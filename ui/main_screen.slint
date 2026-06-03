@@ -1,14 +1,16 @@
 // main_screen.slint — Main application window after login.
-// Phase 2: Toolbar + tab skeleton.  Parser + table wired in Phase 3+.
+// Phase 4: file picker wired, StandardTableView shows parsed transactions,
+//          summary panel shows live data from Rust parser.
 
-import { Button, TabWidget, VerticalBox, HorizontalBox, ComboBox } from "std-widgets.slint";
+import { Button, TabWidget, VerticalBox, HorizontalBox, ComboBox,
+         StandardTableView } from "std-widgets.slint";
 import { DashboardScreen } from "dashboard.slint";
 
 // ── Reusable summary row ──────────────────────────────────────────────────────
 component SummaryRow inherits HorizontalBox {
-    in property <string> label: "Label";
-    in property <string> value: "—";
-    in property <color>  row-color: #37474F;
+    in property <string> label:     "Label";
+    in property <string> value:     "—";
+    in property <color>  val-color: #37474F;
 
     Text {
         text:               root.label;
@@ -21,29 +23,37 @@ component SummaryRow inherits HorizontalBox {
         text:                root.value;
         font-size:           11px;
         font-weight:         600;
-        color:               root.row-color;
+        color:               root.val-color;
         horizontal-alignment: right;
         vertical-alignment:  center;
     }
 }
 
-// ── Main application screen ───────────────────────────────────────────────────
+// ── Main screen ───────────────────────────────────────────────────────────────
 export component MainScreen inherits Rectangle {
-    // ── Public interface ──────────────────────────────────────────────────────
+
+    // ── Callbacks ─────────────────────────────────────────────────────────────
     callback logout();
     callback load-file();
     callback batch-folder();
 
-    // Client list (filled from DB in Phase 4)
+    // ── Input properties ──────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
 
-    // Dashboard data forwarded from AppState (Phase 7)
-    in property <string> dash-opening:   "₹ —";
-    in property <string> dash-credits:   "₹ —";
-    in property <string> dash-debits:    "₹ —";
-    in property <string> dash-closing:   "₹ —";
-    in property <string> dash-txn-count: "—";
-    in property <string> dash-vendors:   "—";
+    in property <string> status-bank: "";
+    in property <string> status-file: "";
+
+    // Transaction table rows  (each inner [StandardListViewItem] = one row)
+    in property <[[StandardListViewItem]]> transaction-rows: [];
+
+    // Dashboard / summary data
+    in property <string> dash-bank-name:  "";
+    in property <string> dash-opening:    "₹ —";
+    in property <string> dash-credits:    "₹ —";
+    in property <string> dash-debits:     "₹ —";
+    in property <string> dash-closing:    "₹ —";
+    in property <string> dash-txn-count:  "—";
+    in property <string> dash-vendors:    "—";
 
     background: #F0F2F5;
 
@@ -76,8 +86,11 @@ export component MainScreen inherits Rectangle {
                     font-size:          14px;
                     vertical-alignment: center;
                 }
+                // Bank name shown after load; falls back to app subtitle
                 Text {
-                    text:               "Bank Statement Processor";
+                    text: root.dash-bank-name != ""
+                        ? root.dash-bank-name
+                        : "Bank Statement Processor";
                     color:              #90CAF9;
                     font-size:          12px;
                     vertical-alignment: center;
@@ -85,15 +98,22 @@ export component MainScreen inherits Rectangle {
 
                 Rectangle { horizontal-stretch: 1; }
 
-                // Client selector
+                // File name status
+                if root.status-file != "" : Text {
+                    text:               root.status-file;
+                    color:              #BBDEFB;
+                    font-size:          11px;
+                    vertical-alignment: center;
+                    max-width:          280px;
+                }
+
                 ComboBox {
                     model:         root.client-names;
                     current-index: 0;
                 }
 
                 Button {
-                    text:    "Load File";
-                    enabled: false;
+                    text:    "Open File";
                     clicked => { root.load-file(); }
                 }
 
@@ -140,8 +160,17 @@ export component MainScreen inherits Rectangle {
                                 spacing:        8px;
 
                                 Text {
-                                    text:               "Filters: All | Unreviewed | Suspense | High Conf. | GST — Phase 3";
+                                    text:               "Filters — Phase 5";
                                     color:              #B0BEC5;
+                                    font-size:          12px;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: root.dash-txn-count != "—"
+                                        ? root.dash-txn-count + " transactions"
+                                        : "No file loaded";
+                                    color:              #546E7A;
                                     font-size:          12px;
                                     vertical-alignment: center;
                                 }
@@ -154,44 +183,56 @@ export component MainScreen inherits Rectangle {
                             spacing:          0px;
                             vertical-stretch: 1;
 
-                            // Transaction table area
+                            // ── Transaction table ─────────────────────────────
                             Rectangle {
                                 horizontal-stretch: 4;
                                 background:         #FFFFFF;
 
-                                VerticalBox {
+                                if root.transaction-rows.length == 0 : VerticalBox {
                                     alignment: center;
                                     spacing:   12px;
 
                                     Text {
-                                        text:                "Transaction Table";
-                                        font-size:           20px;
-                                        font-weight:         700;
-                                        color:               #CFD8DC;
+                                        text:                 "No transactions loaded";
+                                        font-size:            18px;
+                                        font-weight:          700;
+                                        color:                #CFD8DC;
                                         horizontal-alignment: center;
                                     }
                                     Text {
-                                        text:                "Load a bank statement (PDF or Excel) to see transactions here.\nParser + DB integration — Phase 3.";
-                                        font-size:           13px;
-                                        color:               #90A4AE;
+                                        text:                 "Click \"Open File\" to load a PDF or Excel bank statement.";
+                                        font-size:            13px;
+                                        color:                #90A4AE;
                                         horizontal-alignment: center;
-                                        wrap:                word-wrap;
+                                        wrap:                 word-wrap;
                                     }
+                                }
+
+                                if root.transaction-rows.length > 0 : StandardTableView {
+                                    columns: [
+                                        { title: "Date",      width: 90px  },
+                                        { title: "Narration", horizontal-stretch: 1 },
+                                        { title: "Debit",     width: 110px },
+                                        { title: "Credit",    width: 110px },
+                                        { title: "Balance",   width: 120px },
+                                        { title: "Reference", width: 130px },
+                                    ];
+                                    rows: root.transaction-rows;
                                 }
                             }
 
-                            // Summary panel
+                            // ── Summary panel ─────────────────────────────────
                             Rectangle {
-                                horizontal-stretch: 1;
+                                horizontal-stretch: 0;
                                 min-width:          220px;
-                                max-width:          260px;
+                                max-width:          240px;
                                 background:         #F8F9FA;
                                 border-width:       1px;
                                 border-color:       #E0E0E0;
 
                                 VerticalBox {
                                     padding: 16px;
-                                    spacing: 10px;
+                                    spacing: 8px;
 
                                     Text {
                                         text:        "Summary";
@@ -202,24 +243,48 @@ export component MainScreen inherits Rectangle {
 
                                     Rectangle { height: 1px; background: #E0E0E0; }
 
-                                    SummaryRow { label: "Opening Balance";  value: "₹ —";   row-color: #1565C0; }
-                                    SummaryRow { label: "Total Credits";    value: "₹ —";   row-color: #2E7D32; }
-                                    SummaryRow { label: "Total Debits";     value: "₹ —";   row-color: #C62828; }
-                                    SummaryRow { label: "Closing Balance";  value: "₹ —";   row-color: #1565C0; }
+                                    SummaryRow {
+                                        label:     "Opening Balance";
+                                        value:     root.dash-opening;
+                                        val-color: #1565C0;
+                                    }
+                                    SummaryRow {
+                                        label:     "Total Credits";
+                                        value:     root.dash-credits;
+                                        val-color: #2E7D32;
+                                    }
+                                    SummaryRow {
+                                        label:     "Total Debits";
+                                        value:     root.dash-debits;
+                                        val-color: #C62828;
+                                    }
+                                    SummaryRow {
+                                        label:     "Closing Balance";
+                                        value:     root.dash-closing;
+                                        val-color: #1565C0;
+                                    }
 
                                     Rectangle { height: 1px; background: #E0E0E0; }
 
-                                    SummaryRow { label: "Transactions";    value: "—";      row-color: #546E7A; }
-                                    SummaryRow { label: "Unreviewed";      value: "—";      row-color: #E65100; }
-                                    SummaryRow { label: "MISMATCH";        value: "₹ 0.00"; row-color: #2E7D32; }
+                                    SummaryRow {
+                                        label:     "Transactions";
+                                        value:     root.dash-txn-count;
+                                        val-color: #546E7A;
+                                    }
+                                    SummaryRow {
+                                        label:     "Vendors";
+                                        value:     root.dash-vendors;
+                                        val-color: #546E7A;
+                                    }
 
                                     Rectangle { vertical-stretch: 1; }
 
-                                    Text {
-                                        text:                "Live data — Phase 3";
+                                    if root.status-bank != "" : Text {
+                                        text:                root.status-bank;
                                         font-size:           10px;
-                                        color:               #B0BEC5;
+                                        color:               #90A4AE;
                                         horizontal-alignment: center;
+                                        wrap:                word-wrap;
                                     }
                                 }
                             }

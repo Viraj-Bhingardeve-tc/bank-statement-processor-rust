@@ -19,6 +19,9 @@ path = "src/lib.rs"
 [dependencies]
 slint = { version = "1.7", optional = true }
 
+# ── Native file dialog (Phase 4) ─────────────────────────────────────────────
+rfd = { version = "0.15", optional = true }
+
 # ── Database ─────────────────────────────────────────────────────────────────
 # bundled = statically links SQLite; no system SQLite required
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -78,7 +81,7 @@ rayon = "1"
 # "slint-ui" gates the entire Slint + window subsystem.
 # Use `--no-default-features` to run parser unit tests without compiling Slint.
 default      = ["slint-ui"]
-slint-ui     = ["dep:slint", "dep:slint-build"]
+slint-ui     = ["dep:slint", "dep:slint-build", "dep:rfd"]
 ai           = ["dep:reqwest"]
 excel-export = ["dep:umya-spreadsheet"]
 

@@ -1,6 +1,4 @@
 // app.slint — Root window. Switches between LoginScreen and MainScreen.
-// All exported properties and callbacks are accessible from Rust via
-// slint::include_modules!() generated code.
 
 import { LoginScreen } from "login.slint";
 import { MainScreen }  from "main_screen.slint";
@@ -12,47 +10,56 @@ export component AppWindow inherits Window {
     min-width:        960px;
     min-height:       600px;
 
-    // ── Auth state (read/written by Rust) ─────────────────────────────────────
-    in-out property <bool>   logged-in:    false;
-    in-out property <string> login-error:  "";
+    // ── Auth state ────────────────────────────────────────────────────────────
+    in-out property <bool>   logged-in:     false;
+    in-out property <string> login-error:   "";
     in-out property <bool>   login-loading: false;
 
-    // ── Main screen data (set by Rust in Phase 3+) ────────────────────────────
-    in property <[string]> client-names:   ["-- Select Client --"];
-    in property <string>   dash-opening:   "₹ —";
-    in property <string>   dash-credits:   "₹ —";
-    in property <string>   dash-debits:    "₹ —";
-    in property <string>   dash-closing:   "₹ —";
-    in property <string>   dash-txn-count: "—";
-    in property <string>   dash-vendors:   "—";
+    // ── File / bank status (set by Rust after parse) ──────────────────────────
+    in property <string> status-bank: "";
+    in property <string> status-file: "";
 
-    // ── Callbacks (implemented in Rust) ───────────────────────────────────────
-    callback do-login(/* email */ string, /* password */ string);
+    // ── Transaction table (set by Rust after parse) ───────────────────────────
+    in property <[[StandardListViewItem]]> transaction-rows: [];
+
+    // ── Dashboard summary (set by Rust after parse) ───────────────────────────
+    in property <string> dash-bank-name:  "";
+    in property <string> dash-opening:    "₹ —";
+    in property <string> dash-credits:    "₹ —";
+    in property <string> dash-debits:     "₹ —";
+    in property <string> dash-closing:    "₹ —";
+    in property <string> dash-txn-count:  "—";
+    in property <string> dash-vendors:    "—";
+
+    // ── Client list (Phase 9) ─────────────────────────────────────────────────
+    in property <[string]> client-names: ["-- Select Client --"];
+
+    // ── Callbacks implemented in Rust ─────────────────────────────────────────
+    callback do-login(string, string);
     callback do-load-file();
     callback do-batch-folder();
 
-    // ── Login screen (shown when not logged in) ───────────────────────────────
+    // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
-        error-message:  root.login-error;
-        is-loading:     root.login-loading;
-        attempt-login(email, password) => {
-            root.do-login(email, password);
-        }
+        error-message: root.login-error;
+        is-loading:    root.login-loading;
+        attempt-login(email, password) => { root.do-login(email, password); }
     }
 
-    // ── Main screen (shown when logged in) ────────────────────────────────────
+    // ── Main screen ───────────────────────────────────────────────────────────
     if root.logged-in : MainScreen {
-        client-names:   root.client-names;
-        dash-opening:   root.dash-opening;
-        dash-credits:   root.dash-credits;
-        dash-debits:    root.dash-debits;
-        dash-closing:   root.dash-closing;
-        dash-txn-count: root.dash-txn-count;
-        dash-vendors:   root.dash-vendors;
-        logout => {
-            root.logged-in   = false;
-            root.login-error = "";
-        }
+        client-names:     root.client-names;
+        status-bank:      root.status-bank;
+        status-file:      root.status-file;
+        transaction-rows: root.transaction-rows;
+        dash-bank-name:   root.dash-bank-name;
+        dash-opening:     root.dash-opening;
+        dash-credits:     root.dash-credits;
+        dash-debits:      root.dash-debits;
+        dash-closing:     root.dash-closing;
+        dash-txn-count:   root.dash-txn-count;
+        dash-vendors:     root.dash-vendors;
+        logout       => { root.logged-in = false; root.login-error = ""; }
         load-file    => { root.do-load-file();    }
         batch-folder => { root.do-batch-folder(); }
     }

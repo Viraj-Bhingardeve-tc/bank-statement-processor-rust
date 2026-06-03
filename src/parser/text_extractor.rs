@@ -1,16 +1,17 @@
-//! text_extractor.rs — PDF → `Vec<Vec<PdfItem>>` using lopdf.
+//! text_extractor.rs — PDF text extraction using lopdf.
 //!
-//! **Limitation**: lopdf's `extract_text()` returns flat text per page with no
-//! X/Y positional information.  This extractor approximates positions by treating
-//! each line as a row and each word as an item with X = character_offset × 6.
+//! lopdf does NOT provide X/Y glyph positions.  Each page's text is returned
+//! as a flat string in reading order.  This module builds two views of that text:
 //!
-//! For true column detection (HDFC, SBI, ICICI, etc.) pdfium-render is required
-//! (planned for Phase 4).  This extractor is sufficient for:
-//!   • Fixed-width format PDFs (Cosmos, some co-op banks) — all items share X≈0.
-//!   • Feeding text into bank detection (text content only).
-//!   • Line-by-line OCR text output.
+//! 1. `extract_pages` — returns `Vec<Vec<PdfItem>>` where every line is ONE item
+//!    placed at X=0.  This makes every PDF look like a fixed-width layout so that
+//!    `pdf_parser::is_fw_format` returns true and `extract_fw_transactions` is tried.
 //!
-//! All downstream parsing logic is tested independently with synthetic PdfItem data.
+//! 2. `extract_full_text` — returns the raw concatenated text for `ocr_parser::parse_ocr_text`.
+//!
+//! **Bug fixed**: the original code passed `page_id.0` (a lopdf *object ID*, e.g. 5, 12, 38)
+//! to `extract_text(&[page_id.0])` as if it were a *page number* (1, 2, 3…).
+//! `doc.get_pages()` returns `BTreeMap<u32, ObjectId>` where keys ARE page numbers.
 
 use std::path::Path;
 
@@ -23,62 +24,84 @@ use crate::parser::{
 
 // ── extract_pages ─────────────────────────────────────────────────────────────
 
-/// Extract text items from a PDF file and cluster them into rows.
+/// Extract text from a PDF and cluster it into rows.
 ///
-/// Uses lopdf to read raw text per page.  Each line of text becomes a row;
-/// each word within the line becomes an item with approximate X position.
-/// Y coordinates are assigned as `line_number × 15` (per-page, reset each page
-/// then offset by `page_number × 1000` so items from different pages don't merge).
+/// Each non-empty line of text becomes **one `PdfItem` at X = 0**.
+/// Placing every item at X = 0 makes `is_fw_format` return true, allowing
+/// `extract_fw_transactions` to attempt character-position parsing.
 ///
-/// **Known limitations** (requires pdfium-render to fix):
-/// - X positions are approximated from character offsets, not real PDF points.
-/// - Multi-column layouts (standard bank PDFs) will not cluster correctly.
-/// - Fixed-width PDFs (all text at x≈0) work correctly.
+/// Page numbers are taken from `doc.get_pages()` (1-indexed keys) — NOT from
+/// the object IDs returned by `page_iter()`.
 pub fn extract_pages(path: &Path) -> Result<Vec<Vec<PdfItem>>> {
     let doc = lopdf::Document::load(path)?;
 
+    // get_pages() → BTreeMap<page_number (1-based), ObjectId>
+    let pages = doc.get_pages();
+    if pages.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let mut all_raw: Vec<RawPdfItem> = Vec::new();
-    let page_ids: Vec<lopdf::ObjectId> = doc.page_iter().collect();
 
-    for (page_idx, &page_id) in page_ids.iter().enumerate() {
-        let page_text = doc
-            .extract_text(&[page_id.0 as u32])
-            .unwrap_or_default();
+    for (page_num, _object_id) in &pages {
+        // extract_text expects 1-based page numbers — use the BTreeMap key directly.
+        let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
 
-        let y_offset = page_idx as f64 * 1000.0;
+        // Y offset separates pages so their lines don't cluster together.
+        let y_offset = (*page_num as f64 - 1.0) * 10_000.0;
 
         for (line_idx, line) in page_text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() { continue; }
 
+            // One item per line, at X = 0 — full line text preserved.
+            // This enables both FW-format and OCR-text parsing downstream.
             let y = y_offset + (line_idx as f64 * 15.0);
-
-            // Build one item per word with approximate X from character position.
-            // For FW-format PDFs (single text column), all words share X≈0.
-            let mut char_pos = 0usize;
-            for word in line.split_whitespace() {
-                if word.is_empty() { continue; }
-                let x = char_pos as f64 * 6.0; // ~6pt per character (approximate)
-                all_raw.push(RawPdfItem::new(word, x, y, (word.len() as f64) * 6.0));
-                char_pos += word.len() + 1;
-            }
+            all_raw.push(RawPdfItem::new(line, 0.0, y, (line.len() as f64) * 6.0));
         }
     }
+
+    log::debug!(
+        "[TextExtractor] {} pages → {} raw lines before clustering",
+        pages.len(),
+        all_raw.len()
+    );
 
     Ok(cluster_into_rows(all_raw, 5.0))
 }
 
-/// Extract all page text as one joined string (for bank detection).
+// ── extract_full_text ─────────────────────────────────────────────────────────
+
+/// Return the entire PDF as one string (pages joined with newlines).
+/// Used as input to `ocr_parser::parse_ocr_text`.
+///
+/// Also uses correct 1-based page numbers from `doc.get_pages()`.
 pub fn extract_full_text(path: &Path) -> String {
-    match lopdf::Document::load(path) {
-        Err(_) => String::new(),
-        Ok(doc) => {
-            let page_ids: Vec<lopdf::ObjectId> = doc.page_iter().collect();
-            page_ids.iter().filter_map(|&id| {
-                doc.extract_text(&[id.0 as u32]).ok()
-            }).collect::<Vec<_>>().join("\n")
+    let doc = match lopdf::Document::load(path) {
+        Ok(d)  => d,
+        Err(e) => {
+            log::warn!("[TextExtractor] load failed: {}", e);
+            return String::new();
+        }
+    };
+
+    let pages = doc.get_pages();
+    let mut parts = Vec::with_capacity(pages.len());
+
+    for (page_num, _) in &pages {
+        match doc.extract_text(&[*page_num]) {
+            Ok(t)  => parts.push(t),
+            Err(e) => log::debug!("[TextExtractor] page {} extract error: {}", page_num, e),
         }
     }
+
+    let full = parts.join("\n");
+    log::debug!(
+        "[TextExtractor] full_text: {} pages, {} chars",
+        pages.len(),
+        full.len()
+    );
+    full
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -87,61 +110,47 @@ pub fn extract_full_text(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::parser::row_builder::RawPdfItem;
-    use crate::parser::column_detector::PdfItem;
 
-    // Tests for extract_pages are integration-level (require actual PDF files).
-    // All unit tests are in the modules that consume Vec<Vec<PdfItem>>.
-
-    // ── cluster_into_rows round-trip (sanity) ─────────────────────────────────
+    // Integration tests (real PDFs) are run manually.
+    // Unit tests cover the clustering logic used by extract_pages.
 
     #[test]
-    fn words_on_same_line_cluster_into_one_row() {
-        // Simulate what extract_pages produces for "Date Narration Balance"
-        let items = vec![
-            RawPdfItem::new("Date",      0.0,  10.0, 25.0),
-            RawPdfItem::new("Narration", 30.0, 10.0, 60.0),
-            RawPdfItem::new("Balance",   95.0, 10.0, 45.0),
-        ];
+    fn single_line_becomes_one_row_one_item() {
+        let items = vec![RawPdfItem::new("03/04/2024 SALARY 50000.00 95000.00", 0.0, 0.0, 200.0)];
         let rows = cluster_into_rows(items, 5.0);
-        assert_eq!(rows.len(), 1, "all on Y=10 → one row");
-        assert_eq!(rows[0].len(), 3);
-    }
-
-    #[test]
-    fn words_on_different_lines_make_separate_rows() {
-        let items = vec![
-            RawPdfItem::new("Header",  0.0, 10.0, 40.0),
-            RawPdfItem::new("DataRow", 0.0, 25.0, 50.0),
-        ];
-        let rows = cluster_into_rows(items, 5.0);
-        assert_eq!(rows.len(), 2, "Y diff = 15 > 5 → separate rows");
-    }
-
-    #[test]
-    fn fw_pdf_all_items_near_x_zero() {
-        // Fixed-width PDF: simulate lopdf output where all text is at x≈0
-        let items: Vec<RawPdfItem> = (0..5).map(|i| {
-            RawPdfItem::new(
-                &format!("{:02}/01/2024 NARRATION 5000.00 95000.00Cr", i+1),
-                0.0, (i as f64) * 15.0, 300.0
-            )
-        }).collect();
-        let rows = cluster_into_rows(items, 5.0);
-        assert_eq!(rows.len(), 5, "5 lines → 5 rows");
-        // Each row has one item (the full line)
+        assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 1);
+        assert!(rows[0][0].text.contains("SALARY"));
     }
 
-    // ── PdfItem carries correct values ────────────────────────────────────────
+    #[test]
+    fn multiple_lines_each_become_own_row() {
+        let items: Vec<RawPdfItem> = (0..5)
+            .map(|i| RawPdfItem::new(&format!("line {}", i), 0.0, (i as f64) * 15.0, 60.0))
+            .collect();
+        let rows = cluster_into_rows(items, 5.0);
+        assert_eq!(rows.len(), 5, "each line (Y spaced by 15) → separate row");
+    }
 
     #[test]
-    fn raw_item_converts_to_pdf_item_correctly() {
-        let raw = RawPdfItem::new("Test", 42.0, 100.0, 30.0);
-        let rows = cluster_into_rows(vec![raw], 5.0);
-        let item = &rows[0][0];
-        assert!((item.x - 42.0).abs() < 0.001);
-        assert_eq!(item.text, "Test");
-        assert!((item.w - 30.0).abs() < 0.001);
-        // Y is not present on PdfItem — only used for clustering
+    fn empty_text_produces_empty_rows() {
+        let rows = cluster_into_rows(vec![], 5.0);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn all_items_at_x_zero_means_fw_format() {
+        // All items at X=0 → is_fw_format should return true
+        use crate::parser::pdf_parser::is_fw_format;
+        let rows: Vec<Vec<crate::parser::column_detector::PdfItem>> = (0..10)
+            .map(|i| {
+                vec![crate::parser::column_detector::PdfItem {
+                    x:    0.0,
+                    text: format!("{:02}/01/2024 PAYMENT 5000.00 95000.00", i + 1),
+                    w:    300.0,
+                }]
+            })
+            .collect();
+        assert!(is_fw_format(&rows), "all-X=0 rows should be detected as FW format");
     }
 }

@@ -31,10 +31,19 @@ static DATE_START_RE: Lazy<Regex> = Lazy::new(||
     Regex::new(r"^(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})\b").unwrap()
 );
 
-// Indian currency amount: comma-formatted or plain ≥5 digits, optional decimal.
-// Mirrors JS: /\b(\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})?|\d{5,}(?:\.\d{1,2})?)\b/g
+// Indian currency amount: comma-formatted or plain ≥5 digits, required decimal
+// for 1–4 digit integers.
+//
+// Requiring a decimal point for 1–4 digit integers prevents false positives from:
+//   • Value-date fragments  — "01/01/2024" → bare "01", "01" no longer match.
+//   • Reference sub-strings — "SAL001", "ATM001" → bare "001" no longer matches.
+//   • Short year-like tokens — "24" (2-digit year) no longer matches.
+//
+// 5+ digit integers still match without a decimal so plain amounts like "50000"
+// (without ".00") are captured.  Values < 1 and 4-digit year literals (1900–2100)
+// are filtered in the loop below.
 static AMT_RE: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"\b(\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})?|\d{5,}(?:\.\d{1,2})?)\b").unwrap()
+    Regex::new(r"\b(\d{1,4}(?:,\d{2,3})*\.\d{1,2}|\d{5,}(?:\.\d{1,2})?)\b").unwrap()
 );
 
 // Dr / Cr markers to strip from narration text.
@@ -257,6 +266,141 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
     }
 }
 
+// ── preprocess_multiline ──────────────────────────────────────────────────────
+
+/// Normalise multi-line PDF text (BOM, SBI, Mahanagar…) into single-line
+/// format that `parse_ocr_text` can consume.
+///
+/// These banks extract as:
+///   Line 1: "04/04/2022"         ← entire line is the date
+///   Line 2: "UPI209…Papad"       ← narration
+///   Line 3: "209498825681"        ← reference (pure integer → skip)
+///   Line 4: "610.00"             ← debit or credit amount
+///   Line 5: "13,24,083.22"       ← running balance
+///   Line 6: "11111-CentralData"  ← noise (channel/branch code)
+///   Line 7: "04/04/2022"         ← next transaction
+///
+/// Output: `"04/04/2022 UPI209…Papad 610.00 1324083.22"`
+///
+/// Amounts are identified by the "mostly-digits" ratio: a line where > 80 %
+/// of non-whitespace characters are digits or decimal/comma separators is an
+/// amount line; everything else is narration or noise.
+pub fn preprocess_multiline(text: &str) -> String {
+    use crate::parser::date_parser::normalize_transaction_date;
+
+    // Header / noise words that appear as standalone lines in some PDFs
+    let header_words: &[&str] = &[
+        "date","type","particulars","debit","credit","balance","channel",
+        "cheque","reference","txn","value","valuedate","description","chq",
+        "ref","s.no","sr.no","sl.no","serial","withdrawal","deposit",
+        "dr","cr","amount","narration","details",
+    ];
+
+    let is_header_line = |line: &str| -> bool {
+        let l = line.to_lowercase();
+        header_words.iter().any(|h| l.trim() == *h)
+    };
+
+    /// True when the line is a pure reference number: >= 6 digits, no decimal.
+    let is_pure_integer = |line: &str| -> bool {
+        let s = line.replace(',', "");
+        let s = s.trim();
+        s.len() >= 6 && s.chars().all(|c| c.is_ascii_digit())
+    };
+
+    /// True when the line is an amount line: after stripping "Rs"/"Rs." prefix,
+    /// > 80 % of non-whitespace characters are digit/separator.
+    let is_amount_line = |line: &str| -> bool {
+        let s = line.trim();
+        let s = if s.to_lowercase().starts_with("rs.") { &s[3..] }
+                else if s.to_lowercase().starts_with("rs") { &s[2..] }
+                else { s };
+        let s = s.trim();
+        if s.is_empty() { return false; }
+        let total: usize = s.chars().filter(|c| !c.is_whitespace()).count();
+        if total == 0 { return false; }
+        let num: usize = s.chars().filter(|c| c.is_ascii_digit() || *c == ',' || *c == '.').count();
+        (num as f64 / total as f64) > 0.80
+    };
+
+    /// Parse the amount from an amount line (strip "Rs" prefix, commas).
+    let parse_amt_line = |line: &str| -> Option<f64> {
+        let s = line.trim();
+        let s = if s.to_lowercase().starts_with("rs.") { &s[3..] }
+                else if s.to_lowercase().starts_with("rs") { &s[2..] }
+                else { s };
+        let s = s.trim().replace(',', "");
+        s.parse::<f64>().ok().filter(|&v| v > 0.0 && v < 2e9)
+    };
+
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && l.len() > 1)
+        .collect();
+
+    let mut out: Vec<String> = Vec::new();
+    let mut cur_date: Option<String> = None;
+    let mut cur_narr: Vec<String>    = Vec::new();
+    let mut cur_amts: Vec<f64>       = Vec::new();
+
+    let flush = |date: &str, narrs: &[String], amts: &[f64], out: &mut Vec<String>| {
+        if amts.len() < 2 { return; } // need txn amount + balance minimum
+        let narr = narrs.join(" ");
+        let narr = if narr.trim().is_empty() { "TRANSACTION".to_string() } else { narr.trim().to_string() };
+        // Format amounts as plain decimals so parse_ocr_text can re-parse them
+        let amts_str: Vec<String> = amts.iter().map(|a| format!("{:.2}", a)).collect();
+        out.push(format!("{} {} {}", date, narr, amts_str.join(" ")));
+    };
+
+    // Noise patterns that never belong in a narration
+    let is_noise_line = |line: &str| -> bool {
+        let l = line.to_lowercase();
+        (l.contains("page") && l.contains("of"))
+            || l.starts_with("11111")     // BOM channel code
+            || l.contains("?identity")    // lopdf font error
+            || l.starts_with("statement for account")
+            || l.starts_with("idbi bank")
+            || l.starts_with("our toll")
+            || l.len() <= 2
+    };
+
+    for &line in &lines {
+        if is_noise_line(line) { continue; }
+        if is_header_line(line) { continue; }
+
+        // Try to parse line as a date
+        let nd = normalize_transaction_date(line);
+        if nd.valid {
+            // Flush previous transaction group
+            if let Some(ref date) = cur_date {
+                flush(date, &cur_narr, &cur_amts, &mut out);
+            }
+            cur_date = Some(nd.display.clone());
+            cur_narr.clear();
+            cur_amts.clear();
+        } else if cur_date.is_some() {
+            if is_pure_integer(line) {
+                // Reference number — skip entirely
+            } else if is_amount_line(line) {
+                if let Some(v) = parse_amt_line(line) {
+                    cur_amts.push(v);
+                }
+            } else {
+                // Text line — add to narration if not noise
+                cur_narr.push(line.to_string());
+            }
+        }
+    }
+
+    // Flush the last group
+    if let Some(ref date) = cur_date {
+        flush(date, &cur_narr, &cur_amts, &mut out);
+    }
+
+    out.join("\n")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -290,10 +434,10 @@ mod tests {
 
     #[test]
     fn skips_sub_one_values() {
-        // AMT_RE: alt1 = \d{1,3}(,\d{2,3})*(\.\d{1,2})?; alt2 = \d{5,}(\.\d{1,2})?
-        // "0.50" matches alt1 → val=0.50, filtered (< 1.0)
-        // "50000.00" matches alt2 (5 digits) → val=50000.0, kept
-        // "5000.00" has only 4 int digits → doesn't match either alt with word boundaries
+        // alt1 = \d{1,4}(,\d{2,3})*\.\d{1,2} (decimal required for ≤4-digit ints)
+        // alt2 = \d{5,}(\.\d{1,2})? (5+ digit ints, decimal optional)
+        // "0.50"  → alt1: 1 digit + ".50" → val=0.50 < 1.0 → filtered
+        // "50000.00" → alt2 (5 digits) → val=50000.0, kept
         let amts = extract_amounts("0.50 some text 50000.00");
         assert_eq!(amts.len(), 1, "0.50 filtered; 50000.00 kept");
         assert!((amts[0].val - 50000.0).abs() < 0.01);

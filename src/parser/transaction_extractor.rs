@@ -8,11 +8,8 @@
 //! (the full text line at a fixed X position).  All column detection is done by
 //! character-position within that line, not by PDF X coordinates.
 
-use std::collections::HashMap;
-
 use crate::parser::{
     ParseResult, Transaction,
-    amount_parser::parse_amount_str,
     column_detector::PdfItem,
     date_parser::normalize_transaction_date,
     excel_parser::{compute_prev_balances, prepend_opening_balance_row},
@@ -21,12 +18,8 @@ use crate::parser::{
 
 // ── Shared regex constants ────────────────────────────────────────────────────
 
-// Date at start: DD-MM-YYYY / DD/MM/YYYY (or em-dash variants)
-const DATE_PREFIX: &str = r"^\d{2}[-/−]\d{2}[-/−]\d{4}";
-// Balance suffix: NN,NNN.NNCr or Dr
-const BAL_SUFFIX: &str  = r"[\d,]+\.\d{2}\s*(Cr|Dr)\s*$";
-// Amount anywhere: NN,NNN.NN
-const AMT_RE: &str      = r"[\d,]+\.\d{2}";
+// ── Constants used only in legacy/dead paths — kept for documentation ─────────
+// These describe the fixed-width patterns; the active parsers use inline regexes.
 
 /// Check if a string starts with a DD-MM-YYYY / DD/MM/YYYY date.
 fn starts_with_date(s: &str) -> Option<String> {
@@ -324,7 +317,7 @@ pub fn extract_fw_transactions(
         let mut prev_bal = op_balance;
         if prev_bal.is_none() {
             if let Some(seed) = txns.iter().find(|t| t.balance.is_some() && (t.debit.is_some() || t.credit.is_some())) {
-                prev_bal = Some((seed.balance.unwrap() - seed.credit.unwrap_or(0.0) + seed.debit.unwrap_or(0.0) * 100.0).round() / 100.0);
+                prev_bal = Some(((seed.balance.unwrap() - seed.credit.unwrap_or(0.0) + seed.debit.unwrap_or(0.0)) * 100.0).round() / 100.0);
             }
         }
         for t in &mut txns {
@@ -478,7 +471,7 @@ pub fn extract_cosmos_transactions(
         t.narration = narration;
         t.reference = reference;
         t.balance   = Some(balance);
-        t.bank_name = file_name.to_string();
+        t.bank_name = "Cosmos Co-operative Bank".to_string();
         // debit/credit resolved in Step 3
         pending.push(Pending { t, txn_val });
     }
@@ -559,13 +552,13 @@ pub fn extract_cosmos_transactions(
 
     let mut txns = valid;
     let op_balance = compute_prev_balances(&mut txns, op_balance);
-    prepend_opening_balance_row(&mut txns, op_balance, file_name, "");
+    prepend_opening_balance_row(&mut txns, op_balance, "Cosmos Co-operative Bank", "");
 
     Some(ParseResult {
         transactions:       txns,
         opening_balance:    op_balance,
         closing_balance,
-        bank_name:          file_name.to_string(),
+        bank_name:          "Cosmos Co-operative Bank".to_string(),
         account_no:         String::new(),
         source_name:        file_name.to_string(),
         col_map:            Default::default(),

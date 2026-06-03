@@ -1,0 +1,36 @@
+[33mcommit 4477db4c4fe5c7c3d5d6caceb1f28da699bfc52f[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: Viraj Bhingardeve <168709660+Viraj-Bhingardeve-tc@users.noreply.github.com>
+Date:   Wed Jun 3 08:54:37 2026 +0530
+
+    first commit
+
+ .gitignore                          |    5 [32m+[m
+ Cargo.lock                          | 7551 [32m+++++++++++++++++++++++++++++++++++[m
+ Cargo.toml                          |   97 [32m+[m
+ assets/.gitkeep                     |    0
+ build.rs                            |   13 [32m+[m
+ src/auth/mod.rs                     |    5 [32m+[m
+ src/auth/monthly_password.rs        |  123 [32m+[m
+ src/db/mod.rs                       |  148 [32m+[m
+ src/lib.rs                          |    6 [32m+[m
+ src/main.rs                         |  165 [32m+[m
+ src/parser/amount_parser.rs         |  457 [32m+++[m
+ src/parser/bank_detection.rs        |  847 [32m++++[m
+ src/parser/column_detector.rs       | 1537 [32m+++++++[m
+ src/parser/date_parser.rs           |  688 [32m++++[m
+ src/parser/excel_parser.rs          | 1389 [32m+++++++[m
+ src/parser/mod.rs                   |  315 [32m++[m
+ src/parser/narration_cleaner.rs     |  802 [32m++++[m
+ src/parser/noise_filter.rs          |  453 [32m+++[m
+ src/parser/ocr_parser.rs            |  473 [32m+++[m
+ src/parser/party_master.rs          |  329 [32m++[m
+ src/parser/pdf_parser.rs            |  764 [32m++++[m
+ src/parser/row_builder.rs           |  224 [32m++[m
+ src/parser/text_extractor.rs        |  147 [32m+[m
+ src/parser/transaction_extractor.rs |  822 [32m++++[m
+ src/ui/mod.rs                       |   93 [32m+[m
+ ui/app.slint                        |   59 [32m+[m
+ ui/dashboard.slint                  |  265 [32m++[m
+ ui/login.slint                      |  112 [32m+[m
+ ui/main_screen.slint                |  268 [32m++[m
+ 29 files changed, 18157 insertions(+)

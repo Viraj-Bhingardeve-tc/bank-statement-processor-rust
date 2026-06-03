@@ -175,7 +175,7 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
         let mut narr = raw_narr.trim().to_string();
 
         // ── Kotak signed combined column ──────────────────────────────────────
-        let (mut debit, mut credit): (Option<f64>, Option<f64>) = if !raw_drcr.is_empty() {
+        let (debit, credit): (Option<f64>, Option<f64>) = if !raw_drcr.is_empty() {
             let signed = parse_amount_str(&raw_drcr);
             let raw_str = raw_drcr.replace(|c: char| c == '₹' || c == ' ' || c == ',', "");
             match signed {
@@ -404,7 +404,7 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
         i += 1;
     }
 
-    pending = None; // discard any unresolved pending at end of page
+    drop(pending); // discard any unresolved BOB pending at end of rows
 
     // ── Pre-header OB / CB scan ───────────────────────────────────────────────
     if op_balance.is_none() {
