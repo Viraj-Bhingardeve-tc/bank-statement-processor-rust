@@ -1,0 +1,93 @@
+// ui/mod.rs — UI application state and Slint bridge helpers.
+// AppState holds the runtime data that drives the Slint UI.
+// Phase 2: basic structure only.  Fields populated in Phase 3+.
+
+/// Runtime state shared between Rust logic and the Slint UI.
+#[derive(Debug, Clone, Default)]
+pub struct AppState {
+    pub client_id:       Option<i64>,
+    pub client_name:     String,
+    pub file_name:       String,
+    pub bank_name:       String,
+    pub account_no:      String,
+
+    pub opening_balance: Option<f64>,
+    pub closing_balance: Option<f64>,
+    pub total_debits:    f64,
+    pub total_credits:   f64,
+    pub txn_count:       usize,
+    pub unreviewed:      usize,
+    pub vendor_count:    usize,
+    pub has_mismatch:    bool,
+}
+
+impl AppState {
+    /// Format an optional f64 as Indian locale amount string (e.g. "₹ 1,23,456.78").
+    pub fn fmt_amount(v: Option<f64>) -> String {
+        match v {
+            None    => "₹ —".to_string(),
+            Some(n) => format!("₹ {}", fmt_inr(n)),
+        }
+    }
+}
+
+/// Format a float in Indian numbering system with 2 decimal places.
+pub fn fmt_inr(amount: f64) -> String {
+    let abs   = amount.abs();
+    let sign  = if amount < 0.0 { "-" } else { "" };
+    let cents = (abs * 100.0).round() as u64;
+    let paise = cents % 100;
+    let rupees = cents / 100;
+
+    if rupees == 0 {
+        return format!("{}{}.{:02}", sign, 0, paise);
+    }
+
+    // Indian grouping: last 3 digits, then groups of 2
+    let s = rupees.to_string();
+    let len = s.len();
+    let mut out = String::new();
+
+    if len <= 3 {
+        out.push_str(&s);
+    } else {
+        let (first, rest) = s.split_at(len - 3);
+        // first part: group in 2s from right
+        let first_chars: Vec<char> = first.chars().collect();
+        let r = first_chars.len() % 2;
+        if r != 0 {
+            out.push_str(&first_chars[..r].iter().collect::<String>());
+        }
+        for chunk in first_chars[r..].chunks(2) {
+            if !out.is_empty() {
+                out.push(',');
+            }
+            out.push_str(&chunk.iter().collect::<String>());
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push_str(rest);
+    }
+
+    format!("{}{}.{:02}", sign, out, paise)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fmt_inr_basic() {
+        assert_eq!(fmt_inr(1000.0),      "1,000.00");
+        assert_eq!(fmt_inr(100000.0),    "1,00,000.00");
+        assert_eq!(fmt_inr(1234567.89),  "12,34,567.89");
+        assert_eq!(fmt_inr(0.5),         "0.50");
+    }
+
+    #[test]
+    fn fmt_inr_negative() {
+        assert_eq!(fmt_inr(-1000.0), "-1,000.00");
+    }
+}

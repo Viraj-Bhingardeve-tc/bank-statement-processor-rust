@@ -1,0 +1,112 @@
+// login.slint — Monthly-password login screen
+// Mirrors the existing Electron login.html design exactly.
+
+import { Button, LineEdit, VerticalBox } from "std-widgets.slint";
+
+export component LoginScreen inherits Rectangle {
+    // ── Public interface ──────────────────────────────────────────────────────
+    in property <string>  error-message: "";
+    in property <bool>    is-loading: false;
+    callback attempt-login(/* email */ string, /* password */ string);
+
+    // ── Blue background ───────────────────────────────────────────────────────
+    background: #1565C0;
+
+    // ── Centered white card ───────────────────────────────────────────────────
+    card := Rectangle {
+        width:         380px;
+        height:        400px;
+        x:             (parent.width  - self.width)  / 2;
+        y:             (parent.height - self.height) / 2;
+        background:    #FFFFFF;
+        border-radius: 10px;
+
+        drop-shadow-blur:     24px;
+        drop-shadow-color:    #00000050;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: 8px;
+
+        VerticalBox {
+            padding:  36px;
+            spacing:  12px;
+
+            // ── Brand ─────────────────────────────────────────────────────────
+            Text {
+                text:                "A S Havaldar";
+                font-size:           22px;
+                font-weight:         800;
+                color:               #0D47A1;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text:                "Bank Statement Processor";
+                font-size:           12px;
+                color:               #546E7A;
+                horizontal-alignment: center;
+            }
+
+            // Divider
+            Rectangle { height: 1px; background: #BBDEFB; }
+
+            // ── Inputs ────────────────────────────────────────────────────────
+            email-input := LineEdit {
+                placeholder-text: "Work email";
+                enabled:          !root.is-loading;
+                // Tab / Enter moves focus to password
+                accepted => { pwd-input.focus(); }
+            }
+
+            pwd-input := LineEdit {
+                placeholder-text: "XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX";
+                input-type:       InputType.password;
+                enabled:          !root.is-loading;
+                accepted => {
+                    if email-input.text != "" && pwd-input.text != "" {
+                        root.attempt-login(email-input.text, pwd-input.text);
+                    }
+                }
+            }
+
+            // ── Sign In button ────────────────────────────────────────────────
+            Button {
+                text:    root.is-loading ? "Verifying…" : "Sign In";
+                primary: true;
+                enabled: !root.is-loading;
+                clicked => {
+                    root.attempt-login(email-input.text, pwd-input.text);
+                }
+            }
+
+            // ── Error message (shown only when non-empty) ─────────────────────
+            if root.error-message != "" : Rectangle {
+                background:    #FFEBEE;
+                border-radius: 5px;
+                border-width:  1px;
+                border-color:  #FFCDD2;
+                height:        36px;
+
+                Text {
+                    text:                root.error-message;
+                    color:               #B71C1C;
+                    font-size:           12px;
+                    horizontal-alignment: center;
+                    vertical-alignment:  center;
+                    wrap:                word-wrap;
+                }
+            }
+
+            // ── Footer note ───────────────────────────────────────────────────
+            Text {
+                text:                "Password is valid for this month only.\nContact your administrator for access.";
+                color:               #90A4AE;
+                font-size:           11px;
+                horizontal-alignment: center;
+                wrap:                word-wrap;
+            }
+        }
+    }
+
+    // Focus email field on startup
+    init => { email-input.focus(); }
+}

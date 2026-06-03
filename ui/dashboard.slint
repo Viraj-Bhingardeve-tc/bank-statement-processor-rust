@@ -1,0 +1,265 @@
+// dashboard.slint — Dashboard tab: summary cards + chart placeholders.
+// Charts will be rendered via plotters (Phase 7). For now, styled placeholders.
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// ── Reusable stat card ────────────────────────────────────────────────────────
+component StatCard inherits Rectangle {
+    in property <string> title:  "Label";
+    in property <string> value:  "₹ —";
+    in property <color>  accent: #1565C0;
+
+    background:    #FFFFFF;
+    border-radius: 8px;
+    min-height:    80px;
+
+    drop-shadow-blur:     4px;
+    drop-shadow-color:    #0000001A;
+    drop-shadow-offset-x: 0px;
+    drop-shadow-offset-y: 2px;
+
+    HorizontalBox {
+        padding:  16px;
+        spacing:  12px;
+
+        // Accent stripe
+        Rectangle {
+            width:         4px;
+            background:    root.accent;
+            border-radius: 2px;
+        }
+
+        VerticalBox {
+            spacing: 4px;
+            alignment: center;
+
+            Text {
+                text:      root.title;
+                color:     #546E7A;
+                font-size: 11px;
+            }
+            Text {
+                text:        root.value;
+                color:       #1A237E;
+                font-size:   18px;
+                font-weight: 700;
+            }
+        }
+    }
+}
+
+// ── Chart placeholder card ────────────────────────────────────────────────────
+component ChartCard inherits Rectangle {
+    in property <string> chart-title: "Chart";
+    in property <string> phase-label: "Phase 7";
+
+    background:    #FFFFFF;
+    border-radius: 8px;
+
+    drop-shadow-blur:     4px;
+    drop-shadow-color:    #0000001A;
+    drop-shadow-offset-x: 0px;
+    drop-shadow-offset-y: 2px;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text:        root.chart-title;
+            font-size:   13px;
+            font-weight: 700;
+            color:       #37474F;
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background:       #F8F9FA;
+            border-radius:    4px;
+            border-width:     1px;
+            border-color:     #ECEFF1;
+
+            VerticalBox {
+                alignment: center;
+                spacing:   6px;
+
+                // Placeholder chart lines (decorative)
+                Rectangle {
+                    width:         80%;
+                    height:        2px;
+                    background:    #CFD8DC;
+                    border-radius: 1px;
+                }
+                Rectangle {
+                    width:         60%;
+                    height:        2px;
+                    background:    #ECEFF1;
+                    border-radius: 1px;
+                }
+                Rectangle {
+                    width:         70%;
+                    height:        2px;
+                    background:    #CFD8DC;
+                    border-radius: 1px;
+                }
+
+                Text {
+                    text:                "Chart coming in " + root.phase-label;
+                    color:               #B0BEC5;
+                    font-size:           12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// ── Dashboard screen ──────────────────────────────────────────────────────────
+export component DashboardScreen inherits Rectangle {
+    // Data bindings — will be populated from Rust in Phase 7
+    in property <string> opening-balance: "₹ —";
+    in property <string> total-credits:   "₹ —";
+    in property <string> total-debits:    "₹ —";
+    in property <string> closing-balance: "₹ —";
+    in property <string> txn-count:       "—";
+    in property <string> vendor-count:    "—";
+
+    background: #F0F2F5;
+
+    ScrollView {
+        width:  parent.width;
+        height: parent.height;
+
+        VerticalBox {
+            padding:  20px;
+            spacing:  16px;
+            width:    parent.visible-width;
+
+            // ── Section title ─────────────────────────────────────────────────
+            HorizontalBox {
+                Text {
+                    text:        "Dashboard";
+                    font-size:   20px;
+                    font-weight: 700;
+                    color:       #1565C0;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text:      "Upload a bank statement to populate charts";
+                    font-size: 12px;
+                    color:     #90A4AE;
+                    vertical-alignment: center;
+                }
+            }
+
+            // ── Summary stat row ──────────────────────────────────────────────
+            HorizontalBox {
+                spacing: 12px;
+
+                StatCard {
+                    title:              "Opening Balance";
+                    value:              root.opening-balance;
+                    accent:             #1565C0;
+                    horizontal-stretch: 1;
+                }
+                StatCard {
+                    title:              "Total Credits";
+                    value:              root.total-credits;
+                    accent:             #2E7D32;
+                    horizontal-stretch: 1;
+                }
+                StatCard {
+                    title:              "Total Debits";
+                    value:              root.total-debits;
+                    accent:             #C62828;
+                    horizontal-stretch: 1;
+                }
+                StatCard {
+                    title:              "Closing Balance";
+                    value:              root.closing-balance;
+                    accent:             #F57F17;
+                    horizontal-stretch: 1;
+                }
+                StatCard {
+                    title:              "Transactions";
+                    value:              root.txn-count;
+                    accent:             #6A1B9A;
+                    horizontal-stretch: 1;
+                }
+                StatCard {
+                    title:              "Vendors";
+                    value:              root.vendor-count;
+                    accent:             #00695C;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            // ── Chart row 1 ───────────────────────────────────────────────────
+            HorizontalBox {
+                spacing: 12px;
+                height:  240px;
+
+                ChartCard {
+                    chart-title:        "Monthly Cash Flow";
+                    phase-label:        "Phase 7";
+                    horizontal-stretch: 2;
+                }
+                ChartCard {
+                    chart-title:        "Expense Breakdown";
+                    phase-label:        "Phase 7";
+                    horizontal-stretch: 1;
+                }
+            }
+
+            // ── Chart row 2 ───────────────────────────────────────────────────
+            HorizontalBox {
+                spacing: 12px;
+                height:  220px;
+
+                ChartCard {
+                    chart-title:        "Top Vendors";
+                    phase-label:        "Phase 7";
+                    horizontal-stretch: 1;
+                }
+                ChartCard {
+                    chart-title:        "Cash Flow Trend";
+                    phase-label:        "Phase 7";
+                    horizontal-stretch: 2;
+                }
+            }
+
+            // ── Insights placeholder ──────────────────────────────────────────
+            Rectangle {
+                background:    #FFFFFF;
+                border-radius: 8px;
+                height:        60px;
+
+                drop-shadow-blur:     4px;
+                drop-shadow-color:    #0000001A;
+                drop-shadow-offset-x: 0px;
+                drop-shadow-offset-y: 2px;
+
+                HorizontalBox {
+                    padding:   16px;
+                    spacing:   24px;
+                    alignment: center;
+
+                    Text {
+                        text:        "Insights";
+                        font-size:   13px;
+                        font-weight: 700;
+                        color:       #37474F;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text:      "Max debit / credit, average amounts, most frequent vendor — Phase 7";
+                        font-size: 12px;
+                        color:     #90A4AE;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

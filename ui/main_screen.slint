@@ -1,0 +1,268 @@
+// main_screen.slint — Main application window after login.
+// Phase 2: Toolbar + tab skeleton.  Parser + table wired in Phase 3+.
+
+import { Button, TabWidget, VerticalBox, HorizontalBox, ComboBox } from "std-widgets.slint";
+import { DashboardScreen } from "dashboard.slint";
+
+// ── Reusable summary row ──────────────────────────────────────────────────────
+component SummaryRow inherits HorizontalBox {
+    in property <string> label: "Label";
+    in property <string> value: "—";
+    in property <color>  row-color: #37474F;
+
+    Text {
+        text:               root.label;
+        font-size:          11px;
+        color:              #546E7A;
+        horizontal-stretch: 1;
+        vertical-alignment: center;
+    }
+    Text {
+        text:                root.value;
+        font-size:           11px;
+        font-weight:         600;
+        color:               root.row-color;
+        horizontal-alignment: right;
+        vertical-alignment:  center;
+    }
+}
+
+// ── Main application screen ───────────────────────────────────────────────────
+export component MainScreen inherits Rectangle {
+    // ── Public interface ──────────────────────────────────────────────────────
+    callback logout();
+    callback load-file();
+    callback batch-folder();
+
+    // Client list (filled from DB in Phase 4)
+    in property <[string]> client-names: ["-- Select Client --"];
+
+    // Dashboard data forwarded from AppState (Phase 7)
+    in property <string> dash-opening:   "₹ —";
+    in property <string> dash-credits:   "₹ —";
+    in property <string> dash-debits:    "₹ —";
+    in property <string> dash-closing:   "₹ —";
+    in property <string> dash-txn-count: "—";
+    in property <string> dash-vendors:   "—";
+
+    background: #F0F2F5;
+
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+
+        // ── Toolbar ───────────────────────────────────────────────────────────
+        Rectangle {
+            height:     48px;
+            background: #1565C0;
+
+            HorizontalBox {
+                padding-left:   14px;
+                padding-right:  14px;
+                padding-top:    0px;
+                padding-bottom: 0px;
+                spacing:        10px;
+
+                Text {
+                    text:               "A S Havaldar";
+                    color:              #FFFFFF;
+                    font-size:          14px;
+                    font-weight:        700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text:               "—";
+                    color:              #90CAF9;
+                    font-size:          14px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text:               "Bank Statement Processor";
+                    color:              #90CAF9;
+                    font-size:          12px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                // Client selector
+                ComboBox {
+                    model:         root.client-names;
+                    current-index: 0;
+                }
+
+                Button {
+                    text:    "Load File";
+                    enabled: false;
+                    clicked => { root.load-file(); }
+                }
+
+                Button {
+                    text:    "Batch Folder";
+                    enabled: false;
+                    clicked => { root.batch-folder(); }
+                }
+
+                Button {
+                    text:    "Logout";
+                    clicked => { root.logout(); }
+                }
+            }
+        }
+
+        // ── Tab view ──────────────────────────────────────────────────────────
+        TabWidget {
+            vertical-stretch: 1;
+
+            // ─── Transactions tab ─────────────────────────────────────────────
+            Tab {
+                title: "Transactions";
+
+                Rectangle {
+                    background: #F0F2F5;
+
+                    VerticalBox {
+                        padding:  0px;
+                        spacing:  0px;
+
+                        // Filter bar
+                        Rectangle {
+                            height:       44px;
+                            background:   #FFFFFF;
+                            border-width: 1px;
+                            border-color: #E0E0E0;
+
+                            HorizontalBox {
+                                padding-left:  12px;
+                                padding-right: 12px;
+                                padding-top:   0px;
+                                padding-bottom: 0px;
+                                spacing:        8px;
+
+                                Text {
+                                    text:               "Filters: All | Unreviewed | Suspense | High Conf. | GST — Phase 3";
+                                    color:              #B0BEC5;
+                                    font-size:          12px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Table + summary panel
+                        HorizontalBox {
+                            padding:          0px;
+                            spacing:          0px;
+                            vertical-stretch: 1;
+
+                            // Transaction table area
+                            Rectangle {
+                                horizontal-stretch: 4;
+                                background:         #FFFFFF;
+
+                                VerticalBox {
+                                    alignment: center;
+                                    spacing:   12px;
+
+                                    Text {
+                                        text:                "Transaction Table";
+                                        font-size:           20px;
+                                        font-weight:         700;
+                                        color:               #CFD8DC;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text:                "Load a bank statement (PDF or Excel) to see transactions here.\nParser + DB integration — Phase 3.";
+                                        font-size:           13px;
+                                        color:               #90A4AE;
+                                        horizontal-alignment: center;
+                                        wrap:                word-wrap;
+                                    }
+                                }
+                            }
+
+                            // Summary panel
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                min-width:          220px;
+                                max-width:          260px;
+                                background:         #F8F9FA;
+                                border-width:       1px;
+                                border-color:       #E0E0E0;
+
+                                VerticalBox {
+                                    padding: 16px;
+                                    spacing: 10px;
+
+                                    Text {
+                                        text:        "Summary";
+                                        font-size:   13px;
+                                        font-weight: 700;
+                                        color:       #37474F;
+                                    }
+
+                                    Rectangle { height: 1px; background: #E0E0E0; }
+
+                                    SummaryRow { label: "Opening Balance";  value: "₹ —";   row-color: #1565C0; }
+                                    SummaryRow { label: "Total Credits";    value: "₹ —";   row-color: #2E7D32; }
+                                    SummaryRow { label: "Total Debits";     value: "₹ —";   row-color: #C62828; }
+                                    SummaryRow { label: "Closing Balance";  value: "₹ —";   row-color: #1565C0; }
+
+                                    Rectangle { height: 1px; background: #E0E0E0; }
+
+                                    SummaryRow { label: "Transactions";    value: "—";      row-color: #546E7A; }
+                                    SummaryRow { label: "Unreviewed";      value: "—";      row-color: #E65100; }
+                                    SummaryRow { label: "MISMATCH";        value: "₹ 0.00"; row-color: #2E7D32; }
+
+                                    Rectangle { vertical-stretch: 1; }
+
+                                    Text {
+                                        text:                "Live data — Phase 3";
+                                        font-size:           10px;
+                                        color:               #B0BEC5;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Export bar
+                        Rectangle {
+                            height:       44px;
+                            background:   #FFFFFF;
+                            border-width: 1px;
+                            border-color: #E0E0E0;
+
+                            HorizontalBox {
+                                padding-left:   12px;
+                                padding-right:  12px;
+                                padding-top:    0px;
+                                padding-bottom: 0px;
+                                spacing:         8px;
+                                alignment:       center;
+
+                                Button { text: "Export to Excel";    enabled: false; }
+                                Button { text: "Export Tally XML";   enabled: false; }
+                                Button { text: "Export Accounting…"; enabled: false; }
+                                Button { text: "Post to Tally";      enabled: false; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ─── Dashboard tab ────────────────────────────────────────────────
+            Tab {
+                title: "Dashboard";
+
+                DashboardScreen {
+                    opening-balance: root.dash-opening;
+                    total-credits:   root.dash-credits;
+                    total-debits:    root.dash-debits;
+                    closing-balance: root.dash-closing;
+                    txn-count:       root.dash-txn-count;
+                    vendor-count:    root.dash-vendors;
+                }
+            }
+        }
+    }
+}
