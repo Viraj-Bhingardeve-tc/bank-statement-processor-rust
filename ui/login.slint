@@ -99,11 +99,12 @@ export component LoginScreen inherits Rectangle {
                     }
                 }
             }
-            Rectangle { height: 14px; }  // margin-top:4px on button + some spacing
+            Rectangle { height: 4px; }  // margin-top:4px on .btn-login
 
             // ── Sign In button — full-width, 14px/600, #1565C0, radius 5px ───
+            // Original: padding:10px both sides + font-size:14px ≈ 40px height
             Rectangle {
-                height:        44px;
+                height:        40px;
                 background:    root.is-loading ? #90CAF9 : #1565C0;
                 border-radius: 5px;
                 TouchArea {

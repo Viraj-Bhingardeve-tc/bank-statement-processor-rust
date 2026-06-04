@@ -29,18 +29,20 @@ export struct TxnRow {
 }
 
 // ── Compact toolbar button (white bg, blue border — matches original .btn in toolbar) ─────
+// btn-primary: bg #1565C0 fg white. btn-ai: bg #6B2FB8 fg white font-weight 700.
 component TBtn inherits Rectangle {
     in property <string> text:    "";
     in property <bool>   enabled: true;
     in property <color>  bg:      #FFFFFF;
     in property <color>  fg:      #0A1929;
+    in property <int>    fw:      500;   // font-weight override (btn-ai needs 700)
     callback clicked();
 
     height: 28px; min-width: 58px;
     background:    root.enabled ? root.bg : #FFFFFF28;
     border-radius: 4px;
     border-width:  1px;
-    border-color:  root.enabled ? #90CAF9 : #FFFFFF20;
+    border-color:  root.enabled ? (root.bg == #FFFFFF ? #90CAF9 : root.bg) : #FFFFFF20;
     opacity:       root.enabled ? 1.0 : 0.4;
 
     TouchArea {
@@ -49,7 +51,7 @@ component TBtn inherits Rectangle {
         clicked => { root.clicked(); }
     }
     Text {
-        text: root.text; font-size: 12px; font-weight: 500;
+        text: root.text; font-size: 12px; font-weight: root.fw;
         color: root.enabled ? root.fg : root.fg;
         horizontal-alignment: center; vertical-alignment: center;
     }
@@ -728,7 +730,8 @@ export component MainScreen inherits Rectangle {
                     model: root.client-names; current-index: 0;
                     height: 28px; min-width: 160px;
                 }
-                TBtn { text: "+ New Client"; clicked => { root.modal-state = "new-client"; } }
+                // btn-primary: background #1565C0, color #fff (blue-on-blue in toolbar)
+                TBtn { text: "+ New Client"; bg: #1565C0; fg: #FFFFFF; clicked => { root.modal-state = "new-client"; } }
 
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
@@ -742,10 +745,10 @@ export component MainScreen inherits Rectangle {
                     enabled: root.transaction-rows.length > 0;
                     clicked => { root.auto-classify(); }
                 }
-                // AI Classify — purple gradient approximated as solid purple
+                // .btn-ai { background: linear-gradient(#5C35C5,#7B1FA2); color:#fff; font-weight:700; letter-spacing:.04em }
                 TBtn {
                     text: "\u{2605} AI Classify";
-                    bg: #6B2FB8; fg: #FFFFFF;
+                    bg: #6B2FB8; fg: #FFFFFF; fw: 700;
                     enabled: root.transaction-rows.length > 0;
                     clicked => { root.modal-state = "ai-consent"; }
                 }
@@ -767,8 +770,9 @@ export component MainScreen inherits Rectangle {
                     CheckBox { text: "Dedupe"; checked: true; }
                 }
 
+                // .loaded-file { font-size:11px; color:#BBDEFB; font-style:italic }
                 if root.status-file != "" : Text {
-                    text: root.status-file; color: #BBDEFB; font-size: 10px;
+                    text: root.status-file; color: #BBDEFB; font-size: 11px; font-italic: true;
                     vertical-alignment: center; max-width: 180px;
                 }
 
@@ -789,9 +793,10 @@ export component MainScreen inherits Rectangle {
                 padding-top: 0px; padding-bottom: 0px;
                 spacing: 6px; height: 35px;
 
+                // .dr-label: font-size:11px; font-weight:700; color:#1565C0; text-transform:uppercase → "PERIOD:"
                 Text {
-                    text: "Period:"; font-size: 12px;
-                    color: #1565C0; font-weight: 700; letter-spacing: 0.5px;
+                    text: "PERIOD:"; font-size: 11px;
+                    color: #1565C0; font-weight: 700; letter-spacing: 0.55px;
                     vertical-alignment: center;
                 }
 
@@ -831,10 +836,10 @@ export component MainScreen inherits Rectangle {
                 QBtn { text: "Current FY"; active: root.active-preset == "current_fy"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "current_fy"; root.date-preset("current_fy"); } }
                 QBtn { text: "Prev FY";    active: root.active-preset == "prev_fy";    enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "prev_fy";    root.date-preset("prev_fy"); } }
 
-                // Active range chip — shown when a preset is applied
+                // Active range chip — .dr-active-chip { background:#FF8F00; border-radius:12px }
                 if root.active-preset != "" : Rectangle {
                     height: 20px;
-                    background: #E65100; border-radius: 10px;
+                    background: #FF8F00; border-radius: 10px;
                     HorizontalBox {
                         padding-left: 8px; padding-right: 6px;
                         padding-top: 0px; padding-bottom: 0px; spacing: 4px;
@@ -887,20 +892,20 @@ export component MainScreen inherits Rectangle {
             padding: 0px; spacing: 0px;
             width: parent.width; height: parent.height;
 
-                // Panel header — background: #E3F2FD, border-bottom: 1px solid #BBDEFB
+                // Panel header — .panel-hdr { padding:7px 12px; font-size:12px; background:#E3F2FD; }
                 Rectangle {
-                    height: 40px; background: #E3F2FD;
+                    height: 36px; background: #E3F2FD;
 
                     // Bottom border
-                    Rectangle { y: 39px; height: 1px; background: #BBDEFB; }
+                    Rectangle { y: 35px; height: 1px; background: #BBDEFB; }
 
                     HorizontalBox {
                         padding-left: 12px; padding-right: 12px;
                         padding-top: 0px; padding-bottom: 0px;
-                        spacing: 4px; height: 39px;
+                        spacing: 4px; height: 35px;
 
                         Text {
-                            text: "Transactions"; font-size: 13px; font-weight: 600;
+                            text: "Transactions"; font-size: 12px; font-weight: 600;
                             color: #0D47A1; vertical-alignment: center;
                         }
                         Text {
@@ -924,13 +929,15 @@ export component MainScreen inherits Rectangle {
 
                         Rectangle { width: 1px; height: 26px; background: #BBDEFB; }
 
-                        FBtn { label: "All"; count: root.fc-all; active: root.active-filter == "all"; a-bg: #1565C0; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
-                        FBtn { label: "Unreviewed"; count: root.fc-unreviewed; active: root.active-filter == "unreviewed"; a-bg: #E65100; a-fg: white; i-border: #FFA726; i-fg: #E65100; clicked => { root.active-filter = "unreviewed"; root.filter-changed("unreviewed"); } }
-                        FBtn { label: "Suspense"; count: root.fc-suspense; active: root.active-filter == "suspense"; a-bg: #7B1FA2; i-border: #AB47BC; i-fg: #7B1FA2; clicked => { root.active-filter = "suspense"; root.filter-changed("suspense"); } }
-                        FBtn { label: "High Conf."; count: root.fc-high; active: root.active-filter == "high"; a-bg: #1B5E20; i-border: #43A047; i-fg: #2E7D32; clicked => { root.active-filter = "high"; root.filter-changed("high"); } }
-                        FBtn { label: "Duplicates"; count: root.fc-duplicates; active: root.active-filter == "duplicates"; a-bg: #880E4F; i-border: #E91E63; i-fg: #C2185B; clicked => { root.active-filter = "duplicates"; root.filter-changed("duplicates"); } }
-                        FBtn { label: "GST/Tax"; count: root.fc-gst; active: root.active-filter == "gst"; a-bg: #2E7D32; i-border: #66BB6A; i-fg: #2E7D32; clicked => { root.active-filter = "gst"; root.filter-changed("gst"); } }
-                        FBtn { label: "Needs Review"; count: root.fc-review; active: root.active-filter == "needs_review"; a-bg: #E65100; i-border: #E67E22; i-fg: #E65100; clicked => { root.active-filter = "needs_review"; root.filter-changed("needs_review"); } }
+                        // Inactive colors: border from .fbtn-* class; text from .fbtn { color:#555 } default
+                        // Except Needs Review: inline style="border-color:#e67e22;color:#e67e22"
+                        FBtn { label: "All";         count: root.fc-all;        active: root.active-filter == "all";         a-bg: #1565C0; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "all";         root.filter-changed("all"); } }
+                        FBtn { label: "Unreviewed";  count: root.fc-unreviewed; active: root.active-filter == "unreviewed";  a-bg: #E65100; a-fg: white; i-border: #FFA726; i-fg: #555555; clicked => { root.active-filter = "unreviewed";  root.filter-changed("unreviewed"); } }
+                        FBtn { label: "Suspense";    count: root.fc-suspense;   active: root.active-filter == "suspense";    a-bg: #7B1FA2; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "suspense";    root.filter-changed("suspense"); } }
+                        FBtn { label: "High Conf.";  count: root.fc-high;       active: root.active-filter == "high";        a-bg: #1B5E20; a-fg: white; i-border: #43A047; i-fg: #555555; clicked => { root.active-filter = "high";        root.filter-changed("high"); } }
+                        FBtn { label: "Duplicates";  count: root.fc-duplicates; active: root.active-filter == "duplicates";  a-bg: #880E4F; a-fg: white; i-border: #E91E63; i-fg: #555555; clicked => { root.active-filter = "duplicates";  root.filter-changed("duplicates"); } }
+                        FBtn { label: "GST/Tax";     count: root.fc-gst;        active: root.active-filter == "gst";         a-bg: #2E7D32; a-fg: white; i-border: #66BB6A; i-fg: #555555; clicked => { root.active-filter = "gst";         root.filter-changed("gst"); } }
+                        FBtn { label: "Needs Review"; count: root.fc-review;    active: root.active-filter == "needs_review"; a-bg: #E65100; a-fg: white; i-border: #E67E22; i-fg: #E67E22; clicked => { root.active-filter = "needs_review"; root.filter-changed("needs_review"); } }
 
                         Rectangle { width: 1px; height: 26px; background: #BBDEFB; }
                         Text { text: "Bank:"; font-size: 11px; color: #607D8B; vertical-alignment: center; }
@@ -1005,61 +1012,61 @@ export component MainScreen inherits Rectangle {
                                 }
                             }
 
-                            // Colour key — background: #E3F2FD, border-top: 1px solid #BBDEFB
+                            // Colour key — .colour-key { gap:18px; padding:5px 12px; background:#E3F2FD; font-size:11px; color:#0D47A1 }
+                            // .k { display:flex; align-items:center; gap:5px; }
+                            // .k::before { width:11px; height:11px; border-radius:2px; background:[color] }
                             Rectangle {
                                 height: 28px; background: #E3F2FD;
                                 border-width: 0px;
                                 Rectangle { y: 0px; height: 1px; background: #BBDEFB; }
 
                                 HorizontalBox {
-                                    padding-left: 10px; padding-right: 10px;
-                                    padding-top: 0px; padding-bottom: 0px;
-                                    spacing: 8px;
+                                    padding-left: 12px; padding-right: 12px;
+                                    padding-top: 5px; padding-bottom: 5px;
+                                    spacing: 18px;
 
+                                    // Row-colour key items: coloured square dot + dark text label
                                     for item in [
-                                        {lbl: "High Conf.", bg: #E8F5E9, fg: #2E7D32},
-                                        {lbl: "Medium",     bg: #FFF8E1, fg: #F9A825},
-                                        {lbl: "Needs Review", bg: #FFEBEE, fg: #C62828},
-                                        {lbl: "Suspense",   bg: #F3E5F5, fg: #7B1FA2},
-                                        {lbl: "Manual",     bg: #E3F2FD, fg: #1565C0},
-                                        {lbl: "Duplicate",  bg: #FCE4EC, fg: #C2185B},
-                                    ] : Rectangle {
-                                        height: 16px; min-width: 30px;
-                                        background: item.bg; border-radius: 3px;
-                                        HorizontalBox {
-                                            padding-left: 5px; padding-right: 5px;
-                                            padding-top: 0px; padding-bottom: 0px;
-                                            Text { text: item.lbl; font-size: 9px; color: item.fg; font-weight: 600; vertical-alignment: center; }
-                                        }
+                                        {lbl: "High Conf.", dot: #A5D6A7},
+                                        {lbl: "Medium",     dot: #FFF176},
+                                        {lbl: "Needs Review", dot: #EF9A9A},
+                                        {lbl: "Suspense",   dot: #CE93D8},
+                                        {lbl: "Manual",     dot: #90CAF9},
+                                        {lbl: "Duplicate",  dot: #F8BBD0},
+                                    ] : HorizontalBox {
+                                        padding: 0px; spacing: 5px; alignment: center;
+                                        Rectangle { width: 11px; height: 11px; border-radius: 2px; background: item.dot; }
+                                        Text { text: item.lbl; font-size: 11px; color: #0D47A1; vertical-alignment: center; }
                                     }
 
-                                    Rectangle { width: 1px; height: 14px; background: #90CAF9; }
+                                    // Pipe separator text
+                                    Text { text: "|"; font-size: 11px; color: #90CAF9; vertical-alignment: center; }
 
+                                    // Tag badges: .txn-tag style (font-size:9.5px; background+border)
                                     for tag in [
-                                        {lbl: "GST", bg: #C8E6C9, fg: #1B5E20},
-                                        {lbl: "TAX", bg: #FFE0B2, fg: #BF360C},
-                                        {lbl: "DUP", bg: #FCE4EC, fg: #880E4F},
+                                        {lbl: "GST", bg: #C8E6C9, fg: #1B5E20, bc: #66BB6A},
+                                        {lbl: "TAX", bg: #FFE0B2, fg: #BF360C, bc: #FFA726},
+                                        {lbl: "DUP", bg: #FCE4EC, fg: #880E4F, bc: #E91E63},
                                     ] : Rectangle {
-                                        height: 14px; min-width: 28px;
+                                        height: 16px; min-width: 28px;
                                         background: tag.bg; border-radius: 3px;
-                                        border-width: 1px; border-color: tag.fg;
-                                        Text { text: tag.lbl; font-size: 9px; color: tag.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                        border-width: 1px; border-color: tag.bc;
+                                        Text { text: tag.lbl; font-size: 10px; color: tag.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
                                     }
 
-                                    Rectangle { width: 1px; height: 14px; background: #90CAF9; }
+                                    // Pipe separator text
+                                    Text { text: "|"; font-size: 11px; color: #90CAF9; vertical-alignment: center; }
 
+                                    // Status chips: .status-chip style (rounded pills)
                                     for chip in [
-                                        {lbl: "HIGH",     bg: #2E7D32},
-                                        {lbl: "REVIEW",   bg: #E65100},
-                                        {lbl: "SUSPENSE", bg: #7B1FA2},
+                                        {lbl: "HIGH",     bg: #C8E6C9, fg: #1B5E20, bc: #81C784},
+                                        {lbl: "REVIEW",   bg: #FFCDD2, fg: #B71C1C, bc: #EF9A9A},
+                                        {lbl: "SUSPENSE", bg: #E1BEE7, fg: #6A1B9A, bc: #BA68C8},
                                     ] : Rectangle {
-                                        height: 14px; min-width: 30px;
-                                        background: chip.bg; border-radius: 10px;
-                                        HorizontalBox {
-                                            padding-left: 4px; padding-right: 4px;
-                                            padding-top: 0px; padding-bottom: 0px;
-                                            Text { text: chip.lbl; font-size: 9px; color: white; font-weight: 800; vertical-alignment: center; }
-                                        }
+                                        height: 16px; min-width: 34px;
+                                        background: chip.bg; border-radius: 8px;
+                                        border-width: 1px; border-color: chip.bc;
+                                        Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
                                     }
 
                                     Rectangle { horizontal-stretch: 1; }
@@ -1082,11 +1089,12 @@ export component MainScreen inherits Rectangle {
                             VerticalBox {
                                 padding: 12px; spacing: 5px; width: 258px;
 
-                                // Summary header with 3px bottom border
+                                // .sum-hdr { font-weight:800; font-size:13px; color:#0A1929; padding-bottom:8px; border-bottom:3px solid #1565C0; margin-bottom:10px }
                                 Text {
                                     text: "Summary"; font-size: 13px; font-weight: 800;
                                     color: #0A1929;
                                 }
+                                Rectangle { height: 8px; }  // padding-bottom:8px before border
                                 Rectangle { height: 3px; background: #1565C0; }
 
                                 // No-data placeholder
@@ -1109,28 +1117,38 @@ export component MainScreen inherits Rectangle {
                                 SR { lbl: "Closing Balance"; val: root.dash-closing;      vcol: #1565C0; }
                                 SR { lbl: "Calc. Closing";   val: root.dash-calc-closing; vcol: #546E7A; }
 
+                                // .recon-card.mismatch { background:#ffebee; border-left:4px solid #c62828; border-radius:6px; padding:10px 12px }
                                 if root.dash-has-mismatch : Rectangle {
-                                    height: 28px; background: #FFEBEE;
-                                    border-radius: 5px; border-width: 1px; border-color: #FFCDD2;
+                                    height: 36px; background: #FFEBEE;
+                                    border-radius: 6px;
+                                    // Left accent border (4px)
+                                    Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #C62828; border-radius: 6px; }
                                     HorizontalBox {
-                                        padding-left: 8px; padding-right: 8px;
-                                        padding-top: 0px; padding-bottom: 0px; spacing: 4px;
+                                        padding-left: 14px; padding-right: 12px;
+                                        padding-top: 0px; padding-bottom: 0px; spacing: 6px;
                                         Text {
-                                            text: "\u{2717} MISMATCH"; font-size: 10px; font-weight: 700;
-                                            color: #C62828; vertical-alignment: center; horizontal-stretch: 1;
+                                            text: "\u{2717} MISMATCH"; font-size: 13px; font-weight: 800;
+                                            color: #B71C1C; vertical-alignment: center; horizontal-stretch: 1;
                                         }
                                         Text {
-                                            text: root.dash-mismatch; font-size: 10px; font-weight: 600;
+                                            text: root.dash-mismatch; font-size: 11px; font-weight: 700;
                                             color: #C62828; vertical-alignment: center;
                                         }
                                     }
                                 }
+                                // .recon-card.ok { background:#e8f5e9; border-left:4px solid #2e7d32; border-radius:6px; padding:10px 12px }
                                 if !root.dash-has-mismatch && root.transaction-rows.length > 0 : Rectangle {
-                                    height: 22px; background: #E8F5E9;
-                                    border-radius: 5px; border-width: 1px; border-color: #C8E6C9;
-                                    Text {
-                                        text: "\u{2713} RECONCILED"; font-size: 10px; font-weight: 700;
-                                        color: #2E7D32; horizontal-alignment: center; vertical-alignment: center;
+                                    height: 36px; background: #E8F5E9;
+                                    border-radius: 6px;
+                                    // Left accent border (4px)
+                                    Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #2E7D32; border-radius: 6px; }
+                                    HorizontalBox {
+                                        padding-left: 14px; padding-right: 12px;
+                                        padding-top: 0px; padding-bottom: 0px;
+                                        Text {
+                                            text: "\u{2713} RECONCILED"; font-size: 13px; font-weight: 800;
+                                            color: #1B5E20; vertical-alignment: center;
+                                        }
                                     }
                                 }
 
@@ -1251,7 +1269,8 @@ export component MainScreen inherits Rectangle {
 
                 // Green buttons
                 FootBtn { text: "Export to Excel";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "excel-export"; } }
-                FootBtn { text: "\u{2193} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.modal-state = "export-wizard"; } }
+                // &#8659; = ⇓ (U+21D3 DOWNWARDS DOUBLE ARROW) from original HTML
+                FootBtn { text: "\u{21D3} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.modal-state = "export-wizard"; } }
                 FootBtn { text: "Quick Tally XML";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "tally-export"; } }
                 FootBtn { text: "Re-import Excel";        enabled: false; clicked => { root.reimport-excel(); } }
                 FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => { root.reset-dedupe(); } }
@@ -1289,7 +1308,8 @@ export component MainScreen inherits Rectangle {
                     LineEdit { placeholder-text: "e.g. Acme Pvt Ltd"; height: 34px; }
                     Text { text: "Bank Ledger Name in Tally *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
                     LineEdit { placeholder-text: "e.g. HDFC Bank A/c - 5021"; height: 34px; }
-                    Text { text: "Must exactly match the ledger name in your Tally company (case-sensitive)"; font-size: 10px; color: #999999; wrap: word-wrap; }
+                    // .fg small { font-size:11px; color:#999; margin-top:3px }
+                    Text { text: "Must exactly match the ledger name in your Tally company (case-sensitive)"; font-size: 11px; color: #999999; wrap: word-wrap; }
                 }
                 MFtr {
                     MBtn { text: "Save Client"; bg: #1565C0; clicked => { root.modal-state = ""; root.new-client(); } }
@@ -1613,8 +1633,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 500px) / 2; y: (parent.height - 420px) / 2;
-            width: 500px; height: 420px; background: white; border-radius: 8px;
+            x: (parent.width - 500px) / 2; y: (parent.height - 440px) / 2;
+            width: 500px; height: 440px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1622,11 +1642,14 @@ export component MainScreen inherits Rectangle {
                 Rectangle { height: 4px; background: #1565C0; }
                 MHdr { title: "Edit Transaction"; close => { root.modal-state = ""; } }
                 VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
-                    // Read-only info block
+                    // .txn-info { background:#F0F7FF; border-radius:5px; border:1px solid #BBDEFB; padding:10px 13px; font-size:12px; line-height:1.9; color:#444 }
                     Rectangle {
-                        height: 62px; background: #F0F7FF; border-radius: 5px;
+                        height: 80px; background: #F0F7FF; border-radius: 5px;
                         border-width: 1px; border-color: #BBDEFB;
-                        VerticalBox { padding: 8px; spacing: 2px;
+                        VerticalBox {
+                            padding-top: 10px; padding-bottom: 10px;
+                            padding-left: 13px; padding-right: 13px;
+                            spacing: 3px;
                             HorizontalBox { padding: 0px; spacing: 0px;
                                 Text { text: "Date: "; font-size: 12px; font-weight: 700; color: #0A1929; }
                                 Text { text: root.edit-txn-date; font-size: 12px; color: #444444; horizontal-stretch: 1; }
@@ -1676,8 +1699,9 @@ export component MainScreen inherits Rectangle {
                             root.modal-state = "";
                         }
                     }
+                    // Original: class="btn btn-orange" → background:#e65100 (not purple)
                     MBtn {
-                        text: "Mark Suspense"; bg: #7B1FA2; fg: white;
+                        text: "Mark Suspense"; bg: #E65100; fg: white;
                         clicked => { root.mark-suspense(root.edit-txn-idx); root.modal-state = ""; }
                     }
                     MBtn {
