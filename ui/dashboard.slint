@@ -49,6 +49,9 @@ global PiePalette {
 }
 
 // ── Stat card ──────────────────────────────────────────────────────────────────
+// Original: border-radius:10px; padding:13px 15px; border-left:4px solid; box-shadow:0 2px 6px rgba(0,0,0,.07)
+// dash-card-lbl: font-size:10px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:.07em; margin-bottom:5px
+// dash-card-val: font-size:15px; font-weight:700; color:#0D47A1
 component StatCard inherits Rectangle {
     in property <string> title:     "Label";
     in property <string> value:     "₹ —";
@@ -58,10 +61,10 @@ component StatCard inherits Rectangle {
     callback clicked();
 
     background:    #FFFFFF;
-    border-radius: 8px;
+    border-radius: 10px;
     min-height:    78px;
-    drop-shadow-blur:     4px;
-    drop-shadow-color:    #0000001A;
+    drop-shadow-blur:     6px;
+    drop-shadow-color:    #00000012;
     drop-shadow-offset-y: 2px;
 
     ta := TouchArea {
@@ -71,58 +74,90 @@ component StatCard inherits Rectangle {
     }
 
     HorizontalBox {
-        padding: 14px; spacing: 10px;
+        padding-top: 13px; padding-bottom: 13px;
+        padding-left: 15px; padding-right: 15px;
+        spacing: 10px;
+        // Left accent border (4px strip)
         Rectangle { width: 4px; background: root.accent; border-radius: 2px; }
         VerticalBox {
-            spacing: 3px; alignment: center;
-            Text { text: root.title; color: #546E7A; font-size: 11px; }
-            Text { text: root.value; color: #1A237E; font-size: 17px; font-weight: 700; }
+            spacing: 5px; alignment: center;
+            Text {
+                text: root.title; color: #888888;
+                font-size: 10px; font-weight: 700;
+                letter-spacing: 0.7px;
+            }
+            Text { text: root.value; color: #0D47A1; font-size: 15px; font-weight: 700; }
             if root.sub != "" : Text {
-                text: root.sub; color: #90A4AE; font-size: 10px;
+                text: root.sub; color: #999999; font-size: 10px;
             }
         }
     }
 }
 
 // ── Chart card wrapper ─────────────────────────────────────────────────────────
+// Original: border-radius:10px; padding:14px; box-shadow:0 2px 6px rgba(0,0,0,.07)
+// dash-chart-title: font-size:11px; font-weight:700; color:#37474F; text-transform:uppercase; letter-spacing:.07em; margin-bottom:10px
 component ChartCard inherits Rectangle {
     in property <string> chart-title: "";
     background:    #FFFFFF;
-    border-radius: 8px;
-    drop-shadow-blur:     4px;
-    drop-shadow-color:    #0000001A;
+    border-radius: 10px;
+    drop-shadow-blur:     6px;
+    drop-shadow-color:    #00000012;
     drop-shadow-offset-y: 2px;
     clip: true;
 
     VerticalBox {
-        padding: 14px; spacing: 6px;
+        padding: 14px; spacing: 10px;
         Text {
             text: root.chart-title;
-            font-size: 13px; font-weight: 700; color: #37474F;
+            font-size: 11px; font-weight: 700; color: #37474F;
+            letter-spacing: 0.7px;
         }
         @children
     }
 }
 
 // ── Insight card ───────────────────────────────────────────────────────────────
+// Original: border-radius:8px; padding:11px 14px; border-top:3px solid #0D47A1; box-shadow:0 1px 4px rgba(0,0,0,.07)
+// dash-ins-lbl: font-size:10px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px
+// dash-ins-val: font-size:13px; font-weight:700; color:#0D47A1
+// dash-ins-sub: font-size:9px; color:#aaa
 component InsCard inherits Rectangle {
     in property <string> label: "Label";
     in property <string> value: "—";
     in property <string> sub:   "";
-    in property <color>  vcol:  #37474F;
+    in property <color>  vcol:  #0D47A1;
 
     background:    #FFFFFF;
-    border-radius: 6px;
-    border-width:  1px;
-    border-color:  #E8ECF0;
+    border-radius: 8px;
     horizontal-stretch: 1;
+    drop-shadow-blur:     4px;
+    drop-shadow-color:    #00000012;
+    drop-shadow-offset-y: 1px;
+
+    // Top border: 3px solid #0D47A1
+    Rectangle {
+        x: 0; y: 0; width: parent.width; height: 3px;
+        background: #0D47A1;
+        border-radius: 8px;  // only top corners
+    }
 
     VerticalBox {
-        padding: 12px; spacing: 3px;
-        Text { text: root.label; font-size: 10px; color: #78909C; }
-        Text { text: root.value; font-size: 15px; font-weight: 700; color: root.vcol; }
+        padding-top: 14px;   // 11px content + 3px for top border
+        padding-bottom: 11px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 4px;
+        Text {
+            text: root.label; font-size: 10px; font-weight: 700;
+            color: #888888; letter-spacing: 0.6px;
+        }
+        Text {
+            text: root.value; font-size: 13px; font-weight: 700;
+            color: root.vcol;
+        }
         if root.sub != "" : Text {
-            text: root.sub; font-size: 10px; color: #90A4AE; wrap: word-wrap;
+            text: root.sub; font-size: 9px; color: #AAAAAA; wrap: word-wrap;
         }
     }
 }
@@ -443,10 +478,14 @@ export component DashboardScreen inherits Rectangle {
         padding: 0px; spacing: 0px;
 
         // ── Filter bar ─────────────────────────────────────────────────────
+        // Original: background:#fff; border-radius:8px; padding:10px 14px; box-shadow:0 1px 4px rgba(0,0,0,.07); gap:10px
+        // dash-fg label: font-size:10px; font-weight:700; color:#666; text-transform:uppercase; letter-spacing:.06em
         Rectangle {
-            height: 46px; background: #FFFFFF;
+            height: 56px; background: #FFFFFF;
             border-width: 0px;
-            Rectangle { y: 45px; height: 1px; background: #E0E0E0; }
+            drop-shadow-blur: 4px;
+            drop-shadow-color: #00000012;
+            drop-shadow-offset-y: 1px;
 
             HorizontalBox {
                 padding-left: 14px; padding-right: 14px;
@@ -454,11 +493,11 @@ export component DashboardScreen inherits Rectangle {
                 spacing: 10px;
 
                 VerticalBox {
-                    padding: 0px; spacing: 2px; alignment: center;
-                    Text { text: "From"; font-size: 10px; color: #90A4AE; }
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "FROM"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
                     LineEdit {
-                        placeholder-text: "DD/MM/YYYY"; height: 24px;
-                        min-width: 96px; max-width: 96px; font-size: 11px;
+                        placeholder-text: "DD/MM/YYYY"; height: 26px;
+                        min-width: 96px; max-width: 96px; font-size: 12px;
                         text: root.dash-from;
                         edited(v) => {
                             root.dash-from = v;
@@ -470,11 +509,11 @@ export component DashboardScreen inherits Rectangle {
                     }
                 }
                 VerticalBox {
-                    padding: 0px; spacing: 2px; alignment: center;
-                    Text { text: "To"; font-size: 10px; color: #90A4AE; }
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "TO"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
                     LineEdit {
-                        placeholder-text: "DD/MM/YYYY"; height: 24px;
-                        min-width: 96px; max-width: 96px; font-size: 11px;
+                        placeholder-text: "DD/MM/YYYY"; height: 26px;
+                        min-width: 96px; max-width: 96px; font-size: 12px;
                         text: root.dash-to;
                         edited(v) => {
                             root.dash-to = v;
@@ -486,10 +525,10 @@ export component DashboardScreen inherits Rectangle {
                     }
                 }
                 VerticalBox {
-                    padding: 0px; spacing: 2px; alignment: center;
-                    Text { text: "Bank"; font-size: 10px; color: #90A4AE; }
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "BANK"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
                     ComboBox {
-                        model: root.filter-banks; height: 24px; min-width: 120px;
+                        model: root.filter-banks; height: 26px; min-width: 120px;
                         current-index: root.dash-bank-idx;
                         selected => {
                             root.dash-bank-idx = self.current-index;
@@ -501,10 +540,10 @@ export component DashboardScreen inherits Rectangle {
                     }
                 }
                 VerticalBox {
-                    padding: 0px; spacing: 2px; alignment: center;
-                    Text { text: "Vendor / Ledger"; font-size: 10px; color: #90A4AE; }
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "VENDOR / LEDGER"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
                     ComboBox {
-                        model: root.filter-vendors; height: 24px; min-width: 130px;
+                        model: root.filter-vendors; height: 26px; min-width: 130px;
                         current-index: root.dash-vendor-idx;
                         selected => {
                             root.dash-vendor-idx = self.current-index;
@@ -516,10 +555,10 @@ export component DashboardScreen inherits Rectangle {
                     }
                 }
                 VerticalBox {
-                    padding: 0px; spacing: 2px; alignment: center;
-                    Text { text: "Expense Head"; font-size: 10px; color: #90A4AE; }
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "EXPENSE HEAD"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
                     ComboBox {
-                        model: root.filter-heads; height: 24px; min-width: 130px;
+                        model: root.filter-heads; height: 26px; min-width: 130px;
                         current-index: root.dash-head-idx;
                         selected => {
                             root.dash-head-idx = self.current-index;
@@ -563,19 +602,6 @@ export component DashboardScreen inherits Rectangle {
             VerticalBox {
                 padding: 16px; spacing: 14px;
                 width: parent.visible-width;
-
-                // ── Header row ───────────────────────────────────────────────
-                HorizontalBox {
-                    Text {
-                        text: "Dashboard"; font-size: 20px; font-weight: 700;
-                        color: #1565C0; vertical-alignment: center;
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    Text {
-                        text: root.has-data ? "" : "Upload a bank statement to populate charts";
-                        font-size: 12px; color: #90A4AE; vertical-alignment: center;
-                    }
-                }
 
                 // ── 8 Summary cards ──────────────────────────────────────────
                 HorizontalBox {
@@ -636,7 +662,7 @@ export component DashboardScreen inherits Rectangle {
                     // Monthly Credits vs Debits (2fr)
                     ChartCard {
                         horizontal-stretch: 2;
-                        chart-title: "Monthly Credits vs Debits";
+                        chart-title: "MONTHLY CREDITS VS DEBITS";
 
                         // Legend
                         HorizontalBox {
@@ -659,7 +685,7 @@ export component DashboardScreen inherits Rectangle {
                     // Expense Head Breakdown (1fr)
                     ChartCard {
                         horizontal-stretch: 1;
-                        chart-title: "Expense Head Breakdown";
+                        chart-title: "EXPENSE HEAD BREAKDOWN";
 
                         ExpenseChart {
                             data: root.chart-expenses;
@@ -674,7 +700,7 @@ export component DashboardScreen inherits Rectangle {
                     // Cash Flow Trend (2fr)
                     ChartCard {
                         horizontal-stretch: 2;
-                        chart-title: "Cash Flow Trend";
+                        chart-title: "CASH FLOW TREND";
 
                         CashFlowChart {
                             data: root.chart-cashflow;
@@ -685,7 +711,7 @@ export component DashboardScreen inherits Rectangle {
                     // Top 10 Vendors / Customers (1fr)
                     ChartCard {
                         horizontal-stretch: 1;
-                        chart-title: "Top 10 Vendors / Customers";
+                        chart-title: "TOP 10 VENDORS / CUSTOMERS";
 
                         // Legend
                         HorizontalBox {
@@ -710,31 +736,31 @@ export component DashboardScreen inherits Rectangle {
                 if root.has-data : HorizontalBox {
                     spacing: 10px;
                     InsCard {
-                        label: "Highest Debit";
+                        label: "HIGHEST DEBIT";
                         value: root.ins-max-dr;
                         sub: root.ins-max-dr-narr;
                         vcol: #C62828;
                     }
                     InsCard {
-                        label: "Highest Credit";
+                        label: "HIGHEST CREDIT";
                         value: root.ins-max-cr;
                         sub: root.ins-max-cr-narr;
                         vcol: #2E7D32;
                     }
                     InsCard {
-                        label: "Avg. Debit Value";
+                        label: "AVG. DEBIT VALUE";
                         value: root.ins-avg-dr;
                         sub: root.ins-dr-count;
                         vcol: #37474F;
                     }
                     InsCard {
-                        label: "Avg. Credit Value";
+                        label: "AVG. CREDIT VALUE";
                         value: root.ins-avg-cr;
                         sub: root.ins-cr-count;
                         vcol: #37474F;
                     }
                     InsCard {
-                        label: "Most Frequent Vendor";
+                        label: "MOST FREQUENT VENDOR";
                         value: root.ins-freq-vendor;
                         horizontal-stretch: 1.5;
                         vcol: #1565C0;

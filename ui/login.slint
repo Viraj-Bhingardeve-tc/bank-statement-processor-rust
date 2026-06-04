@@ -1,25 +1,29 @@
-// login.slint — Monthly-password login screen
-// Mirrors the existing Electron login.html design exactly.
+// login.slint — Monthly-password login screen.
+// Pixel-perfect match to login.html:
+//   card: 380×auto, padding 36px 40px 32px, border-radius 10px, shadow 0 8px 32px rgba(0,0,0,.28)
+//   brand → 28px gap → divider → 24px gap → form groups (label 5px → input, 16px between groups)
+//   button: full-width, font-size 14px, font-weight 600, padding 10px (→ height ~44px), border-radius 5px
+//   footer note: margin-top 22px, font-size 11px, color #90A4AE
 
-import { Button, LineEdit, VerticalBox } from "std-widgets.slint";
+import { VerticalBox } from "std-widgets.slint";
 
 export component LoginScreen inherits Rectangle {
-    // ── Public interface ──────────────────────────────────────────────────────
     in property <string>  error-message: "";
-    in property <bool>    is-loading: false;
-    callback attempt-login(/* email */ string, /* password */ string);
+    in property <bool>    is-loading:    false;
+    callback attempt-login(string, string);
 
-    // ── Blue background ───────────────────────────────────────────────────────
+    // Internal state to hold typed values
+    in-out property <string> email-val: "";
+    in-out property <string> pwd-val:   "";
+
     background: #1565C0;
 
-    // ── Centered white card ───────────────────────────────────────────────────
     card := Rectangle {
         width:         380px;
         x:             (parent.width  - self.width)  / 2;
         y:             (parent.height - self.height) / 2;
         background:    #FFFFFF;
         border-radius: 10px;
-
         drop-shadow-blur:     32px;
         drop-shadow-color:    #00000047;
         drop-shadow-offset-x: 0px;
@@ -30,95 +34,113 @@ export component LoginScreen inherits Rectangle {
             padding-left:   40px;
             padding-right:  40px;
             padding-bottom: 32px;
-            spacing:  12px;
+            spacing: 0px;
 
-            // ── Brand ─────────────────────────────────────────────────────────
+            // ── Brand (centered, name 20/800, sub 12/400) ─────────────────────
             Text {
-                text:                "A S Havaldar";
-                font-size:           20px;
-                font-weight:         800;
-                color:               #0D47A1;
+                text: "A S Havaldar";
+                font-size: 20px; font-weight: 800; color: #0D47A1;
+                letter-spacing: 0.3px; horizontal-alignment: center;
+            }
+            Rectangle { height: 3px; }   // margin-top:3px on brand-sub
+            Text {
+                text: "Bank Statement Processor";
+                font-size: 12px; color: #546E7A;
                 horizontal-alignment: center;
             }
+            Rectangle { height: 25px; }  // brand margin-bottom:28px total (3+25)
 
-            Text {
-                text:                "Bank Statement Processor";
-                font-size:           12px;
-                color:               #546E7A;
-                horizontal-alignment: center;
-            }
-
-            // Divider
+            // ── Divider + gap ─────────────────────────────────────────────────
             Rectangle { height: 1px; background: #BBDEFB; }
+            Rectangle { height: 24px; }  // margin: 0 0 24px
 
-            // ── Inputs ────────────────────────────────────────────────────────
+            // ── Email group ───────────────────────────────────────────────────
             Text {
-                text: "WORK EMAIL";
-                font-size: 11px; font-weight: 600; color: #37474F;
-                letter-spacing: 0.5px;
+                text: "WORK EMAIL"; font-size: 11px; font-weight: 600;
+                color: #37474F; letter-spacing: 0.5px;
             }
-            email-input := LineEdit {
-                placeholder-text: "yourname@company.com";
-                enabled:          !root.is-loading;
-                // Tab / Enter moves focus to password
-                accepted => { pwd-input.focus(); }
+            Rectangle { height: 5px; }
+            email-box := Rectangle {
+                height: 36px; border-radius: 5px;
+                border-width: 1px; border-color: email-ti.has-focus ? #1565C0 : #90CAF9;
+                background: #FFFFFF;
+                email-ti := TextInput {
+                    x: 12px; width: parent.width - 24px; height: parent.height;
+                    font-size: 13px; color: #0A1929;
+                    vertical-alignment: center;
+                    enabled: !root.is-loading;
+                    text <=> root.email-val;
+                    accepted => { pwd-ti.focus(); }
+                }
             }
+            Rectangle { height: 16px; }
 
+            // ── Password group ────────────────────────────────────────────────
             Text {
-                text: "THIS MONTH'S PASSWORD";
-                font-size: 11px; font-weight: 600; color: #37474F;
-                letter-spacing: 0.5px;
+                text: "THIS MONTH'S PASSWORD"; font-size: 11px; font-weight: 600;
+                color: #37474F; letter-spacing: 0.5px;
             }
-            pwd-input := LineEdit {
-                placeholder-text: "XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX";
-                input-type:       InputType.password;
-                enabled:          !root.is-loading;
-                accepted => {
-                    if email-input.text != "" && pwd-input.text != "" {
-                        root.attempt-login(email-input.text, pwd-input.text);
+            Rectangle { height: 5px; }
+            pwd-box := Rectangle {
+                height: 36px; border-radius: 5px;
+                border-width: 1px; border-color: pwd-ti.has-focus ? #1565C0 : #90CAF9;
+                background: #FFFFFF;
+                pwd-ti := TextInput {
+                    x: 12px; width: parent.width - 24px; height: parent.height;
+                    font-size: 13px; color: #0A1929;
+                    vertical-alignment: center;
+                    input-type: password;
+                    enabled: !root.is-loading;
+                    text <=> root.pwd-val;
+                    accepted => {
+                        if root.email-val != "" && root.pwd-val != "" {
+                            root.attempt-login(root.email-val, root.pwd-val);
+                        }
                     }
                 }
             }
+            Rectangle { height: 14px; }  // margin-top:4px on button + some spacing
 
-            // ── Sign In button ────────────────────────────────────────────────
-            Button {
-                text:    root.is-loading ? "Verifying…" : "Sign In";
-                primary: true;
-                enabled: !root.is-loading;
-                clicked => {
-                    root.attempt-login(email-input.text, pwd-input.text);
-                }
-            }
-
-            // ── Error message (shown only when non-empty) ─────────────────────
-            if root.error-message != "" : Rectangle {
-                background:    #FFEBEE;
+            // ── Sign In button — full-width, 14px/600, #1565C0, radius 5px ───
+            Rectangle {
+                height:        44px;
+                background:    root.is-loading ? #90CAF9 : #1565C0;
                 border-radius: 5px;
-                border-width:  1px;
-                border-color:  #FFCDD2;
-                height:        36px;
-
+                TouchArea {
+                    enabled: !root.is-loading;
+                    mouse-cursor: pointer;
+                    clicked => { root.attempt-login(root.email-val, root.pwd-val); }
+                }
                 Text {
-                    text:                root.error-message;
-                    color:               #B71C1C;
-                    font-size:           12px;
-                    horizontal-alignment: center;
-                    vertical-alignment:  center;
-                    wrap:                word-wrap;
+                    text: root.is-loading ? "Verifying…" : "Sign In";
+                    font-size: 14px; font-weight: 600; color: #FFFFFF;
+                    horizontal-alignment: center; vertical-alignment: center;
                 }
             }
 
-            // ── Footer note ───────────────────────────────────────────────────
+            // ── Error (margin-top:14px, padding 9px 12px) ────────────────────
+            if root.error-message != "" : Rectangle { height: 14px; }
+            if root.error-message != "" : Rectangle {
+                height: 40px; background: #FFEBEE;
+                border-radius: 5px; border-width: 1px; border-color: #FFCDD2;
+                Text {
+                    x: 12px; width: parent.width - 24px; height: parent.height;
+                    text: root.error-message;
+                    color: #B71C1C; font-size: 12px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+
+            // ── Footer note (margin-top:22px) ─────────────────────────────────
+            Rectangle { height: 22px; }
             Text {
-                text:                "Password is valid for this month only.\nContact your administrator for access.";
-                color:               #90A4AE;
-                font-size:           11px;
-                horizontal-alignment: center;
-                wrap:                word-wrap;
+                text: "Password is valid for this month only.\nContact your administrator for access.";
+                font-size: 11px; color: #90A4AE;
+                horizontal-alignment: center; wrap: word-wrap;
             }
         }
     }
 
-    // Focus email field on startup
-    init => { email-input.focus(); }
+    init => { email-ti.focus(); }
 }

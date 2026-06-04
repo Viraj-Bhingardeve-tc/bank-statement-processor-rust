@@ -49,7 +49,7 @@ component TBtn inherits Rectangle {
         clicked => { root.clicked(); }
     }
     Text {
-        text: root.text; font-size: 12px;
+        text: root.text; font-size: 12px; font-weight: 500;
         color: root.enabled ? root.fg : root.fg;
         horizontal-alignment: center; vertical-alignment: center;
     }
@@ -74,7 +74,7 @@ component QBtn inherits Rectangle {
         clicked => { root.clicked(); }
     }
     Text {
-        text: root.text; font-size: 11px;
+        text: root.text; font-size: 10px;
         color: root.active ? #1565C0 : (root.enabled ? #1565C0 : #90A8C0);
         horizontal-alignment: center; vertical-alignment: center;
     }
@@ -107,12 +107,13 @@ component FBtn inherits Rectangle {
             color: root.active ? root.a-fg : root.i-fg;
             vertical-alignment: center;
         }
+        // count badge: inactive=rgba(0,0,0,.15)=#00000026, active=rgba(255,255,255,.28)=#FFFFFF47
         if root.count != "" : Rectangle {
             height: 16px; min-width: 20px;
-            background:    root.active ? #FFFFFF30 : #E8E8E8;
+            background:    root.active ? #FFFFFF47 : #00000026;
             border-radius: 8px;
             Text {
-                text: root.count; font-size: 10px;
+                text: root.count; font-size: 9px; font-weight: 800;
                 color: root.active ? white : #37474F;
                 horizontal-alignment: center; vertical-alignment: center;
             }
@@ -145,6 +146,7 @@ component VTab inherits Rectangle {
 }
 
 // ── Footer action button ───────────────────────────────────────────────────────
+// Original .btn: padding:5px 11px; font-size:12px; font-weight:500; border:1px solid #90CAF9; border-radius:4px; height≈27px
 component FootBtn inherits Rectangle {
     in property <string> text:       "";
     in property <bool>   enabled:    false;
@@ -166,7 +168,7 @@ component FootBtn inherits Rectangle {
         clicked => { root.clicked(); }
     }
     Text {
-        text: root.text; font-size: 12px;
+        text: root.text; font-size: 12px; font-weight: 500;
         color: root.enabled ? root.fg : #BDBDBD;
         horizontal-alignment: center; vertical-alignment: center;
     }
@@ -189,17 +191,19 @@ component SR inherits HorizontalBox {
 }
 
 // ── Summary section title ──────────────────────────────────────────────────────
+// Original .sec-title: margin-top:11px; margin-bottom:3px; font-size:10px; font-weight:700; color:#1565C0; letter-spacing:.6px
 component SDivider inherits VerticalBox {
     in property <string> title: "";
-    padding: 0px; spacing: 2px; height: 22px;
+    padding: 0px; spacing: 3px; height: 24px;
     Rectangle { height: 1px; background: #BBDEFB; }
     Text {
         text: root.title; font-size: 10px; font-weight: 700;
-        color: #1565C0; letter-spacing: 0.5px;
+        color: #1565C0; letter-spacing: 0.6px;
     }
 }
 
 // ── Modal action button ────────────────────────────────────────────────────────
+// Original .btn: padding:5px 11px; font-size:12px; border-radius:4px; height≈27px
 component MBtn inherits Rectangle {
     in property <string> text:    "";
     in property <color>  bg:      #1565C0;
@@ -207,7 +211,7 @@ component MBtn inherits Rectangle {
     in property <bool>   enabled: true;
     callback clicked();
 
-    height: 32px; min-width: 80px;
+    height: 28px; min-width: 80px;
     background:    root.enabled ? root.bg : #F5F5F5;
     border-radius: 4px;
     border-width:  root.enabled ? 0px : 1px;
@@ -273,43 +277,82 @@ component MFtr inherits Rectangle {
 }
 
 // ── Transaction table header ───────────────────────────────────────────────────
+// Original: thead { background:#1565C0; } th { padding:7px 9px; font-weight:600; white-space:nowrap; border-right:1px solid #1976D2; }
+// Generated columns have font-style:italic. Debit header color:#FFCDD2, Credit:#C8E6C9
 component TxnHeader inherits Rectangle {
     height: 32px; background: #1565C0;
     Rectangle { y: 31px; height: 1px; background: #1976D2; }
 
     HorizontalBox {
         padding: 0px; spacing: 0px;
-        // Helper for column header cell
-        for col in [
-            {t: "Bank Name",          w: 88,  r: false},
-            {t: "Account No",         w: 88,  r: false},
-            {t: "Date",               w: 82,  r: false},
-            {t: "Narration",          w: 0,   r: false},
-            {t: "Ref",                w: 95,  r: false},
-            {t: "Debit",              w: 92,  r: true },
-            {t: "Credit",             w: 92,  r: true },
-            {t: "Balance",            w: 100, r: true },
-            {t: "Vendor / Customer",  w: 120, r: false},
-            {t: "Ledger for Posting", w: 120, r: false},
-            {t: "Expense Head",       w: 100, r: false},
-            {t: "Type / Status",      w: 75,  r: false},
-            {t: "Tags",               w: 65,  r: false},
-            {t: "Review",             w: 60,  r: false},
-        ] : Rectangle {
-            width:             col.w > 0 ? col.w * 1px : 0px;
-            horizontal-stretch: col.w == 0 ? 1.0 : 0.0;
-            border-width: 0px; border-color: transparent;
-            // Right separator
+        // Bank Name 90px (raw)
+        Rectangle { width: 90px; clip: true;
+            Rectangle { x: 89px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 72px; height: parent.height; text: "Bank Name"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Account No 90px (raw)
+        Rectangle { width: 90px; clip: true;
+            Rectangle { x: 89px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 72px; height: parent.height; text: "Account No"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Date 82px (raw)
+        Rectangle { width: 82px; clip: true;
+            Rectangle { x: 81px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 64px; height: parent.height; text: "Date"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Narration stretch (raw)
+        Rectangle { horizontal-stretch: 1; clip: true;
             Rectangle { x: parent.width - 1px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
-            Text {
-                x: col.r ? 0px : 9px;
-                width: col.r ? parent.width - 9px : parent.width - 18px;
-                height: parent.height;
-                text: col.t; font-size: 12px; font-weight: 600;
-                color: #FFFFFF; letter-spacing: 0.2px;
-                horizontal-alignment: col.r ? right : left;
-                vertical-alignment: center;
-            }
+            Text { x: 9px; width: parent.width - 18px; height: parent.height; text: "Narration"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Ref 95px (raw)
+        Rectangle { width: 95px; clip: true;
+            Rectangle { x: 94px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 77px; height: parent.height; text: "Ref"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Debit 92px (raw) — pink tint header
+        Rectangle { width: 92px; clip: true;
+            Rectangle { x: 91px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 83px; height: parent.height; text: "Debit"; font-size: 12px; font-weight: 600; color: #FFCDD2; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Credit 92px (raw) — green tint header
+        Rectangle { width: 92px; clip: true;
+            Rectangle { x: 91px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 83px; height: parent.height; text: "Credit"; font-size: 12px; font-weight: 600; color: #C8E6C9; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Balance 100px (raw)
+        Rectangle { width: 100px; clip: true;
+            Rectangle { x: 99px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 91px; height: parent.height; text: "Balance"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Vendor/Customer 120px (generated — italic)
+        Rectangle { width: 120px; clip: true;
+            Rectangle { x: 119px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 102px; height: parent.height; text: "Vendor/Customer"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Ledger for Posting 120px (generated — italic)
+        Rectangle { width: 120px; clip: true;
+            Rectangle { x: 119px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 102px; height: parent.height; text: "Ledger for Posting"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
+        }
+        // Expense Head 100px (generated — italic)
+        Rectangle { width: 100px; clip: true;
+            Rectangle { x: 99px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 82px; height: parent.height; text: "Expense Head"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
+        }
+        // Type/Status 75px (generated — italic)
+        Rectangle { width: 75px; clip: true;
+            Rectangle { x: 74px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 57px; height: parent.height; text: "Type/Status"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
+        }
+        // Tags 80px (generated — italic, min-width:80px in original)
+        Rectangle { width: 80px; clip: true;
+            Rectangle { x: 79px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 62px; height: parent.height; text: "Tags"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Review 60px (generated — italic)
+        Rectangle { width: 60px; clip: true;
+            Text { x: 9px; width: 42px; height: parent.height; text: "Review"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
     }
 }
@@ -342,14 +385,14 @@ component TxnTableRow inherits Rectangle {
     HorizontalBox {
         padding: 0px; spacing: 0px;
 
-        // Bank Name 88px
-        Rectangle { width: 88px; clip: true;
+        // Bank Name 90px (matches header)
+        Rectangle { width: 90px; clip: true;
             Text { x: 6px; width: parent.width - 12px; height: parent.height;
                    text: root.data.bank-name; font-size: 11px; color: #555555;
                    vertical-alignment: center; overflow: elide; }
         }
-        // Account No 88px
-        Rectangle { width: 88px; clip: true;
+        // Account No 90px (matches header)
+        Rectangle { width: 90px; clip: true;
             Text { x: 6px; width: parent.width - 12px; height: parent.height;
                    text: root.data.account-no; font-size: 11px; color: #555555;
                    vertical-alignment: center; overflow: elide; }
@@ -455,8 +498,8 @@ component TxnTableRow inherits Rectangle {
                 }
             }
         }
-        // Tags 65px — GST/TAX/DUP badges
-        Rectangle { width: 65px; clip: true;
+        // Tags 80px — GST/TAX/DUP badges (original: min-width:80px)
+        Rectangle { width: 80px; clip: true;
             HorizontalBox {
                 padding-left: 3px; padding-right: 3px;
                 padding-top: 0px; padding-bottom: 0px;
@@ -764,18 +807,20 @@ export component MainScreen inherits Rectangle {
                     edited(v) => { root.date-to = v; }
                 }
 
+                // Apply: .btn.btn-sm.btn-primary → font-size:10px; padding:2px 7px; height:~24px
                 Rectangle {
-                    height: 26px; width: 52px;
+                    height: 24px; width: 52px;
                     background: #1565C0; border-radius: 4px;
                     TouchArea { clicked => { root.date-filter-apply(root.date-from, root.date-to); } }
-                    Text { text: "Apply"; font-size: 11px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Apply"; font-size: 10px; font-weight: 500; color: white; horizontal-alignment: center; vertical-alignment: center; }
                 }
+                // Clear: .btn.btn-sm → font-size:10px; padding:2px 7px; height:~24px
                 Rectangle {
-                    height: 26px; width: 46px;
+                    height: 24px; width: 46px;
                     background: #FFFFFF; border-radius: 4px;
                     border-width: 1px; border-color: #B0C8E8;
                     TouchArea { clicked => { root.date-from = ""; root.date-to = ""; root.active-preset = ""; root.date-filter-apply("", ""); } }
-                    Text { text: "Clear"; font-size: 11px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: "Clear"; font-size: 10px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle { width: 1px; height: 18px; background: #C5D9F0; }
@@ -1091,19 +1136,24 @@ export component MainScreen inherits Rectangle {
 
                                 SDivider { title: "TRANSACTIONS"; }
                                 HorizontalBox {
-                                    padding: 0px; spacing: 4px;
+                                    padding: 0px; spacing: 6px;
+                                    // sum-stat: padding:7px 8px; text-align:center; border-radius:6px
+                                    // sum-stat-val: font-size:15px; font-weight:800; color:#0D47A1
+                                    // sum-stat-lbl: font-size:9px; color:#888; text-transform:uppercase; letter-spacing:.4px
                                     for s in [
-                                        {v: root.dash-txn-count,    lbl: "Total"},
-                                        {v: root.dash-credit-count, lbl: "Credits"},
-                                        {v: root.dash-debit-count,  lbl: "Debits"},
+                                        {v: root.dash-txn-count,    lbl: "TOTAL"},
+                                        {v: root.dash-credit-count, lbl: "CREDITS"},
+                                        {v: root.dash-debit-count,  lbl: "DEBITS"},
                                     ] : Rectangle {
-                                        horizontal-stretch: 1; height: 42px;
+                                        horizontal-stretch: 1; height: 46px;
                                         background: #FFFFFF; border-radius: 6px;
                                         border-width: 1px; border-color: #BBDEFB;
                                         VerticalBox {
-                                            padding: 4px; spacing: 0px; alignment: center;
+                                            padding-top: 7px; padding-bottom: 7px;
+                                            padding-left: 8px; padding-right: 8px;
+                                            spacing: 2px; alignment: center;
                                             Text { text: s.v; font-size: 15px; font-weight: 800; color: #0D47A1; horizontal-alignment: center; }
-                                            Text { text: s.lbl; font-size: 9px; color: #888888; horizontal-alignment: center; }
+                                            Text { text: s.lbl; font-size: 9px; color: #888888; letter-spacing: 0.4px; horizontal-alignment: center; }
                                         }
                                     }
                                 }
