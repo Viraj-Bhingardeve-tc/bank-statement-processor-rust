@@ -4,3 +4,4 @@
 // with `cargo test --lib --no-default-features` without compiling the Slint UI.
 
 pub mod parser;
+pub mod analytics;

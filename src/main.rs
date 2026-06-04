@@ -4,12 +4,13 @@
 //   1. Initialise logger
 //   2. Open (or create) the SQLite database
 //   3. Create the Slint AppWindow
-//   4. Wire callbacks: do-login, do-load-file, do-batch-folder
+//   4. Wire callbacks: do-login, do-load-file, all toolbar/footer actions
 //   5. Run the Slint event loop
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod analytics;
 mod db;
 mod parser;
 mod ui;
@@ -17,7 +18,7 @@ mod ui;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "slint-ui")]
-use slint::SharedString;
+use slint::{SharedString, Model as _};
 
 #[cfg(feature = "slint-ui")]
 slint::include_modules!();
@@ -36,16 +37,321 @@ impl LoginState {
     fn exhausted(&self) -> bool { self.attempts >= self.max }
 }
 
-// ── Helpers (slint-ui only) ───────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Format an optional f64 as an Indian-locale amount string (no ₹ prefix).
-/// Returns empty string for None (table cell stays blank).
 #[cfg(feature = "slint-ui")]
 fn fmt_cell(v: Option<f64>) -> String {
     match v {
         None    => String::new(),
         Some(n) => ui::fmt_inr(n),
     }
+}
+
+#[cfg(feature = "slint-ui")]
+fn stub_callback(name: &str) {
+    log::info!("[Stub] {} — not yet implemented", name);
+}
+
+// ── Parse DD/MM/YYYY → (yyyy, mm, dd) for ordering comparisons ────────────────
+#[cfg(feature = "slint-ui")]
+fn parse_date_ymd(s: &str) -> Option<(i32, u32, u32)> {
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() != 3 { return None; }
+    let dd   = parts[0].parse::<u32>().ok()?;
+    let mm   = parts[1].parse::<u32>().ok()?;
+    let yyyy = parts[2].parse::<i32>().ok()?;
+    Some((yyyy, mm, dd))
+}
+
+// ── Apply status + date + bank filters to a transaction list ──────────────────
+#[cfg(feature = "slint-ui")]
+fn apply_txn_filters<'a>(
+    txns: &'a [parser::Transaction],
+    status:  &str,
+    from:    &str,
+    to:      &str,
+    bank:    &str,
+) -> Vec<&'a parser::Transaction> {
+    txns.iter()
+        .filter(|t| !t.is_opening_balance)
+        .filter(|t| match status {
+            "unreviewed"   => matches!(t.status, parser::TransactionStatus::Unreviewed),
+            "suspense"     => matches!(t.status, parser::TransactionStatus::Suspense),
+            "high"         => matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7,
+            "duplicates"   => t.dup_flag,
+            "gst"          => t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }),
+            "needs_review" => matches!(t.status, parser::TransactionStatus::NeedsReview),
+            _              => true,
+        })
+        .filter(|t| {
+            if from.is_empty() && to.is_empty() { return true; }
+            let td = match parse_date_ymd(&t.date) { Some(d) => d, None => return true };
+            if !from.is_empty() {
+                if let Some(fd) = parse_date_ymd(from) { if td < fd { return false; } }
+            }
+            if !to.is_empty() {
+                if let Some(td2) = parse_date_ymd(to) { if td > td2 { return false; } }
+            }
+            true
+        })
+        .filter(|t| bank.is_empty() || bank == "All Banks" || t.bank_name == bank)
+        .collect()
+}
+
+// ── Build Slint TxnRow model from filtered transaction slice ──────────────────
+#[cfg(feature = "slint-ui")]
+fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
+    txns.iter().map(|t| {
+        let narr: String = t.narration.chars().take(80).collect();
+        let has_gst = t.tags.iter().any(|g| g.to_uppercase().contains("GST"));
+        let has_tax = t.tags.iter().any(|g| g.to_uppercase().contains("TAX"));
+        let has_dup = t.dup_flag || t.tags.iter().any(|g| g.to_uppercase().contains("DUP"));
+        let row_color: i32 = match t.status {
+            parser::TransactionStatus::NeedsReview => 3,
+            parser::TransactionStatus::Suspense    => 4,
+            parser::TransactionStatus::Manual      => 6,
+            _ if t.dup_flag                        => 5,
+            parser::TransactionStatus::Classified  => if t.confidence >= 0.7 { 1 } else { 2 },
+            _                                      => 0,
+        };
+        TxnRow {
+            bank_name:    SharedString::from(t.bank_name.as_str()),
+            account_no:   SharedString::from(t.account_no.as_str()),
+            date:         SharedString::from(t.date.as_str()),
+            narration:    SharedString::from(narr.as_str()),
+            ref_no:       SharedString::from(t.reference.as_str()),
+            debit:        SharedString::from(fmt_cell(t.debit).as_str()),
+            credit:       SharedString::from(fmt_cell(t.credit).as_str()),
+            balance:      SharedString::from(fmt_cell(t.balance).as_str()),
+            vendor:       SharedString::from(t.vendor.as_str()),
+            ledger:       SharedString::from(t.account_head.as_str()),
+            expense_head: SharedString::from(""),
+            status_text:  SharedString::from(t.status.to_string().as_str()),
+            tags:         SharedString::from(t.tags.join(" ").as_str()),
+            review:       SharedString::from(""),
+            row_color,
+            has_gst,
+            has_tax,
+            has_dup_tag:  has_dup,
+        }
+    }).collect()
+}
+
+// ── Compute filter-count badges from full unfiltered list ─────────────────────
+#[cfg(feature = "slint-ui")]
+fn compute_filter_counts(txns: &[parser::Transaction]) -> [usize; 7] {
+    let real: Vec<&parser::Transaction> = txns.iter().filter(|t| !t.is_opening_balance).collect();
+    let all        = real.len();
+    let unreviewed = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed)).count();
+    let suspense   = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::Suspense)).count();
+    let high       = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7).count();
+    let duplicates = real.iter().filter(|t| t.dup_flag).count();
+    let gst        = real.iter().filter(|t| t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") })).count();
+    let review     = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::NeedsReview)).count();
+    [all, unreviewed, suspense, high, duplicates, gst, review]
+}
+
+// ── Rebuild visible TxnRow model + filter counts from current AppState filters ─
+#[cfg(feature = "slint-ui")]
+fn rebuild_rows(h: &AppWindow, st: &ui::AppState) {
+    let filtered = apply_txn_filters(
+        &st.transactions,
+        &st.active_filter,
+        &st.date_from,
+        &st.date_to,
+        &st.bank_filter,
+    );
+    let rows = build_txn_rows(&filtered);
+    h.set_transaction_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+
+    // Update filter badge counts (always from full unfiltered list)
+    let [all, unreviewed, suspense, high, dups, gst, review] =
+        compute_filter_counts(&st.transactions);
+    h.set_fc_all(SharedString::from(all.to_string().as_str()));
+    h.set_fc_unreviewed(SharedString::from(unreviewed.to_string().as_str()));
+    h.set_fc_suspense(SharedString::from(suspense.to_string().as_str()));
+    h.set_fc_high(SharedString::from(high.to_string().as_str()));
+    h.set_fc_duplicates(SharedString::from(dups.to_string().as_str()));
+    h.set_fc_gst(SharedString::from(gst.to_string().as_str()));
+    h.set_fc_review(SharedString::from(review.to_string().as_str()));
+
+    log::info!("[Filter] showing {} / {} txns  (status='{}' from='{}' to='{}' bank='{}')",
+        filtered.len(), st.transactions.iter().filter(|t| !t.is_opening_balance).count(),
+        st.active_filter, st.date_from, st.date_to, st.bank_filter);
+}
+
+// ── Compute FY date range (Indian FY: Apr 1 → Mar 31) ────────────────────────
+#[cfg(feature = "slint-ui")]
+fn fy_range(current: bool) -> (String, String) {
+    // Use today from system time; approximate year via a fixed reference
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // Seconds since epoch → rough date (leap years ignored, close enough for FY)
+    let days = (now / 86400) as i64;
+    let year = 1970 + days / 365;
+    let day_of_year = days % 365;
+    // April 1 = day 90 (approx)
+    let (fy_start_year, fy_end_year) = if day_of_year >= 90 {
+        (year, year + 1)   // Apr..Dec → FY start = this year
+    } else {
+        (year - 1, year)   // Jan..Mar → FY start = last year
+    };
+    if current {
+        (format!("01/04/{}", fy_start_year), format!("31/03/{}", fy_end_year))
+    } else {
+        (format!("01/04/{}", fy_start_year - 1), format!("31/03/{}", fy_start_year))
+    }
+}
+
+// ── Compute today / this-month / last-month date ranges ──────────────────────
+#[cfg(feature = "slint-ui")]
+fn preset_range(preset: &str) -> (String, String) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days_since_epoch = (now / 86400) as i64;
+    // Gregorian date calculation (Zeller-ish, accurate enough for presets)
+    let z = days_since_epoch + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    match preset {
+        "today" => {
+            let today = format!("{:02}/{:02}/{}", d, m, y);
+            (today.clone(), today)
+        }
+        "this_month" => {
+            let last_day = days_in_month(m as u32, y as i32);
+            (format!("01/{:02}/{}", m, y), format!("{:02}/{:02}/{}", last_day, m, y))
+        }
+        "last_month" => {
+            let (pm, py) = if m == 1 { (12i64, y - 1) } else { (m - 1, y) };
+            let last_day = days_in_month(pm as u32, py as i32);
+            (format!("01/{:02}/{}", pm, py), format!("{:02}/{:02}/{}", last_day, pm, py))
+        }
+        "current_fy" => fy_range(true),
+        "prev_fy"    => fy_range(false),
+        _            => (String::new(), String::new()),
+    }
+}
+
+#[cfg(feature = "slint-ui")]
+fn days_in_month(month: u32, year: i32) -> u32 {
+    match month {
+        1|3|5|7|8|10|12 => 31,
+        4|6|9|11 => 30,
+        2 => if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 29 } else { 28 },
+        _ => 30,
+    }
+}
+
+#[cfg(feature = "slint-ui")]
+fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Option<f64>) {
+    use analytics::{compute, unique_banks, unique_vendors, unique_heads, fmt_amt};
+
+    let data = compute(txns, opening_bal);
+    let s = &data.summary;
+
+    // Summary cards
+    h.set_dash_credits(SharedString::from(fmt_amt(Some(s.total_credit)).as_str()));
+    h.set_dash_debits(SharedString::from(fmt_amt(Some(s.total_debit)).as_str()));
+    h.set_dash_net_flow(SharedString::from(fmt_amt(Some(s.net_flow)).as_str()));
+    h.set_dash_vendors(SharedString::from(s.vendor_count.to_string().as_str()));
+    h.set_dash_txn_count(SharedString::from(s.txn_count.to_string().as_str()));
+    h.set_dash_top_expense(SharedString::from(s.top_expense_head.as_str()));
+    h.set_dash_top_exp_amt(SharedString::from(
+        if s.top_expense_amt > 0.0 { fmt_amt(Some(s.top_expense_amt)) } else { String::new() }
+    .as_str()));
+    h.set_dash_has_data(s.txn_count > 0);
+
+    // Insights
+    let ins = &data.insights;
+    h.set_dash_ins_max_dr(SharedString::from(ins.max_dr_amt.as_str()));
+    h.set_dash_ins_max_dr_narr(SharedString::from(ins.max_dr_narr.as_str()));
+    h.set_dash_ins_max_cr(SharedString::from(ins.max_cr_amt.as_str()));
+    h.set_dash_ins_max_cr_narr(SharedString::from(ins.max_cr_narr.as_str()));
+    h.set_dash_ins_avg_dr(SharedString::from(ins.avg_dr.as_str()));
+    h.set_dash_ins_avg_cr(SharedString::from(ins.avg_cr.as_str()));
+    h.set_dash_ins_dr_count(SharedString::from(ins.dr_count.as_str()));
+    h.set_dash_ins_cr_count(SharedString::from(ins.cr_count.as_str()));
+    h.set_dash_ins_freq_vendor(SharedString::from(ins.freq_vendor.as_str()));
+
+    // Monthly chart — normalise bars
+    let max_monthly = data.monthly.credits.iter().chain(data.monthly.debits.iter())
+        .cloned().fold(0.0f64, f64::max);
+    let month_bars: Vec<DashMonthBar> = data.monthly.labels.iter()
+        .enumerate()
+        .map(|(i, lbl)| {
+            let cr = data.monthly.credits.get(i).cloned().unwrap_or(0.0);
+            let dr = data.monthly.debits.get(i).cloned().unwrap_or(0.0);
+            let scale = if max_monthly > 0.0 { max_monthly } else { 1.0 };
+            DashMonthBar {
+                label:      SharedString::from(lbl.as_str()),
+                credit_h:   (cr / scale) as f32,
+                debit_h:    (dr / scale) as f32,
+                credit_str: SharedString::from(fmt_amt(Some(cr)).as_str()),
+                debit_str:  SharedString::from(fmt_amt(Some(dr)).as_str()),
+            }
+        })
+        .collect();
+    h.set_dash_chart_monthly(slint::ModelRc::new(slint::VecModel::from(month_bars)));
+
+    // Expense breakdown — normalise widths
+    let max_exp = data.expenses.iter().map(|e| e.amount).fold(0.0f64, f64::max);
+    let exp_bars: Vec<DashExpBar> = data.expenses.iter().map(|e| DashExpBar {
+        label:      SharedString::from(e.label.as_str()),
+        w:          (if max_exp > 0.0 { e.amount / max_exp } else { 0.0 }) as f32,
+        amount_str: SharedString::from(fmt_amt(Some(e.amount)).as_str()),
+        color_idx:  e.color_idx,
+        pct:        e.pct,
+    }).collect();
+    h.set_dash_chart_expenses(slint::ModelRc::new(slint::VecModel::from(exp_bars)));
+
+    // Cash flow
+    let cf: Vec<DashCashPt> = data.cashflow.iter().map(|p| DashCashPt { h: p.norm }).collect();
+    h.set_dash_chart_cashflow(slint::ModelRc::new(slint::VecModel::from(cf)));
+
+    // Vendors — normalise widths
+    let max_vendor = data.vendors.iter().map(|v| v.debit.max(v.credit)).fold(0.0f64, f64::max);
+    let vbars: Vec<DashVendorBar> = data.vendors.iter().map(|v| {
+        let scale = if max_vendor > 0.0 { max_vendor } else { 1.0 };
+        DashVendorBar {
+            label:      SharedString::from(v.name.as_str()),
+            debit_w:    (v.debit  / scale) as f32,
+            credit_w:   (v.credit / scale) as f32,
+            debit_str:  SharedString::from(
+                if v.debit  > 0.0 { analytics::fmt_short_pub(v.debit)  } else { String::new() }.as_str()),
+            credit_str: SharedString::from(
+                if v.credit > 0.0 { analytics::fmt_short_pub(v.credit) } else { String::new() }.as_str()),
+        }
+    }).collect();
+    h.set_dash_chart_vendors(slint::ModelRc::new(slint::VecModel::from(vbars)));
+
+    // Filter dropdown options
+    let mut banks_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
+        .chain(unique_banks(txns).into_iter().map(|s| SharedString::from(s.as_str())))
+        .collect();
+    let mut vendor_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Vendors"))
+        .chain(unique_vendors(txns).into_iter().map(|s| SharedString::from(s.as_str())))
+        .collect();
+    let mut head_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Expense Heads"))
+        .chain(unique_heads(txns).into_iter().map(|s| SharedString::from(s.as_str())))
+        .collect();
+    let _ = (banks_opts.len(), vendor_opts.len(), head_opts.len());
+
+    h.set_dash_filter_banks(slint::ModelRc::new(slint::VecModel::from(banks_opts)));
+    h.set_dash_filter_vendors(slint::ModelRc::new(slint::VecModel::from(vendor_opts)));
+    h.set_dash_filter_heads(slint::ModelRc::new(slint::VecModel::from(head_opts)));
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -58,7 +364,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Bank Statement Processor starting…");
 
-    // Database (non-fatal if it fails — parser still works)
     let db_path = {
         let mut p = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
         p.pop();
@@ -75,11 +380,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let app = AppWindow::new()?;
 
-        // ── AppState shared between callbacks ─────────────────────────────────
+        // DEV: auto-login + auto-load test file for dashboard verification
+        app.set_logged_in(true);
+        app.set_start_dashboard(true);
+
+        // DEV: auto-load HDFC test file to show dashboard with data
+        {
+            let test_path = std::path::PathBuf::from(
+                "C:/Users/ADMIN/Desktop/myproject/bank-statement-processing/assets/HDFC.xls"
+            );
+            if test_path.exists() {
+                match parser::excel_parser::parse_excel_file(&test_path) {
+                    Ok(r) => {
+                        let real: Vec<&parser::Transaction> = r.transactions.iter()
+                            .filter(|t| !t.is_opening_balance).collect();
+                        let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
+                        let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
+                        let bank_set: std::collections::BTreeSet<&String> =
+                            real.iter().map(|t| &t.bank_name).collect();
+                        let row_models: Vec<TxnRow> = real.iter().map(|t| {
+                            let row_color: i32 = match t.status {
+                                parser::TransactionStatus::NeedsReview => 3,
+                                parser::TransactionStatus::Suspense    => 4,
+                                parser::TransactionStatus::Manual      => 6,
+                                _ if t.dup_flag => 5,
+                                parser::TransactionStatus::Classified  => 1,
+                                _ => 0,
+                            };
+                            TxnRow {
+                                bank_name:    SharedString::from(t.bank_name.as_str()),
+                                account_no:   SharedString::from(t.account_no.as_str()),
+                                date:         SharedString::from(t.date.as_str()),
+                                narration:    SharedString::from(t.narration.chars().take(80).collect::<String>().as_str()),
+                                ref_no:       SharedString::from(t.reference.as_str()),
+                                debit:        SharedString::from(fmt_cell(t.debit).as_str()),
+                                credit:       SharedString::from(fmt_cell(t.credit).as_str()),
+                                balance:      SharedString::from(fmt_cell(t.balance).as_str()),
+                                vendor:       SharedString::from(t.vendor.as_str()),
+                                ledger:       SharedString::from(t.account_head.as_str()),
+                                expense_head: SharedString::from(""),
+                                status_text:  SharedString::from(t.status.to_string().as_str()),
+                                tags:         SharedString::from(""),
+                                review:       SharedString::from(""),
+                                row_color,
+                                has_gst: false, has_tax: false, has_dup_tag: t.dup_flag,
+                            }
+                        }).collect();
+                        let mut bank_names: Vec<SharedString> =
+                            std::iter::once(SharedString::from("All Banks"))
+                            .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
+                            .collect();
+                        app.set_transaction_rows(
+                            slint::ModelRc::new(slint::VecModel::from(row_models)));
+                        app.set_bank_names(
+                            slint::ModelRc::new(slint::VecModel::from(bank_names)));
+                        app.set_dash_bank_name(SharedString::from(r.bank_name.as_str()));
+                        app.set_dash_opening(SharedString::from(
+                            ui::AppState::fmt_amount(r.opening_balance).as_str()));
+                        app.set_dash_closing(SharedString::from(
+                            ui::AppState::fmt_amount(r.closing_balance).as_str()));
+                        app.set_dash_credits(SharedString::from(
+                            ui::AppState::fmt_amount(Some(total_cr)).as_str()));
+                        app.set_dash_debits(SharedString::from(
+                            ui::AppState::fmt_amount(Some(total_dr)).as_str()));
+                        app.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
+                        let cnt = real.len().to_string();
+                        app.set_fc_all(SharedString::from(cnt.as_str()));
+                        app.set_status_file(SharedString::from("HDFC.xls"));
+                        push_dashboard(&app, &r.transactions, r.opening_balance);
+                        log::info!("DEV: auto-loaded {} HDFC transactions", real.len());
+                    }
+                    Err(e) => log::warn!("DEV auto-load failed: {}", e),
+                }
+            }
+        }
+
         let app_state: Arc<Mutex<ui::AppState>> =
             Arc::new(Mutex::new(ui::AppState::default()));
 
-        // ── Login callback ────────────────────────────────────────────────────
+        // ── Login ─────────────────────────────────────────────────────────────
         {
             let handle      = app.as_weak();
             let login_state = Arc::new(Mutex::new(LoginState::new()));
@@ -119,13 +498,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        // ── Load File callback ────────────────────────────────────────────────
+        // ── Load File ─────────────────────────────────────────────────────────
         {
             let handle     = app.as_weak();
             let state_ref  = app_state.clone();
 
             app.on_do_load_file(move || {
-                // 1. Native file picker
                 let path = match rfd::FileDialog::new()
                     .set_title("Open Bank Statement")
                     .add_filter("Bank Statements", &["pdf", "xlsx", "xls", "xlsm"])
@@ -134,7 +512,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .pick_file()
                 {
                     Some(p) => p,
-                    None    => return, // user cancelled
+                    None    => return,
                 };
 
                 let h = match handle.upgrade() { Some(h) => h, None => return };
@@ -150,15 +528,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .to_lowercase();
 
                 log::info!("Opening: {} (ext={})", file_name, ext);
-
-                // Show the filename immediately so the user knows something is happening
                 h.set_status_file(SharedString::from(file_name.as_str()));
                 h.set_status_bank(SharedString::from("Parsing…"));
 
-                // 2. Parse the file
                 let parse_result: Option<parser::ParseResult> =
                     if ["xlsx", "xls", "xlsm"].contains(&ext.as_str()) {
-                        // ── Excel ──────────────────────────────────────────────
                         match parser::excel_parser::parse_excel_file(&path) {
                             Ok(r) => {
                                 log::info!("Excel OK: {} rows", r.transactions.len());
@@ -171,39 +545,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     } else if ext == "pdf" {
-                        // ── PDF — two-stage parsing ────────────────────────────
-                        //
-                        // Stage 1: extract text lines as fixed-width rows (all X=0)
-                        //   → try FW format detection → extract_fw_transactions
-                        //
-                        // Stage 2 (fallback): feed raw text to parse_ocr_text
-                        //   → date-anchored line-by-line parsing; works when FW fails.
-                        //
-                        // NOTE: lopdf gives no X/Y positions.  Column-based PDFs
-                        // (HDFC, SBI, ICICI) need pdfium-render for accurate column
-                        // detection — Phase 5.
-
-                        // ── Stage 1: structured row parsing ───────────────────
+                        // Stage 1: structured row parsing
                         let stage1 = match parser::text_extractor::extract_pages(&path) {
                             Ok(rows) => {
-                                println!("[PDF] Stage-1 extract_pages → {} rows", rows.len());
-                                if rows.is_empty() {
-                                    println!("[PDF] Stage-1: 0 rows — lopdf extracted no text");
-                                    None
-                                } else {
-                                    // Print first 5 rows for inspection
-                                    for (i, row) in rows.iter().take(5).enumerate() {
-                                        let txt: Vec<&str> = row.iter().map(|it| it.text.as_str()).collect();
-                                        println!("[PDF] row[{}]: {:?}", i, txt.join(" | "));
-                                    }
-                                    let r = parser::pdf_parser::parse_pdf_rows(rows, &file_name);
-                                    println!("[PDF] Stage-1 parse_pdf_rows → {:?}",
-                                        r.as_ref().map(|pr| pr.transactions.len()));
-                                    r
-                                }
+                                if rows.is_empty() { None }
+                                else { parser::pdf_parser::parse_pdf_rows(rows, &file_name) }
                             }
                             Err(e) => {
-                                println!("[PDF] Stage-1 extract_pages error: {}", e);
                                 log::error!("PDF extract error: {}", e);
                                 None
                             }
@@ -212,61 +560,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if stage1.is_some() {
                             stage1
                         } else {
-                            // ── Stage 2: OCR-text fallback ─────────────────────
-                            println!("[PDF] Stage-1 returned None → trying OCR text fallback");
+                            // Stage 2a: OCR text parsing
                             let full_text = parser::text_extractor::extract_full_text(&path);
-                            println!("[PDF] Stage-2 full_text: {} chars, first 300: {:?}",
-                                full_text.len(),
-                                &full_text.chars().take(300).collect::<String>());
-
                             if full_text.trim().is_empty() {
-                                println!("[PDF] Stage-2: empty text — likely scanned PDF");
                                 h.set_status_bank(SharedString::from(
-                                    "Scanned PDF — OCR not yet supported in Phase 4",
+                                    "Scanned PDF — OCR not yet supported",
                                 ));
                                 return;
                             }
 
-                            // Stage 2a: plain OCR parsing (works when date + amounts on same line)
                             let ocr = parser::ocr_parser::parse_ocr_text(&full_text, &file_name);
                             let real_count = ocr.transactions.iter()
                                 .filter(|t| !t.is_opening_balance)
                                 .count();
-                            println!("[PDF] Stage-2a parse_ocr_text → {} real transactions", real_count);
 
                             if real_count > 0 {
                                 Some(ocr)
                             } else {
-                                // Stage 2b: multi-line preprocessor (BOM, SBI, Mahanagar style)
-                                // Each transaction spans multiple lines; preprocess into
-                                // "DATE narration AMT BAL" single-line format, then re-parse.
+                                // Stage 2b: multiline preprocessor
                                 let preprocessed =
                                     parser::ocr_parser::preprocess_multiline(&full_text);
-                                println!("[PDF] Stage-2b preprocessed: {} lines",
-                                    preprocessed.lines().count());
                                 if !preprocessed.trim().is_empty() {
-                                    // Print first 5 preprocessed lines for inspection
-                                    for (i, l) in preprocessed.lines().take(5).enumerate() {
-                                        println!("[PDF]   pre[{}]: {}", i, l);
-                                    }
                                     let ml = parser::ocr_parser::parse_ocr_text(
                                         &preprocessed, &file_name,
                                     );
                                     let ml_count = ml.transactions.iter()
                                         .filter(|t| !t.is_opening_balance)
                                         .count();
-                                    println!("[PDF] Stage-2b multiline → {} real transactions", ml_count);
-                                    if ml_count > 0 {
-                                        Some(ml)
-                                    } else {
-                                        println!("[PDF] All stages failed — PDF may use embedded/unreadable fonts");
+                                    if ml_count > 0 { Some(ml) } else {
                                         h.set_status_bank(SharedString::from(
-                                            "PDF font not readable by lopdf — needs pdfium (Phase 5)",
+                                            "No transactions found — PDF may use embedded fonts",
                                         ));
                                         return;
                                     }
                                 } else {
-                                    println!("[PDF] Stage-2b: no preprocessed lines");
                                     h.set_status_bank(SharedString::from(
                                         "No transactions found — PDF may use embedded fonts",
                                     ));
@@ -288,7 +615,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                // 3. Compute summary statistics
+                // ── Build summary statistics ───────────────────────────────────
                 let real: Vec<&parser::Transaction> = result
                     .transactions
                     .iter()
@@ -298,51 +625,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
                 let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
 
+                // Period (first–last date)
+                let dates: Vec<&str> = real.iter()
+                    .filter(|t| !t.date.is_empty())
+                    .map(|t| t.date.as_str())
+                    .collect();
+                let period = if dates.len() >= 2 {
+                    format!("{} – {}", dates[0], dates[dates.len() - 1])
+                } else if dates.len() == 1 {
+                    dates[0].to_string()
+                } else {
+                    "—".to_string()
+                };
+
+                // Counts
+                let unreviewed_cnt = real.iter()
+                    .filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed))
+                    .count();
+                let credit_cnt = real.iter().filter(|t| t.credit.is_some()).count();
+                let debit_cnt  = real.iter().filter(|t| t.debit.is_some()).count();
+
+                // Calculated closing balance
+                let calc_closing = match result.opening_balance {
+                    Some(ob) => Some((ob + total_cr - total_dr).round() / 1.0),
+                    None     => None,
+                };
+                let has_mismatch = match (result.closing_balance, calc_closing) {
+                    (Some(stated), Some(calc)) => (stated - calc).abs() >= 0.5,
+                    _ => false,
+                };
+                let mismatch_str = if has_mismatch {
+                    match (result.closing_balance, calc_closing) {
+                        (Some(stated), Some(calc)) => {
+                            format!("Diff: {}", ui::fmt_inr((stated - calc).abs()))
+                        }
+                        _ => String::new(),
+                    }
+                } else {
+                    String::new()
+                };
+
                 log::info!(
                     "Summary: bank='{}' txns={} dr={:.2} cr={:.2} ob={:?} cb={:?}",
                     result.bank_name, real.len(), total_dr, total_cr,
                     result.opening_balance, result.closing_balance
                 );
 
-                // Diagnostic: confirm we reached model-building
-                println!("[UI] Building table model: bank='{}' txns={} ob={:?} cb={:?}",
-                    result.bank_name, real.len(),
-                    result.opening_balance, result.closing_balance);
-
-                // 4. Build [[StandardListViewItem]] table model
-                //    Outer model: each element is one row (ModelRc<StandardListViewItem>)
-                //    Inner model: each element is one cell (StandardListViewItem { text })
-                let row_models: Vec<slint::ModelRc<slint::StandardListViewItem>> = real
+                // ── Build TxnRow table rows ───────────────────────────────────
+                let mut bank_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                let row_models: Vec<TxnRow> = real
                     .iter()
                     .map(|t| {
-                        let narration_display: String =
-                            t.narration.chars().take(70).collect();
-
-                        // StandardListViewItem is #[non_exhaustive] — use From<&str>
-                        let cells: Vec<slint::StandardListViewItem> = vec![
-                            slint::StandardListViewItem::from(t.date.as_str()),
-                            slint::StandardListViewItem::from(narration_display.as_str()),
-                            slint::StandardListViewItem::from(fmt_cell(t.debit).as_str()),
-                            slint::StandardListViewItem::from(fmt_cell(t.credit).as_str()),
-                            slint::StandardListViewItem::from(fmt_cell(t.balance).as_str()),
-                            slint::StandardListViewItem::from(t.reference.as_str()),
-                        ];
-                        slint::ModelRc::new(slint::VecModel::from(cells))
+                        bank_set.insert(t.bank_name.clone());
+                        let narr: String = t.narration.chars().take(80).collect();
+                        let has_gst = t.tags.iter().any(|tag| tag.to_uppercase().contains("GST"));
+                        let has_tax = t.tags.iter().any(|tag| tag.to_uppercase().contains("TAX"));
+                        let has_dup = t.tags.iter().any(|tag| tag.to_uppercase().contains("DUP")) || t.dup_flag;
+                        let row_color: i32 = match t.status {
+                            parser::TransactionStatus::NeedsReview => 3,
+                            parser::TransactionStatus::Suspense    => 4,
+                            parser::TransactionStatus::Manual      => 6,
+                            _ if t.dup_flag                        => 5,
+                            parser::TransactionStatus::Classified  => {
+                                if t.confidence >= 0.7 { 1 } else { 2 }
+                            }
+                            _ => 0,
+                        };
+                        TxnRow {
+                            bank_name:    SharedString::from(t.bank_name.as_str()),
+                            account_no:   SharedString::from(t.account_no.as_str()),
+                            date:         SharedString::from(t.date.as_str()),
+                            narration:    SharedString::from(narr.as_str()),
+                            ref_no:       SharedString::from(t.reference.as_str()),
+                            debit:        SharedString::from(fmt_cell(t.debit).as_str()),
+                            credit:       SharedString::from(fmt_cell(t.credit).as_str()),
+                            balance:      SharedString::from(fmt_cell(t.balance).as_str()),
+                            vendor:       SharedString::from(t.vendor.as_str()),
+                            ledger:       SharedString::from(t.account_head.as_str()),
+                            expense_head: SharedString::from(""),
+                            status_text:  SharedString::from(t.status.to_string().as_str()),
+                            tags:         SharedString::from(t.tags.join(" ").as_str()),
+                            review:       SharedString::from(""),
+                            row_color,
+                            has_gst,
+                            has_tax,
+                            has_dup_tag: has_dup,
+                        }
                     })
                     .collect();
 
-                let table_model =
-                    slint::ModelRc::new(slint::VecModel::from(row_models));
+                let mut bank_names: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
+                    .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
+                    .collect();
+                let _ = bank_names.len(); // suppress unused
 
-                println!("[UI] Pushing {} row models to Slint set_transaction_rows", real.len());
+                let table_model = slint::ModelRc::new(slint::VecModel::from(row_models));
+                let banks_model = slint::ModelRc::new(slint::VecModel::from(bank_names));
 
-                // 5. Push everything to the Slint UI
+                // ── Push to Slint UI ───────────────────────────────────────────
                 h.set_transaction_rows(table_model);
-
+                h.set_bank_names(banks_model);
                 h.set_status_file(SharedString::from(file_name.as_str()));
                 h.set_status_bank(SharedString::from(result.bank_name.as_str()));
-                h.set_dash_bank_name(SharedString::from(result.bank_name.as_str()));
 
+                // Basic summary
+                h.set_dash_bank_name(SharedString::from(result.bank_name.as_str()));
                 h.set_dash_opening(SharedString::from(
                     ui::AppState::fmt_amount(result.opening_balance).as_str(),
                 ));
@@ -355,12 +742,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 h.set_dash_debits(SharedString::from(
                     ui::AppState::fmt_amount(Some(total_dr)).as_str(),
                 ));
-                h.set_dash_txn_count(SharedString::from(
-                    real.len().to_string().as_str(),
-                ));
-                h.set_dash_vendors(SharedString::from("—")); // Phase 7
+                h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
+                h.set_dash_vendors(SharedString::from("—"));
 
-                // Update in-memory app state
+                // Enhanced summary
+                h.set_dash_account_no(SharedString::from(result.account_no.as_str()));
+                h.set_dash_period(SharedString::from(period.as_str()));
+                h.set_dash_credit_count(SharedString::from(credit_cnt.to_string().as_str()));
+                h.set_dash_debit_count(SharedString::from(debit_cnt.to_string().as_str()));
+                h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
+                h.set_dash_suspense(SharedString::from("0"));
+                h.set_dash_needs_review(SharedString::from("0"));
+                h.set_dash_duplicates(SharedString::from("0"));
+                h.set_dash_gst_count(SharedString::from("0"));
+                h.set_dash_calc_closing(SharedString::from(
+                    ui::AppState::fmt_amount(calc_closing).as_str(),
+                ));
+                h.set_dash_has_mismatch(has_mismatch);
+                h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
+
+                // Update in-memory app state and reset filters on new file load
                 {
                     let mut st = state_ref.lock().unwrap();
                     st.bank_name       = result.bank_name.clone();
@@ -371,20 +772,333 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.total_debits    = total_dr;
                     st.total_credits   = total_cr;
                     st.txn_count       = real.len();
+                    st.unreviewed      = unreviewed_cnt;
+                    st.transactions    = result.transactions.clone();
+                    // Reset filters whenever a new file is loaded
+                    st.active_filter   = "all".to_string();
+                    st.date_from       = String::new();
+                    st.date_to         = String::new();
+                    st.bank_filter     = String::new();
                 }
+
+                // Build filter badge counts from the full transaction list
+                let [all_cnt, unreview_cnt2, susp_cnt, high_cnt, dup_cnt, gst_cnt, rev_cnt] =
+                    compute_filter_counts(&result.transactions);
+                h.set_fc_all(SharedString::from(all_cnt.to_string().as_str()));
+                h.set_fc_unreviewed(SharedString::from(unreview_cnt2.to_string().as_str()));
+                h.set_fc_suspense(SharedString::from(susp_cnt.to_string().as_str()));
+                h.set_fc_high(SharedString::from(high_cnt.to_string().as_str()));
+                h.set_fc_duplicates(SharedString::from(dup_cnt.to_string().as_str()));
+                h.set_fc_gst(SharedString::from(gst_cnt.to_string().as_str()));
+                h.set_fc_review(SharedString::from(rev_cnt.to_string().as_str()));
+
+                // ── Dashboard analytics ────────────────────────────────────────
+                let txns_all: Vec<parser::Transaction> = result.transactions.clone();
+                push_dashboard(&h, &txns_all, result.opening_balance);
 
                 log::info!("UI updated with {} transactions", real.len());
             });
         }
 
-        // ── Batch Folder callback (Phase 9) ───────────────────────────────────
+        // ── Stub callbacks for toolbar / footer actions ───────────────────────
         {
-            let handle = app.as_weak();
+            let h = app.as_weak();
             app.on_do_batch_folder(move || {
-                if let Some(h) = handle.upgrade() {
-                    log::info!("Batch Folder — Phase 9");
-                    let _ = h;
+                if let Some(h) = h.upgrade() { let _ = h; }
+                stub_callback("batch-folder");
+            });
+        }
+        {
+            app.on_do_new_client(|| stub_callback("new-client"));
+        }
+        {
+            app.on_do_auto_classify(|| stub_callback("auto-classify"));
+        }
+        {
+            app.on_do_ai_classify(|| stub_callback("ai-classify"));
+        }
+        {
+            app.on_do_view_rules(|| stub_callback("view-rules"));
+        }
+        {
+            app.on_do_import_history(|| stub_callback("import-history"));
+        }
+        {
+            app.on_do_import_ledgers(|| stub_callback("import-ledgers"));
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_filter_changed(move |f| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                st.active_filter = f.to_string();
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_date_filter_apply(move |from, to| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                st.date_from = from.to_string();
+                st.date_to   = to.to_string();
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_date_preset(move |preset| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                let (from, to) = preset_range(preset.as_str());
+                st.date_from = from;
+                st.date_to   = to;
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_bank_filter(move |bank| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                st.bank_filter = if bank == "All Banks" { String::new() } else { bank.to_string() };
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            app.on_do_export_excel(|| stub_callback("export-excel"));
+        }
+        {
+            app.on_do_export_tally(|| stub_callback("export-tally"));
+        }
+        {
+            app.on_do_export_accounting(|| stub_callback("export-accounting"));
+        }
+        {
+            app.on_do_reimport_excel(|| stub_callback("reimport-excel"));
+        }
+        {
+            app.on_do_reset_dedupe(|| stub_callback("reset-dedupe"));
+        }
+        {
+            app.on_do_reconcile(|| stub_callback("reconcile"));
+        }
+        {
+            app.on_do_batch_monitor(|| stub_callback("batch-monitor"));
+        }
+        {
+            app.on_do_audit_trail(|| stub_callback("audit-trail"));
+        }
+        {
+            app.on_do_settings(|| stub_callback("settings"));
+        }
+        {
+            app.on_do_add_row(|| stub_callback("add-row"));
+        }
+
+        // ── Row editing callbacks ─────────────────────────────────────────────
+
+        // Helper: convert visible row index (filtered) → absolute index in st.transactions
+        // We need this because the UI row idx is into the filtered list, not st.transactions.
+        fn visible_to_abs(st: &ui::AppState, vis_idx: usize) -> Option<usize> {
+            let mut vis = 0usize;
+            for (abs, t) in st.transactions.iter().enumerate() {
+                if t.is_opening_balance { continue; }
+                let pass = match st.active_filter.as_str() {
+                    "unreviewed"   => matches!(t.status, parser::TransactionStatus::Unreviewed),
+                    "suspense"     => matches!(t.status, parser::TransactionStatus::Suspense),
+                    "high"         => matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7,
+                    "duplicates"   => t.dup_flag,
+                    "gst"          => t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }),
+                    "needs_review" => matches!(t.status, parser::TransactionStatus::NeedsReview),
+                    _              => true,
+                };
+                if !pass { continue; }
+                // date filter
+                if !st.date_from.is_empty() || !st.date_to.is_empty() {
+                    let td = match parse_date_ymd(&t.date) { Some(d) => d, None => { vis += 1; if vis - 1 == vis_idx { return Some(abs); } continue; }};
+                    if !st.date_from.is_empty() { if let Some(fd) = parse_date_ymd(&st.date_from) { if td < fd { continue; } } }
+                    if !st.date_to.is_empty()   { if let Some(tod) = parse_date_ymd(&st.date_to)   { if td > tod { continue; } } }
                 }
+                if !st.bank_filter.is_empty() && t.bank_name != st.bank_filter { continue; }
+                if vis == vis_idx { return Some(abs); }
+                vis += 1;
+            }
+            None
+        }
+
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_row_click(move |idx| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+
+                if let Some(abs) = visible_to_abs(&st, idx as usize) {
+                    let t = &st.transactions[abs];
+                    h.set_edit_txn_idx(idx);
+                    h.set_edit_txn_bank(SharedString::from(t.bank_name.as_str()));
+                    h.set_edit_txn_date(SharedString::from(t.date.as_str()));
+                    h.set_edit_txn_narr(SharedString::from(t.narration.as_str()));
+                    h.set_edit_txn_dr(SharedString::from(fmt_cell(t.debit).as_str()));
+                    h.set_edit_txn_cr(SharedString::from(fmt_cell(t.credit).as_str()));
+                }
+                log::info!("[RowClick] vis_idx={}", idx);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_save_txn(move |idx, vendor, head, typ, learn| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+
+                if let Some(abs) = visible_to_abs(&st, idx as usize) {
+                    let t = &mut st.transactions[abs];
+                    if !vendor.is_empty() { t.vendor = vendor.to_string(); }
+                    if !head.is_empty()   { t.account_head = head.to_string(); }
+                    if !typ.is_empty() {
+                        t.txn_type = match typ.as_str() {
+                            "Receipt" => parser::VoucherType::Receipt,
+                            "Payment" => parser::VoucherType::Payment,
+                            "Contra"  => parser::VoucherType::Contra,
+                            _         => t.txn_type.clone(),
+                        };
+                    }
+                    t.status     = parser::TransactionStatus::Classified;
+                    t.confidence = 1.0;
+                    log::info!("[SaveTxn] abs={} vendor='{}' head='{}' type='{}' learn={}", abs, vendor, head, typ, learn);
+                }
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_delete_txn(move |idx| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+
+                if let Some(abs) = visible_to_abs(&st, idx as usize) {
+                    st.transactions.remove(abs);
+                    log::info!("[DeleteTxn] abs={} removed", abs);
+                }
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_mark_suspense(move |idx| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+
+                if let Some(abs) = visible_to_abs(&st, idx as usize) {
+                    st.transactions[abs].status = parser::TransactionStatus::Suspense;
+                    log::info!("[MarkSuspense] abs={}", abs);
+                }
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_add_txn(move |date, refno, narr, dr, cr, vendor, head, typ| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+
+                let debit_val  = dr.parse::<f64>().ok().filter(|v| *v > 0.0);
+                let credit_val = cr.parse::<f64>().ok().filter(|v| *v > 0.0);
+
+                let new_txn = parser::Transaction {
+                    id:          format!("manual-{}", st.transactions.len()),
+                    date:        date.to_string(),
+                    date_ts:     0,
+                    narration:   narr.to_string(),
+                    reference:   refno.to_string(),
+                    debit:       debit_val,
+                    credit:      credit_val,
+                    balance:     None,
+                    vendor:      vendor.to_string(),
+                    account_head: head.to_string(),
+                    txn_type:    match typ.as_str() {
+                        "Receipt" => parser::VoucherType::Receipt,
+                        "Payment" => parser::VoucherType::Payment,
+                        "Contra"  => parser::VoucherType::Contra,
+                        _         => parser::VoucherType::Unknown,
+                    },
+                    confidence:  1.0,
+                    status:      parser::TransactionStatus::Manual,
+                    tags:        vec![],
+                    bank_name:   st.bank_name.clone(),
+                    account_no:  st.account_no.clone(),
+                    is_opening_balance: false,
+                    dup_flag:    false,
+                    prev_balance: None,
+                    balance_ok:  None,
+                };
+                st.transactions.push(new_txn);
+                log::info!("[AddTxn] date='{}' narr='{}' dr={:?} cr={:?}", date, narr, debit_val, credit_val);
+                rebuild_rows(&h, &st);
+            });
+        }
+
+        {
+            app.on_do_pdf_pwd_confirm(|pwd| {
+                log::info!("[PdfPwd] password entered (len={})", pwd.len());
+            });
+        }
+        {
+            app.on_do_pdf_pwd_cancel(|| {
+                log::info!("[PdfPwd] cancelled");
+            });
+        }
+        {
+            app.on_do_ai_cancel(|| {
+                log::info!("[AICancel] user cancelled AI classification");
+            });
+        }
+
+        // ── Dashboard filter callback ──────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_dash_filter(move |from, to, bank, vendor, head| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                let txns      = st.transactions.clone();
+                let opening   = st.opening_balance;
+                drop(st);
+
+                // If all filters empty just re-use the full set
+                let filtered_txns: Vec<parser::Transaction> = if from.is_empty() && to.is_empty()
+                    && bank.is_empty() && vendor.is_empty() && head.is_empty()
+                {
+                    txns.clone()
+                } else {
+                    let filter = analytics::DashFilter {
+                        from:   from.as_str(),
+                        to:     to.as_str(),
+                        bank:   bank.as_str(),
+                        vendor: vendor.as_str(),
+                        head:   head.as_str(),
+                    };
+                    analytics::filter_txns(&txns, &filter)
+                        .into_iter().cloned().collect()
+                };
+
+                push_dashboard(&h, &filtered_txns, opening);
+                log::info!("[DashFilter] filtered to {} txns", filtered_txns.len());
             });
         }
 

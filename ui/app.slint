@@ -1,26 +1,29 @@
 // app.slint — Root window. Switches between LoginScreen and MainScreen.
 
 import { LoginScreen } from "login.slint";
-import { MainScreen }  from "main_screen.slint";
+import { MainScreen, TxnRow } from "main_screen.slint";
+import { DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 export component AppWindow inherits Window {
     title:            "A S Havaldar — Bank Statement Processor";
-    preferred-width:  1280px;
-    preferred-height: 800px;
-    min-width:        960px;
-    min-height:       600px;
+    preferred-width:  1440px;
+    preferred-height: 860px;
+    min-width:        1280px;
+    min-height:       720px;
 
     // ── Auth state ────────────────────────────────────────────────────────────
-    in-out property <bool>   logged-in:     false;
-    in-out property <string> login-error:   "";
-    in-out property <bool>   login-loading: false;
+    in-out property <bool>   logged-in:        false;
+    in-out property <string> login-error:      "";
+    in-out property <bool>   login-loading:    false;
+    in-out property <bool>   start-dashboard:  false;
 
     // ── File / bank status (set by Rust after parse) ──────────────────────────
     in property <string> status-bank: "";
     in property <string> status-file: "";
 
     // ── Transaction table (set by Rust after parse) ───────────────────────────
-    in property <[[StandardListViewItem]]> transaction-rows: [];
+    in property <[TxnRow]>  transaction-rows: [];
+    in property <[string]>  bank-names: ["All Banks"];
 
     // ── Dashboard summary (set by Rust after parse) ───────────────────────────
     in property <string> dash-bank-name:  "";
@@ -31,16 +34,113 @@ export component AppWindow inherits Window {
     in property <string> dash-txn-count:  "—";
     in property <string> dash-vendors:    "—";
 
-    // ── Client list (Phase 9) ─────────────────────────────────────────────────
+    // ── Enhanced summary panel ────────────────────────────────────────────────
+    in property <string> dash-client-name:   "";
+    in property <string> dash-account-no:    "";
+    in property <string> dash-period:        "—";
+    in property <string> dash-credit-count:  "—";
+    in property <string> dash-debit-count:   "—";
+    in property <string> dash-unreviewed:    "0";
+    in property <string> dash-suspense:      "0";
+    in property <string> dash-needs-review:  "0";
+    in property <string> dash-duplicates:    "0";
+    in property <string> dash-gst-count:     "0";
+    in property <string> dash-calc-closing:  "₹ —";
+    in property <bool>   dash-has-mismatch:  false;
+    in property <string> dash-mismatch:      "";
+
+    // ── Filter counts (set by Rust after parse) ───────────────────────────────
+    in property <string> fc-all:        "0";
+    in property <string> fc-unreviewed: "0";
+    in property <string> fc-suspense:   "0";
+    in property <string> fc-high:       "0";
+    in property <string> fc-duplicates: "0";
+    in property <string> fc-gst:        "0";
+    in property <string> fc-review:     "0";
+
+    // ── Client list ───────────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
+
+    // ── Edit Transaction (set by Rust when a row is selected) ─────────────────
+    in property <string> edit-txn-date:     "";
+    in property <string> edit-txn-narr:     "";
+    in property <string> edit-txn-dr:       "";
+    in property <string> edit-txn-cr:       "";
+    in property <string> edit-txn-bank:     "";
+    in property <int>    edit-txn-idx:      -1;
+
+    // ── Dashboard chart data ──────────────────────────────────────────────────
+    in property <string> dash-net-flow:        "₹ —";
+    in property <string> dash-top-expense:     "—";
+    in property <string> dash-top-exp-amt:     "";
+    in property <bool>   dash-has-data:        false;
+    in property <[DashMonthBar]>  dash-chart-monthly:  [];
+    in property <[DashExpBar]>    dash-chart-expenses: [];
+    in property <[DashCashPt]>    dash-chart-cashflow: [];
+    in property <[DashVendorBar]> dash-chart-vendors:  [];
+    in property <[string]> dash-filter-banks:   ["All Banks"];
+    in property <[string]> dash-filter-vendors: ["All Vendors"];
+    in property <[string]> dash-filter-heads:   ["All Expense Heads"];
+    in property <string> dash-ins-max-dr:      "—";
+    in property <string> dash-ins-max-dr-narr: "";
+    in property <string> dash-ins-max-cr:      "—";
+    in property <string> dash-ins-max-cr-narr: "";
+    in property <string> dash-ins-avg-dr:      "—";
+    in property <string> dash-ins-avg-cr:      "—";
+    in property <string> dash-ins-dr-count:    "";
+    in property <string> dash-ins-cr-count:    "";
+    in property <string> dash-ins-freq-vendor: "—";
+
+    // ── Toast / overlays ─────────────────────────────────────────────────────
+    in property <string> toast-msg:          "";
+    in property <int>    toast-kind:         0;
+    in property <bool>   ocr-visible:        false;
+    in property <string> ocr-msg:            "Initialising…";
+    in property <int>    ocr-pct:            0;
+    in property <bool>   ai-overlay-visible: false;
+    in property <string> ai-msg:             "Preparing…";
+    in property <int>    ai-pct:             0;
+    in property <bool>   pdf-pwd-visible:    false;
+    in property <string> pdf-pwd-prompt:     "";
 
     // ── Callbacks implemented in Rust ─────────────────────────────────────────
     callback do-login(string, string);
     callback do-load-file();
     callback do-batch-folder();
+    callback do-new-client();
+    callback do-auto-classify();
+    callback do-ai-classify();
+    callback do-view-rules();
+    callback do-import-history();
+    callback do-import-ledgers();
+    callback do-filter-changed(string);
+    callback do-date-filter-apply(string, string);
+    callback do-date-preset(string);
+    callback do-bank-filter(string);
+    callback do-export-excel();
+    callback do-export-tally();
+    callback do-export-accounting();
+    callback do-reimport-excel();
+    callback do-reset-dedupe();
+    callback do-reconcile();
+    callback do-batch-monitor();
+    callback do-audit-trail();
+    callback do-settings();
+    callback do-add-row();
+    // Row editing callbacks
+    callback do-row-click(int);
+    callback do-save-txn(int, string, string, string, bool);   // idx, vendor, head, type, learn
+    callback do-delete-txn(int);
+    callback do-mark-suspense(int);
+    callback do-add-txn(string, string, string, string, string, string, string, string); // date,ref,narr,dr,cr,vendor,head,type
+    callback do-pdf-pwd-confirm(string);
+    callback do-pdf-pwd-cancel();
+    callback do-ai-cancel();
+    callback do-dash-filter(string, string, string, string, string);
 
     // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
+        width: root.width; height: root.height;
         error-message: root.login-error;
         is-loading:    root.login-loading;
         attempt-login(email, password) => { root.do-login(email, password); }
@@ -48,19 +148,113 @@ export component AppWindow inherits Window {
 
     // ── Main screen ───────────────────────────────────────────────────────────
     if root.logged-in : MainScreen {
-        client-names:     root.client-names;
-        status-bank:      root.status-bank;
-        status-file:      root.status-file;
-        transaction-rows: root.transaction-rows;
-        dash-bank-name:   root.dash-bank-name;
-        dash-opening:     root.dash-opening;
-        dash-credits:     root.dash-credits;
-        dash-debits:      root.dash-debits;
-        dash-closing:     root.dash-closing;
-        dash-txn-count:   root.dash-txn-count;
-        dash-vendors:     root.dash-vendors;
-        logout       => { root.logged-in = false; root.login-error = ""; }
-        load-file    => { root.do-load-file();    }
-        batch-folder => { root.do-batch-folder(); }
+        width: root.width; height: root.height;
+        client-names:      root.client-names;
+        status-bank:       root.status-bank;
+        status-file:       root.status-file;
+        transaction-rows:  root.transaction-rows;
+        bank-names:        root.bank-names;
+
+        dash-bank-name:    root.dash-bank-name;
+        dash-opening:      root.dash-opening;
+        dash-credits:      root.dash-credits;
+        dash-debits:       root.dash-debits;
+        dash-closing:      root.dash-closing;
+        dash-txn-count:    root.dash-txn-count;
+        dash-vendors:      root.dash-vendors;
+
+        dash-client-name:  root.dash-client-name;
+        dash-account-no:   root.dash-account-no;
+        dash-period:       root.dash-period;
+        dash-credit-count: root.dash-credit-count;
+        dash-debit-count:  root.dash-debit-count;
+        dash-unreviewed:   root.dash-unreviewed;
+        dash-suspense:     root.dash-suspense;
+        dash-needs-review: root.dash-needs-review;
+        dash-duplicates:   root.dash-duplicates;
+        dash-gst-count:    root.dash-gst-count;
+        dash-calc-closing: root.dash-calc-closing;
+        dash-has-mismatch: root.dash-has-mismatch;
+        dash-mismatch:     root.dash-mismatch;
+
+        fc-all:            root.fc-all;
+        fc-unreviewed:     root.fc-unreviewed;
+        fc-suspense:       root.fc-suspense;
+        fc-high:           root.fc-high;
+        fc-duplicates:     root.fc-duplicates;
+        fc-gst:            root.fc-gst;
+        fc-review:         root.fc-review;
+
+        edit-txn-date:     root.edit-txn-date;
+        edit-txn-narr:     root.edit-txn-narr;
+        edit-txn-dr:       root.edit-txn-dr;
+        edit-txn-cr:       root.edit-txn-cr;
+        edit-txn-bank:     root.edit-txn-bank;
+        edit-txn-idx:      root.edit-txn-idx;
+
+        dash-net-flow:        root.dash-net-flow;
+        dash-top-expense:     root.dash-top-expense;
+        dash-top-exp-amt:     root.dash-top-exp-amt;
+        dash-has-data:        root.dash-has-data;
+        dash-chart-monthly:   root.dash-chart-monthly;
+        dash-chart-expenses:  root.dash-chart-expenses;
+        dash-chart-cashflow:  root.dash-chart-cashflow;
+        dash-chart-vendors:   root.dash-chart-vendors;
+        dash-filter-banks:    root.dash-filter-banks;
+        dash-filter-vendors:  root.dash-filter-vendors;
+        dash-filter-heads:    root.dash-filter-heads;
+        dash-ins-max-dr:      root.dash-ins-max-dr;
+        dash-ins-max-dr-narr: root.dash-ins-max-dr-narr;
+        dash-ins-max-cr:      root.dash-ins-max-cr;
+        dash-ins-max-cr-narr: root.dash-ins-max-cr-narr;
+        dash-ins-avg-dr:      root.dash-ins-avg-dr;
+        dash-ins-avg-cr:      root.dash-ins-avg-cr;
+        dash-ins-dr-count:    root.dash-ins-dr-count;
+        dash-ins-cr-count:    root.dash-ins-cr-count;
+        dash-ins-freq-vendor: root.dash-ins-freq-vendor;
+        dash-filter-changed(f, t, b, v, h) => { root.do-dash-filter(f, t, b, v, h); }
+
+        toast-msg:          root.toast-msg;
+        toast-kind:         root.toast-kind;
+        ocr-visible:        root.ocr-visible;
+        ocr-msg:            root.ocr-msg;
+        ocr-pct:            root.ocr-pct;
+        ai-overlay-visible: root.ai-overlay-visible;
+        ai-msg:             root.ai-msg;
+        ai-pct:             root.ai-pct;
+        pdf-pwd-visible:    root.pdf-pwd-visible;
+        pdf-pwd-prompt:     root.pdf-pwd-prompt;
+
+        logout              => { root.logged-in = false; root.login-error = ""; }
+        load-file           => { root.do-load-file();           }
+        batch-folder        => { root.do-batch-folder();        }
+        new-client          => { root.do-new-client();          }
+        auto-classify       => { root.do-auto-classify();       }
+        ai-classify         => { root.do-ai-classify();         }
+        view-rules          => { root.do-view-rules();          }
+        import-history      => { root.do-import-history();      }
+        import-ledgers      => { root.do-import-ledgers();      }
+        filter-changed(f)   => { root.do-filter-changed(f);     }
+        date-filter-apply(a,b) => { root.do-date-filter-apply(a, b); }
+        date-preset(p)      => { root.do-date-preset(p);        }
+        bank-filter-changed(b) => { root.do-bank-filter(b);     }
+        export-excel        => { root.do-export-excel();        }
+        export-tally        => { root.do-export-tally();        }
+        export-accounting   => { root.do-export-accounting();   }
+        reimport-excel      => { root.do-reimport-excel();      }
+        reset-dedupe        => { root.do-reset-dedupe();        }
+        reconcile           => { root.do-reconcile();           }
+        open-batch-monitor  => { root.do-batch-monitor();       }
+        open-audit-trail    => { root.do-audit-trail();         }
+        open-settings       => { root.do-settings();            }
+        add-row             => { root.do-add-row();             }
+        row-click(idx)      => { root.do-row-click(idx);        }
+        save-txn(i,v,h,t,l) => { root.do-save-txn(i,v,h,t,l); }
+        delete-txn(i)       => { root.do-delete-txn(i);        }
+        mark-suspense(i)    => { root.do-mark-suspense(i);      }
+        add-txn(d,r,n,dr,cr,v,h,t) => { root.do-add-txn(d,r,n,dr,cr,v,h,t); }
+        pdf-pwd-confirm(p) => { root.do-pdf-pwd-confirm(p); }
+        pdf-pwd-cancel     => { root.do-pdf-pwd-cancel();   }
+        ai-cancel          => { root.do-ai-cancel();        }
     }
 }

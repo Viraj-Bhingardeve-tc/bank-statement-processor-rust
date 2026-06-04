@@ -19,6 +19,15 @@ pub struct AppState {
     pub unreviewed:      usize,
     pub vendor_count:    usize,
     pub has_mismatch:    bool,
+
+    // Full transaction list for dashboard re-aggregation on filter change
+    pub transactions:    Vec<crate::parser::Transaction>,
+
+    // Active filter state — kept in sync with Slint UI
+    pub active_filter: String,   // "all" | "unreviewed" | "suspense" | "high" | "duplicates" | "gst" | "needs_review"
+    pub date_from:     String,   // DD/MM/YYYY
+    pub date_to:       String,   // DD/MM/YYYY
+    pub bank_filter:   String,   // "" means All Banks
 }
 
 impl AppState {

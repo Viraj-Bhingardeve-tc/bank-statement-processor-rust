@@ -15,25 +15,27 @@ export component LoginScreen inherits Rectangle {
     // ── Centered white card ───────────────────────────────────────────────────
     card := Rectangle {
         width:         380px;
-        height:        400px;
         x:             (parent.width  - self.width)  / 2;
         y:             (parent.height - self.height) / 2;
         background:    #FFFFFF;
         border-radius: 10px;
 
-        drop-shadow-blur:     24px;
-        drop-shadow-color:    #00000050;
+        drop-shadow-blur:     32px;
+        drop-shadow-color:    #00000047;
         drop-shadow-offset-x: 0px;
         drop-shadow-offset-y: 8px;
 
         VerticalBox {
-            padding:  36px;
+            padding-top:    36px;
+            padding-left:   40px;
+            padding-right:  40px;
+            padding-bottom: 32px;
             spacing:  12px;
 
             // ── Brand ─────────────────────────────────────────────────────────
             Text {
                 text:                "A S Havaldar";
-                font-size:           22px;
+                font-size:           20px;
                 font-weight:         800;
                 color:               #0D47A1;
                 horizontal-alignment: center;
@@ -50,13 +52,23 @@ export component LoginScreen inherits Rectangle {
             Rectangle { height: 1px; background: #BBDEFB; }
 
             // ── Inputs ────────────────────────────────────────────────────────
+            Text {
+                text: "WORK EMAIL";
+                font-size: 11px; font-weight: 600; color: #37474F;
+                letter-spacing: 0.5px;
+            }
             email-input := LineEdit {
-                placeholder-text: "Work email";
+                placeholder-text: "yourname@company.com";
                 enabled:          !root.is-loading;
                 // Tab / Enter moves focus to password
                 accepted => { pwd-input.focus(); }
             }
 
+            Text {
+                text: "THIS MONTH'S PASSWORD";
+                font-size: 11px; font-weight: 600; color: #37474F;
+                letter-spacing: 0.5px;
+            }
             pwd-input := LineEdit {
                 placeholder-text: "XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX";
                 input-type:       InputType.password;

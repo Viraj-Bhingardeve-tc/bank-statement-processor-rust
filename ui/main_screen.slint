@@ -1,333 +1,2129 @@
-// main_screen.slint — Main application window after login.
-// Phase 4: file picker wired, StandardTableView shows parsed transactions,
-//          summary panel shows live data from Rust parser.
+// main_screen.slint — Full restoration of the original Bank Statement Processor UI.
+// Colors match the original Electron app exactly.
 
-import { Button, TabWidget, VerticalBox, HorizontalBox, ComboBox,
-         StandardTableView } from "std-widgets.slint";
-import { DashboardScreen } from "dashboard.slint";
+import { Button, VerticalBox, HorizontalBox, ComboBox,
+         LineEdit, CheckBox, ScrollView, ListView } from "std-widgets.slint";
+import { DashboardScreen, DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
-// ── Reusable summary row ──────────────────────────────────────────────────────
-component SummaryRow inherits HorizontalBox {
-    in property <string> label:     "Label";
-    in property <string> value:     "—";
-    in property <color>  val-color: #37474F;
+// ── Transaction row data struct ────────────────────────────────────────────────
+export struct TxnRow {
+    bank-name:    string,
+    account-no:   string,
+    date:         string,
+    narration:    string,
+    ref-no:       string,
+    debit:        string,
+    credit:       string,
+    balance:      string,
+    vendor:       string,
+    ledger:       string,
+    expense-head: string,
+    status-text:  string,
+    tags:         string,
+    review:       string,
+    // 0=white 1=hi-green 2=med-yellow 3=review-red 4=suspense-purple 5=dup-pink 6=manual-blue
+    row-color:    int,
+    has-gst:      bool,
+    has-tax:      bool,
+    has-dup-tag:  bool,
+}
 
-    Text {
-        text:               root.label;
-        font-size:          11px;
-        color:              #546E7A;
-        horizontal-stretch: 1;
-        vertical-alignment: center;
+// ── Compact toolbar button (white bg, blue border — matches original .btn in toolbar) ─────
+component TBtn inherits Rectangle {
+    in property <string> text:    "";
+    in property <bool>   enabled: true;
+    in property <color>  bg:      #FFFFFF;
+    in property <color>  fg:      #0A1929;
+    callback clicked();
+
+    height: 28px; min-width: 58px;
+    background:    root.enabled ? root.bg : #FFFFFF28;
+    border-radius: 4px;
+    border-width:  1px;
+    border-color:  root.enabled ? #90CAF9 : #FFFFFF20;
+    opacity:       root.enabled ? 1.0 : 0.4;
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
     }
     Text {
-        text:                root.value;
-        font-size:           11px;
-        font-weight:         600;
-        color:               root.val-color;
-        horizontal-alignment: right;
-        vertical-alignment:  center;
+        text: root.text; font-size: 12px;
+        color: root.enabled ? root.fg : root.fg;
+        horizontal-alignment: center; vertical-alignment: center;
     }
 }
 
-// ── Main screen ───────────────────────────────────────────────────────────────
+// ── Date-preset quick button ───────────────────────────────────────────────────
+component QBtn inherits Rectangle {
+    in property <string> text:    "";
+    in property <bool>   active:  false;
+    in property <bool>   enabled: true;
+    callback clicked();
+
+    height: 24px; min-width: 62px;
+    background:    root.active ? #D4E8FF : #FFFFFF;
+    border-radius: 4px;
+    border-width:  1px;
+    border-color:  root.active ? #1565C0 : #B0C8E8;
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text; font-size: 11px;
+        color: root.active ? #1565C0 : (root.enabled ? #1565C0 : #90A8C0);
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// ── Transaction status filter button ──────────────────────────────────────────
+component FBtn inherits Rectangle {
+    in property <string> label:    "";
+    in property <string> count:    "";
+    in property <bool>   active:   false;
+    in property <color>  a-bg:     #1565C0;
+    in property <color>  a-fg:     white;
+    in property <color>  i-border: #90CAF9;
+    in property <color>  i-fg:     #555555;
+    callback clicked();
+
+    height: 22px; min-width: 50px;
+    background:    root.active ? root.a-bg : #FFFFFF;
+    border-radius: 3px;
+    border-width:  1px;
+    border-color:  root.active ? root.a-bg : root.i-border;
+
+    TouchArea { clicked => { root.clicked(); } }
+    HorizontalBox {
+        padding-left: 7px; padding-right: 7px;
+        padding-top: 0px; padding-bottom: 0px;
+        spacing: 3px; alignment: center;
+        Text {
+            text: root.label; font-size: 11px;
+            color: root.active ? root.a-fg : root.i-fg;
+            vertical-alignment: center;
+        }
+        if root.count != "" : Rectangle {
+            height: 16px; min-width: 20px;
+            background:    root.active ? #FFFFFF30 : #E8E8E8;
+            border-radius: 8px;
+            Text {
+                text: root.count; font-size: 10px;
+                color: root.active ? white : #37474F;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ── Custom tab button (on dark #0D47A1 background) ────────────────────────────
+component VTab inherits Rectangle {
+    in property <string> text:   "";
+    in property <bool>   active: false;
+    callback clicked();
+
+    height: 36px; min-width: 110px;
+    background: transparent; border-width: 0px;
+
+    // Active bottom border (3px, light blue)
+    Rectangle {
+        y: parent.height - 3px; height: 3px;
+        background: root.active ? #64B5F6 : transparent;
+    }
+    TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.text; font-size: 12px;
+        font-weight: 700;
+        color: root.active ? #FFFFFF : #90CAF9;
+        letter-spacing: 0.72px;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// ── Footer action button ───────────────────────────────────────────────────────
+component FootBtn inherits Rectangle {
+    in property <string> text:       "";
+    in property <bool>   enabled:    false;
+    in property <color>  bg:         #FFFFFF;
+    in property <color>  border-clr: #90CAF9;
+    in property <color>  fg:         #0A1929;
+    callback clicked();
+
+    height: 28px; min-width: 82px;
+    background:    root.enabled ? root.bg : #F5F5F5;
+    border-radius: 4px;
+    border-width:  1px;
+    border-color:  root.enabled ? root.border-clr : #E0E0E0;
+    opacity:       root.enabled ? 1.0 : 0.4;
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text; font-size: 12px;
+        color: root.enabled ? root.fg : #BDBDBD;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// ── Summary label / value row ──────────────────────────────────────────────────
+component SR inherits HorizontalBox {
+    in property <string> lbl:  "";
+    in property <string> val:  "\u{2014}";
+    in property <color>  vcol: #37474F;
+    padding: 0px; spacing: 0px; height: 18px;
+    Text {
+        text: root.lbl; font-size: 12px; color: #607D8B;
+        horizontal-stretch: 1; vertical-alignment: center;
+    }
+    Text {
+        text: root.val; font-size: 12px; font-weight: 600;
+        color: root.vcol; horizontal-alignment: right; vertical-alignment: center;
+    }
+}
+
+// ── Summary section title ──────────────────────────────────────────────────────
+component SDivider inherits VerticalBox {
+    in property <string> title: "";
+    padding: 0px; spacing: 2px; height: 22px;
+    Rectangle { height: 1px; background: #BBDEFB; }
+    Text {
+        text: root.title; font-size: 10px; font-weight: 700;
+        color: #1565C0; letter-spacing: 0.5px;
+    }
+}
+
+// ── Modal action button ────────────────────────────────────────────────────────
+component MBtn inherits Rectangle {
+    in property <string> text:    "";
+    in property <color>  bg:      #1565C0;
+    in property <color>  fg:      white;
+    in property <bool>   enabled: true;
+    callback clicked();
+
+    height: 32px; min-width: 80px;
+    background:    root.enabled ? root.bg : #F5F5F5;
+    border-radius: 4px;
+    border-width:  root.enabled ? 0px : 1px;
+    border-color:  #D0D0D0;
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text; font-size: 12px;
+        color: root.enabled ? root.fg : #BDBDBD;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// ── Modal header ───────────────────────────────────────────────────────────────
+component MHdr inherits Rectangle {
+    in property <string> title: "";
+    in property <color>  bg:    #FFFFFF;
+    callback close();
+
+    height: 46px; background: root.bg;
+    border-width: 0px;
+
+    // Bottom border only
+    Rectangle { y: parent.height - 1px; height: 1px; background: #EEEEEE; }
+
+    HorizontalBox {
+        padding-left: 18px; padding-right: 12px;
+        padding-top: 0px; padding-bottom: 0px;
+        Text {
+            text: root.title; font-size: 15px; font-weight: 700;
+            color: #0A1929; vertical-alignment: center; horizontal-stretch: 1;
+        }
+        Rectangle {
+            width: 28px; height: 28px; border-radius: 14px; background: transparent;
+            TouchArea { clicked => { root.close(); } }
+            Text {
+                text: "\u{2715}"; font-size: 22px; color: #AAAAAA;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ── Modal footer row (always right-aligned, matching original flex-end) ────────
+component MFtr inherits Rectangle {
+    height: 50px; background: #FFFFFF;
+    border-width: 0px;
+    // Top border only
+    Rectangle { y: 0; height: 1px; background: #EEEEEE; }
+    HorizontalBox {
+        padding-left: 18px; padding-right: 18px;
+        padding-top: 0px; padding-bottom: 0px;
+        spacing: 8px;
+        alignment: start;
+        // Auto stretch-spacer pushes all children right (flex-end equivalent)
+        Rectangle { horizontal-stretch: 1; }
+        @children
+    }
+}
+
+// ── Transaction table header ───────────────────────────────────────────────────
+component TxnHeader inherits Rectangle {
+    height: 32px; background: #1565C0;
+    Rectangle { y: 31px; height: 1px; background: #1976D2; }
+
+    HorizontalBox {
+        padding: 0px; spacing: 0px;
+        // Helper for column header cell
+        for col in [
+            {t: "Bank Name",          w: 88,  r: false},
+            {t: "Account No",         w: 88,  r: false},
+            {t: "Date",               w: 82,  r: false},
+            {t: "Narration",          w: 0,   r: false},
+            {t: "Ref",                w: 95,  r: false},
+            {t: "Debit",              w: 92,  r: true },
+            {t: "Credit",             w: 92,  r: true },
+            {t: "Balance",            w: 100, r: true },
+            {t: "Vendor / Customer",  w: 120, r: false},
+            {t: "Ledger for Posting", w: 120, r: false},
+            {t: "Expense Head",       w: 100, r: false},
+            {t: "Type / Status",      w: 75,  r: false},
+            {t: "Tags",               w: 65,  r: false},
+            {t: "Review",             w: 60,  r: false},
+        ] : Rectangle {
+            width:             col.w > 0 ? col.w * 1px : 0px;
+            horizontal-stretch: col.w == 0 ? 1.0 : 0.0;
+            border-width: 0px; border-color: transparent;
+            // Right separator
+            Rectangle { x: parent.width - 1px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text {
+                x: col.r ? 0px : 9px;
+                width: col.r ? parent.width - 9px : parent.width - 18px;
+                height: parent.height;
+                text: col.t; font-size: 12px; font-weight: 600;
+                color: #FFFFFF; letter-spacing: 0.2px;
+                horizontal-alignment: col.r ? right : left;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ── Custom transaction table row ───────────────────────────────────────────────
+component TxnTableRow inherits Rectangle {
+    in property <TxnRow> data;
+    in property <int>    row-idx;
+    in property <bool>   compact: false;
+    callback clicked(int);
+
+    height: root.compact ? 22px : 26px;
+    background:
+        root.data.row-color == 1 ? #E8F5E9 :
+        root.data.row-color == 2 ? #FFFDE7 :
+        root.data.row-color == 3 ? #FFEBEE :
+        root.data.row-color == 4 ? #F3E5F5 :
+        root.data.row-color == 5 ? #FCE4EC :
+        root.data.row-color == 6 ? #E3F2FD :
+        #FFFFFF;
+
+    // Bottom row separator
+    Rectangle { y: parent.height - 1px; height: 1px; background: #E3F2FD; }
+
+    ta := TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => { root.clicked(root.row-idx); }
+    }
+
+    HorizontalBox {
+        padding: 0px; spacing: 0px;
+
+        // Bank Name 88px
+        Rectangle { width: 88px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.bank-name; font-size: 11px; color: #555555;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Account No 88px
+        Rectangle { width: 88px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.account-no; font-size: 11px; color: #555555;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Date 82px
+        Rectangle { width: 82px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.date; font-size: 12px; color: #0A1929;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Narration stretch
+        Rectangle { horizontal-stretch: 1; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.narration; font-size: 12px; color: #0A1929;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Ref 95px
+        Rectangle { width: 95px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.ref-no; font-size: 11px; color: #546E7A;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Debit 92px right-aligned red
+        Rectangle { width: 92px; clip: true;
+            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+                   text: root.data.debit;
+                   font-size: 12px; font-weight: root.data.debit != "" ? 600 : 400;
+                   color: root.data.debit != "" ? #B71C1C : #CCCCCC;
+                   horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Credit 92px right-aligned green
+        Rectangle { width: 92px; clip: true;
+            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+                   text: root.data.credit;
+                   font-size: 12px; font-weight: root.data.credit != "" ? 600 : 400;
+                   color: root.data.credit != "" ? #1B5E20 : #CCCCCC;
+                   horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Balance 100px right-aligned blue
+        Rectangle { width: 100px; clip: true;
+            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+                   text: root.data.balance; font-size: 12px; font-weight: 600;
+                   color: #0D47A1;
+                   horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Vendor 120px
+        Rectangle { width: 120px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.vendor; font-size: 12px; color: #0D47A1; font-weight: 600;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Ledger 120px
+        Rectangle { width: 120px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.ledger; font-size: 12px; color: #0D47A1; font-weight: 600;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Expense Head 100px
+        Rectangle { width: 100px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.expense-head; font-size: 11px; color: #455A64;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Status 75px — chip rendering
+        Rectangle { width: 75px; clip: true;
+            HorizontalBox {
+                padding-left: 4px; padding-right: 4px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 2px; alignment: start;
+                if root.data.row-color == 1 : Rectangle {
+                    height: 14px; min-width: 34px; background: #C8E6C9;
+                    border-radius: 7px; border-width: 1px; border-color: #81C784;
+                    Text { text: "HIGH"; font-size: 9px; font-weight: 800; color: #1B5E20;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 3 : Rectangle {
+                    height: 14px; min-width: 42px; background: #FFCDD2;
+                    border-radius: 7px; border-width: 1px; border-color: #EF9A9A;
+                    Text { text: "REVIEW"; font-size: 9px; font-weight: 800; color: #B71C1C;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 4 : Rectangle {
+                    height: 14px; min-width: 56px; background: #E1BEE7;
+                    border-radius: 7px; border-width: 1px; border-color: #BA68C8;
+                    Text { text: "SUSPENSE"; font-size: 9px; font-weight: 800; color: #6A1B9A;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 5 : Rectangle {
+                    height: 14px; min-width: 30px; background: #FCE4EC;
+                    border-radius: 7px; border-width: 1px; border-color: #E91E63;
+                    Text { text: "DUP"; font-size: 9px; font-weight: 800; color: #880E4F;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 6 : Rectangle {
+                    height: 14px; min-width: 38px; background: #BBDEFB;
+                    border-radius: 7px; border-width: 1px; border-color: #64B5F6;
+                    Text { text: "MANUAL"; font-size: 9px; font-weight: 800; color: #0D47A1;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 0 : Text {
+                    text: root.data.status-text; font-size: 10px; color: #888888;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        // Tags 65px — GST/TAX/DUP badges
+        Rectangle { width: 65px; clip: true;
+            HorizontalBox {
+                padding-left: 3px; padding-right: 3px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 2px; alignment: start;
+                if root.data.has-gst : Rectangle {
+                    height: 14px; min-width: 26px; background: #C8E6C9;
+                    border-radius: 3px; border-width: 1px; border-color: #66BB6A;
+                    Text { text: "GST"; font-size: 9px; font-weight: 800; color: #1B5E20;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.has-tax : Rectangle {
+                    height: 14px; min-width: 26px; background: #FFE0B2;
+                    border-radius: 3px; border-width: 1px; border-color: #FFA726;
+                    Text { text: "TAX"; font-size: 9px; font-weight: 800; color: #BF360C;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.has-dup-tag : Rectangle {
+                    height: 14px; min-width: 26px; background: #FCE4EC;
+                    border-radius: 3px; border-width: 1px; border-color: #E91E63;
+                    Text { text: "DUP"; font-size: 9px; font-weight: 800; color: #880E4F;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+        // Review 60px
+        Rectangle { width: 60px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.review; font-size: 11px; color: #546E7A;
+                   vertical-alignment: center; overflow: elide; }
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MainScreen
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export component MainScreen inherits Rectangle {
+    background: #F0F7FF;
 
     // ── Callbacks ─────────────────────────────────────────────────────────────
     callback logout();
     callback load-file();
     callback batch-folder();
+    callback new-client();
+    callback auto-classify();
+    callback ai-classify();
+    callback view-rules();
+    callback import-history();
+    callback import-ledgers();
+    callback filter-changed(string);
+    callback date-filter-apply(string, string);
+    callback date-preset(string);
+    callback bank-filter-changed(string);
+    callback export-excel();
+    callback export-tally();
+    callback export-accounting();
+    callback reimport-excel();
+    callback reset-dedupe();
+    callback reconcile();
+    callback open-batch-monitor();
+    callback open-audit-trail();
+    callback open-settings();
+    callback add-row();
+    // Row editing
+    callback row-click(int);
+    callback save-txn(int, string, string, string, bool);
+    callback delete-txn(int);
+    callback mark-suspense(int);
+    callback add-txn(string, string, string, string, string, string, string, string);
 
-    // ── Input properties ──────────────────────────────────────────────────────
+    // ── Data ──────────────────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
+    in property <string>   status-bank:  "";
+    in property <string>   status-file:  "";
+    in property <[TxnRow]>  transaction-rows: [];
+    in property <[string]> bank-names: ["All Banks"];
 
-    in property <string> status-bank: "";
-    in property <string> status-file: "";
+    in property <string> dash-bank-name:    "";
+    in property <string> dash-opening:      "\u{20B9} \u{2014}";
+    in property <string> dash-credits:      "\u{20B9} \u{2014}";
+    in property <string> dash-debits:       "\u{20B9} \u{2014}";
+    in property <string> dash-closing:      "\u{20B9} \u{2014}";
+    in property <string> dash-txn-count:    "\u{2014}";
+    in property <string> dash-vendors:      "\u{2014}";
+    in property <string> dash-client-name:  "";
+    in property <string> dash-account-no:   "";
+    in property <string> dash-period:       "\u{2014}";
+    in property <string> dash-credit-count: "\u{2014}";
+    in property <string> dash-debit-count:  "\u{2014}";
+    in property <string> dash-unreviewed:   "0";
+    in property <string> dash-suspense:     "0";
+    in property <string> dash-needs-review: "0";
+    in property <string> dash-duplicates:   "0";
+    in property <string> dash-gst-count:    "0";
+    in property <string> dash-calc-closing: "\u{20B9} \u{2014}";
+    in property <bool>   dash-has-mismatch: false;
+    in property <string> dash-mismatch:     "";
 
-    // Transaction table rows  (each inner [StandardListViewItem] = one row)
-    in property <[[StandardListViewItem]]> transaction-rows: [];
+    // ── Dashboard chart data ──────────────────────────────────────────────────
+    in property <string> dash-net-flow:       "₹ —";
+    in property <string> dash-top-expense:    "—";
+    in property <string> dash-top-exp-amt:    "";
+    in property <bool>   dash-has-data:       false;
+    in property <[DashMonthBar]>  dash-chart-monthly:  [];
+    in property <[DashExpBar]>    dash-chart-expenses: [];
+    in property <[DashCashPt]>    dash-chart-cashflow: [];
+    in property <[DashVendorBar]> dash-chart-vendors:  [];
+    in property <[string]> dash-filter-banks:   ["All Banks"];
+    in property <[string]> dash-filter-vendors: ["All Vendors"];
+    in property <[string]> dash-filter-heads:   ["All Expense Heads"];
+    // Insight strip
+    in property <string> dash-ins-max-dr:      "—";
+    in property <string> dash-ins-max-dr-narr: "";
+    in property <string> dash-ins-max-cr:      "—";
+    in property <string> dash-ins-max-cr-narr: "";
+    in property <string> dash-ins-avg-dr:      "—";
+    in property <string> dash-ins-avg-cr:      "—";
+    in property <string> dash-ins-dr-count:    "";
+    in property <string> dash-ins-cr-count:    "";
+    in property <string> dash-ins-freq-vendor: "—";
+    // Dashboard filter callbacks
+    callback dash-filter-changed(string, string, string, string, string);
 
-    // Dashboard / summary data
-    in property <string> dash-bank-name:  "";
-    in property <string> dash-opening:    "₹ —";
-    in property <string> dash-credits:    "₹ —";
-    in property <string> dash-debits:     "₹ —";
-    in property <string> dash-closing:    "₹ —";
-    in property <string> dash-txn-count:  "—";
-    in property <string> dash-vendors:    "—";
+    in property <string> fc-all:        "0";
+    in property <string> fc-unreviewed: "0";
+    in property <string> fc-suspense:   "0";
+    in property <string> fc-high:       "0";
+    in property <string> fc-duplicates: "0";
+    in property <string> fc-gst:        "0";
+    in property <string> fc-review:     "0";
 
-    background: #F0F2F5;
+    // ── Toast / overlays ─────────────────────────────────────────────────────
+    in property <string> toast-msg:           "";
+    in property <int>    toast-kind:          0;  // 0=info, 1=success, 2=error, 3=warning
+    in property <bool>   ocr-visible:         false;
+    in property <string> ocr-msg:             "Initialising…";
+    in property <int>    ocr-pct:             0;
+    in property <bool>   ai-overlay-visible:  false;
+    in property <string> ai-msg:              "Preparing…";
+    in property <int>    ai-pct:              0;
+    in property <bool>   pdf-pwd-visible:     false;
+    in property <string> pdf-pwd-prompt:      "";
+    in-out property <string> pdf-pwd-input:   "";
+    callback pdf-pwd-confirm(string);
+    callback pdf-pwd-cancel();
+    callback ai-cancel();
 
-    VerticalBox {
-        padding: 0px;
-        spacing: 0px;
+    // ── Edit transaction (read-only display data set by Rust) ────────────────
+    in property <string> edit-txn-date: "";
+    in property <string> edit-txn-narr: "";
+    in property <string> edit-txn-dr:   "";
+    in property <string> edit-txn-cr:   "";
+    in property <string> edit-txn-bank: "";
+    in property <int>    edit-txn-idx:  -1;
 
-        // ── Toolbar ───────────────────────────────────────────────────────────
+    // ── Internal state ─────────────────────────────────────────────────────────
+    in-out property <bool>   show-dashboard: true;
+    in-out property <string> active-filter:  "all";
+    in-out property <string> date-from:      "";
+    in-out property <string> date-to:        "";
+    in-out property <string> active-preset:  "";
+    in-out property <string> modal-state:    "";
+    // Edit transaction editable fields
+    in-out property <string> etxn-vendor: "";
+    in-out property <string> etxn-head:   "";
+    in-out property <int>    etxn-type-idx: 0;
+    // Add transaction fields
+    in-out property <string> add-date:   "";
+    in-out property <string> add-ref:    "";
+    in-out property <string> add-narr:   "";
+    in-out property <string> add-dr:     "";
+    in-out property <string> add-cr:     "";
+    in-out property <string> add-vendor: "";
+    in-out property <string> add-head:   "";
+    in-out property <int>    add-type-idx: 0;
+    // Compact mode + double-click state
+    in-out property <bool>   compact-mode:      false;
+    in-out property <int>    dclick-pending-idx: -1;
+    // Export wizard state
+    in-out property <int>    wiz-step:      1;
+    in-out property <int>    wiz-sw-idx:    0;   // selected software 0=Tally 1=Zoho 2=QB 3=Odoo 4=Excel 5=XML
+    in-out property <string> wiz-company:   "";
+    in-out property <string> wiz-gstin:     "";
+    in-out property <string> wiz-from:      "";
+    in-out property <string> wiz-to:        "";
+
+    // ── MAIN LAYOUT ───────────────────────────────────────────────────────────
+    VerticalLayout {
+        padding: 0px; spacing: 0px;
+        width: root.width; height: root.height;
+
+        // ─────────────────────────── TOOLBAR ──────────────────────────────────
+        // background: #1565C0, box-shadow via drop-shadow, border-bottom: 2px solid #0D47A1
         Rectangle {
-            height:     48px;
-            background: #1565C0;
+            height: 50px; background: #1565C0;
+
+            // Bottom border
+            Rectangle {
+                y: 48px; height: 2px; background: #0D47A1;
+            }
 
             HorizontalBox {
-                padding-left:   14px;
-                padding-right:  14px;
-                padding-top:    0px;
-                padding-bottom: 0px;
-                spacing:        10px;
+                padding-left: 14px; padding-right: 14px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 10px; height: 48px;
 
-                Text {
-                    text:               "A S Havaldar";
-                    color:              #FFFFFF;
-                    font-size:          14px;
-                    font-weight:        700;
-                    vertical-alignment: center;
+                // Firm block — stacked vertically
+                VerticalBox {
+                    padding: 0px; spacing: 0px; alignment: center;
+                    min-width: 155px; max-width: 155px;
+                    Text {
+                        text: "A S Havaldar";
+                        color: #FFFFFF; font-size: 16px; font-weight: 800;
+                        letter-spacing: 0.4px;
+                    }
+                    Text {
+                        text: "Bank Statement Processor";
+                        color: #BBDEFB; font-size: 11px; font-weight: 500;
+                        letter-spacing: 0.3px;
+                    }
                 }
-                Text {
-                    text:               "—";
-                    color:              #90CAF9;
-                    font-size:          14px;
-                    vertical-alignment: center;
+
+                // Client dropdown
+                Text { text: "Client:"; font-size: 12px; color: #E3F2FD; vertical-alignment: center; font-weight: 600; }
+                ComboBox {
+                    model: root.client-names; current-index: 0;
+                    height: 28px; min-width: 160px;
                 }
-                // Bank name shown after load; falls back to app subtitle
-                Text {
-                    text: root.dash-bank-name != ""
-                        ? root.dash-bank-name
-                        : "Bank Statement Processor";
-                    color:              #90CAF9;
-                    font-size:          12px;
-                    vertical-alignment: center;
+                TBtn { text: "+ New Client"; clicked => { root.modal-state = "new-client"; } }
+
+                Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
+                TBtn { text: "Load Single File"; clicked => { root.load-file(); } }
+                TBtn { text: "Batch Process Folder"; enabled: false; clicked => { root.batch-folder(); } }
+
+                Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
+                TBtn {
+                    text: "Auto-Classify All";
+                    enabled: root.transaction-rows.length > 0;
+                    clicked => { root.auto-classify(); }
+                }
+                // AI Classify — purple gradient approximated as solid purple
+                TBtn {
+                    text: "\u{2605} AI Classify";
+                    bg: #6B2FB8; fg: #FFFFFF;
+                    enabled: root.transaction-rows.length > 0;
+                    clicked => { root.modal-state = "ai-consent"; }
+                }
+
+                Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
+                TBtn { text: "View Rules"; enabled: false; clicked => { root.modal-state = "view-rules"; } }
+                TBtn {
+                    text: "Import History";
+                    enabled: root.transaction-rows.length > 0;
+                    clicked => { root.modal-state = "import-history"; }
+                }
+                TBtn { text: "Import Ledgers"; enabled: false; clicked => { root.import-ledgers(); } }
+
+                Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
+                HorizontalBox {
+                    padding: 0px; spacing: 4px;
+                    CheckBox { text: "Dedupe"; checked: true; }
+                }
+
+                if root.status-file != "" : Text {
+                    text: root.status-file; color: #BBDEFB; font-size: 10px;
+                    vertical-alignment: center; max-width: 180px;
                 }
 
                 Rectangle { horizontal-stretch: 1; }
-
-                // File name status
-                if root.status-file != "" : Text {
-                    text:               root.status-file;
-                    color:              #BBDEFB;
-                    font-size:          11px;
-                    vertical-alignment: center;
-                    max-width:          280px;
-                }
-
-                ComboBox {
-                    model:         root.client-names;
-                    current-index: 0;
-                }
-
-                Button {
-                    text:    "Open File";
-                    clicked => { root.load-file(); }
-                }
-
-                Button {
-                    text:    "Batch Folder";
-                    enabled: false;
-                    clicked => { root.batch-folder(); }
-                }
-
-                Button {
-                    text:    "Logout";
-                    clicked => { root.logout(); }
-                }
             }
         }
 
-        // ── Tab view ──────────────────────────────────────────────────────────
-        TabWidget {
-            vertical-stretch: 1;
+        // ─────────────────────────── DATE RANGE BAR ───────────────────────────
+        // background: #EBF3FF, border-bottom: 1px solid #C5D9F0
+        Rectangle {
+            height: 36px; background: #EBF3FF;
 
-            // ─── Transactions tab ─────────────────────────────────────────────
-            Tab {
-                title: "Transactions";
+            // Bottom border
+            Rectangle { y: 35px; height: 1px; background: #C5D9F0; }
+
+            HorizontalBox {
+                padding-left: 12px; padding-right: 12px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 6px; height: 35px;
+
+                Text {
+                    text: "Period:"; font-size: 12px;
+                    color: #1565C0; font-weight: 700; letter-spacing: 0.5px;
+                    vertical-alignment: center;
+                }
+
+                LineEdit {
+                    placeholder-text: "DD/MM/YYYY"; text: root.date-from;
+                    height: 26px; min-width: 100px; max-width: 100px; font-size: 11px;
+                    edited(v) => { root.date-from = v; }
+                }
+                Text { text: "\u{2013}"; color: #7B97B4; vertical-alignment: center; font-size: 13px; }
+                LineEdit {
+                    placeholder-text: "DD/MM/YYYY"; text: root.date-to;
+                    height: 26px; min-width: 100px; max-width: 100px; font-size: 11px;
+                    edited(v) => { root.date-to = v; }
+                }
 
                 Rectangle {
-                    background: #F0F2F5;
+                    height: 26px; width: 52px;
+                    background: #1565C0; border-radius: 4px;
+                    TouchArea { clicked => { root.date-filter-apply(root.date-from, root.date-to); } }
+                    Text { text: "Apply"; font-size: 11px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    height: 26px; width: 46px;
+                    background: #FFFFFF; border-radius: 4px;
+                    border-width: 1px; border-color: #B0C8E8;
+                    TouchArea { clicked => { root.date-from = ""; root.date-to = ""; root.active-preset = ""; root.date-filter-apply("", ""); } }
+                    Text { text: "Clear"; font-size: 11px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
+                }
 
-                    VerticalBox {
-                        padding:  0px;
-                        spacing:  0px;
+                Rectangle { width: 1px; height: 18px; background: #C5D9F0; }
 
-                        // Filter bar
+                QBtn { text: "Today";      active: root.active-preset == "today";      enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "today";      root.date-preset("today"); } }
+                QBtn { text: "This Month"; active: root.active-preset == "this_month"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "this_month"; root.date-preset("this_month"); } }
+                QBtn { text: "Last Month"; active: root.active-preset == "last_month"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "last_month"; root.date-preset("last_month"); } }
+                QBtn { text: "Current FY"; active: root.active-preset == "current_fy"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "current_fy"; root.date-preset("current_fy"); } }
+                QBtn { text: "Prev FY";    active: root.active-preset == "prev_fy";    enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "prev_fy";    root.date-preset("prev_fy"); } }
+
+                // Active range chip — shown when a preset is applied
+                if root.active-preset != "" : Rectangle {
+                    height: 20px;
+                    background: #E65100; border-radius: 10px;
+                    HorizontalBox {
+                        padding-left: 8px; padding-right: 6px;
+                        padding-top: 0px; padding-bottom: 0px; spacing: 4px;
+                        Text {
+                            text: root.active-preset == "today"      ? "Today" :
+                                  root.active-preset == "this_month" ? "This Month" :
+                                  root.active-preset == "last_month" ? "Last Month" :
+                                  root.active-preset == "current_fy" ? "Current FY" :
+                                  root.active-preset == "prev_fy"    ? "Prev FY" : root.active-preset;
+                            font-size: 10px; font-weight: 700; color: white;
+                            vertical-alignment: center;
+                        }
                         Rectangle {
-                            height:       44px;
-                            background:   #FFFFFF;
-                            border-width: 1px;
-                            border-color: #E0E0E0;
+                            width: 14px; height: 14px; border-radius: 7px;
+                            background: #FFFFFF30;
+                            TouchArea { clicked => { root.active-preset = ""; root.date-filter-apply("", ""); } }
+                            Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
 
-                            HorizontalBox {
-                                padding-left:  12px;
-                                padding-right: 12px;
-                                padding-top:   0px;
-                                padding-bottom: 0px;
-                                spacing:        8px;
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
 
-                                Text {
-                                    text:               "Filters — Phase 5";
-                                    color:              #B0BEC5;
-                                    font-size:          12px;
-                                    vertical-alignment: center;
-                                }
-                                Rectangle { horizontal-stretch: 1; }
-                                Text {
-                                    text: root.dash-txn-count != "—"
-                                        ? root.dash-txn-count + " transactions"
-                                        : "No file loaded";
-                                    color:              #546E7A;
-                                    font-size:          12px;
-                                    vertical-alignment: center;
-                                }
+        // ─────────────────────────── VIEW TABS ────────────────────────────────
+        // background: #0D47A1 (deep blue), border-bottom: 2px solid #1565C0
+        Rectangle {
+            height: 38px; background: #0D47A1;
+
+            // Bottom border
+            Rectangle { y: 36px; height: 2px; background: #1565C0; }
+
+            HorizontalBox {
+                padding-left: 14px; padding-right: 14px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 0px; height: 36px;
+                VTab { text: "TRANSACTIONS"; active: !root.show-dashboard; clicked => { root.show-dashboard = false; } }
+                VTab { text: "DASHBOARD";    active:  root.show-dashboard;  clicked => { root.show-dashboard = true;  } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+
+        // ─────────────────────────── CONTENT AREA (stretch wrapper) ─────────────
+        Rectangle {
+            vertical-stretch: 1; clip: true;
+
+        // ─────────────────────────── TRANSACTIONS PANEL ───────────────────────
+        if !root.show-dashboard : VerticalBox {
+            padding: 0px; spacing: 0px;
+            width: parent.width; height: parent.height;
+
+                // Panel header — background: #E3F2FD, border-bottom: 1px solid #BBDEFB
+                Rectangle {
+                    height: 40px; background: #E3F2FD;
+
+                    // Bottom border
+                    Rectangle { y: 39px; height: 1px; background: #BBDEFB; }
+
+                    HorizontalBox {
+                        padding-left: 12px; padding-right: 12px;
+                        padding-top: 0px; padding-bottom: 0px;
+                        spacing: 4px; height: 39px;
+
+                        Text {
+                            text: "Transactions"; font-size: 13px; font-weight: 600;
+                            color: #0D47A1; vertical-alignment: center;
+                        }
+                        Text {
+                            text: "(double-click to edit)"; font-size: 10px;
+                            color: #888888; vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            height: 24px; width: 68px;
+                            background: #FFFFFF; border-radius: 4px;
+                            border-width: 1px; border-color: #90CAF9;
+                            TouchArea {
+                                enabled: root.transaction-rows.length > 0;
+                                clicked => { root.modal-state = "add-txn"; }
+                            }
+                            Text {
+                                text: "+ Add Row"; font-size: 11px; color: #0A1929;
+                                horizontal-alignment: center; vertical-alignment: center;
                             }
                         }
 
-                        // Table + summary panel
-                        HorizontalBox {
-                            padding:          0px;
-                            spacing:          0px;
-                            vertical-stretch: 1;
+                        Rectangle { width: 1px; height: 26px; background: #BBDEFB; }
 
-                            // ── Transaction table ─────────────────────────────
-                            Rectangle {
-                                horizontal-stretch: 4;
-                                background:         #FFFFFF;
+                        FBtn { label: "All"; count: root.fc-all; active: root.active-filter == "all"; a-bg: #1565C0; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
+                        FBtn { label: "Unreviewed"; count: root.fc-unreviewed; active: root.active-filter == "unreviewed"; a-bg: #E65100; a-fg: white; i-border: #FFA726; i-fg: #E65100; clicked => { root.active-filter = "unreviewed"; root.filter-changed("unreviewed"); } }
+                        FBtn { label: "Suspense"; count: root.fc-suspense; active: root.active-filter == "suspense"; a-bg: #7B1FA2; i-border: #AB47BC; i-fg: #7B1FA2; clicked => { root.active-filter = "suspense"; root.filter-changed("suspense"); } }
+                        FBtn { label: "High Conf."; count: root.fc-high; active: root.active-filter == "high"; a-bg: #1B5E20; i-border: #43A047; i-fg: #2E7D32; clicked => { root.active-filter = "high"; root.filter-changed("high"); } }
+                        FBtn { label: "Duplicates"; count: root.fc-duplicates; active: root.active-filter == "duplicates"; a-bg: #880E4F; i-border: #E91E63; i-fg: #C2185B; clicked => { root.active-filter = "duplicates"; root.filter-changed("duplicates"); } }
+                        FBtn { label: "GST/Tax"; count: root.fc-gst; active: root.active-filter == "gst"; a-bg: #2E7D32; i-border: #66BB6A; i-fg: #2E7D32; clicked => { root.active-filter = "gst"; root.filter-changed("gst"); } }
+                        FBtn { label: "Needs Review"; count: root.fc-review; active: root.active-filter == "needs_review"; a-bg: #E65100; i-border: #E67E22; i-fg: #E65100; clicked => { root.active-filter = "needs_review"; root.filter-changed("needs_review"); } }
 
-                                if root.transaction-rows.length == 0 : VerticalBox {
-                                    alignment: center;
-                                    spacing:   12px;
+                        Rectangle { width: 1px; height: 26px; background: #BBDEFB; }
+                        Text { text: "Bank:"; font-size: 11px; color: #607D8B; vertical-alignment: center; }
+                        ComboBox {
+                            model: root.bank-names; height: 26px; min-width: 100px;
+                            selected(v) => { root.bank-filter-changed(v); }
+                        }
 
-                                    Text {
-                                        text:                 "No transactions loaded";
-                                        font-size:            18px;
-                                        font-weight:          700;
-                                        color:                #CFD8DC;
-                                        horizontal-alignment: center;
-                                    }
-                                    Text {
-                                        text:                 "Click \"Open File\" to load a PDF or Excel bank statement.";
-                                        font-size:            13px;
-                                        color:                #90A4AE;
-                                        horizontal-alignment: center;
-                                        wrap:                 word-wrap;
-                                    }
-                                }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.fc-all != "0" ? root.fc-all + " transactions" : "No file loaded";
+                            font-size: 11px; color: #90A4AE; vertical-alignment: center;
+                        }
 
-                                if root.transaction-rows.length > 0 : StandardTableView {
-                                    columns: [
-                                        { title: "Date",      width: 90px  },
-                                        { title: "Narration", horizontal-stretch: 1 },
-                                        { title: "Debit",     width: 110px },
-                                        { title: "Credit",    width: 110px },
-                                        { title: "Balance",   width: 120px },
-                                        { title: "Reference", width: 130px },
-                                    ];
-                                    rows: root.transaction-rows;
+                        Rectangle {
+                            height: 24px; width: 60px;
+                            background: #FFFFFF; border-radius: 4px;
+                            border-width: 1px; border-color: #90CAF9;
+                            TouchArea { clicked => { root.compact-mode = !root.compact-mode; } }
+                            Text { text: "Compact"; font-size: 11px;
+                                   color: root.compact-mode ? #1565C0 : #546E7A;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                // Table + Summary
+                HorizontalBox {
+                    padding: 0px; spacing: 0px; vertical-stretch: 1;
+
+                    // Transaction table — white background
+                    Rectangle {
+                        horizontal-stretch: 4; background: #FFFFFF; clip: true;
+
+                        VerticalBox {
+                            padding: 0px; spacing: 0px;
+
+                            if root.transaction-rows.length == 0 : VerticalBox {
+                                alignment: center; spacing: 12px;
+                                Text {
+                                    text: "Select a client, then load a bank statement (Excel .xlsx / .xls)";
+                                    font-size: 13px; color: #AAAAAA;
+                                    horizontal-alignment: center; wrap: word-wrap;
                                 }
                             }
 
-                            // ── Summary panel ─────────────────────────────────
-                            Rectangle {
-                                horizontal-stretch: 0;
-                                min-width:          220px;
-                                max-width:          240px;
-                                background:         #F8F9FA;
-                                border-width:       1px;
-                                border-color:       #E0E0E0;
+                            if root.transaction-rows.length > 0 : VerticalBox {
+                                vertical-stretch: 1; padding: 0px; spacing: 0px;
+                                // Sticky table header
+                                TxnHeader { }
+                                // Scrollable body with colored rows
+                                ListView {
+                                    vertical-stretch: 1;
+                                    for row[idx] in root.transaction-rows : TxnTableRow {
+                                        width: parent.width;
+                                        data: row;
+                                        row-idx: idx;
+                                        compact: root.compact-mode;
+                                        clicked(i) => {
+                                            if root.dclick-pending-idx == i {
+                                                root.row-click(i);
+                                                root.etxn-vendor = "";
+                                                root.etxn-head   = "";
+                                                root.etxn-type-idx = 0;
+                                                root.modal-state = "edit-txn";
+                                                root.dclick-pending-idx = -1;
+                                            } else {
+                                                root.dclick-pending-idx = i;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
-                                VerticalBox {
-                                    padding: 16px;
+                            // Colour key — background: #E3F2FD, border-top: 1px solid #BBDEFB
+                            Rectangle {
+                                height: 28px; background: #E3F2FD;
+                                border-width: 0px;
+                                Rectangle { y: 0px; height: 1px; background: #BBDEFB; }
+
+                                HorizontalBox {
+                                    padding-left: 10px; padding-right: 10px;
+                                    padding-top: 0px; padding-bottom: 0px;
                                     spacing: 8px;
 
-                                    Text {
-                                        text:        "Summary";
-                                        font-size:   13px;
-                                        font-weight: 700;
-                                        color:       #37474F;
+                                    for item in [
+                                        {lbl: "High Conf.", bg: #E8F5E9, fg: #2E7D32},
+                                        {lbl: "Medium",     bg: #FFF8E1, fg: #F9A825},
+                                        {lbl: "Needs Review", bg: #FFEBEE, fg: #C62828},
+                                        {lbl: "Suspense",   bg: #F3E5F5, fg: #7B1FA2},
+                                        {lbl: "Manual",     bg: #E3F2FD, fg: #1565C0},
+                                        {lbl: "Duplicate",  bg: #FCE4EC, fg: #C2185B},
+                                    ] : Rectangle {
+                                        height: 16px; min-width: 30px;
+                                        background: item.bg; border-radius: 3px;
+                                        HorizontalBox {
+                                            padding-left: 5px; padding-right: 5px;
+                                            padding-top: 0px; padding-bottom: 0px;
+                                            Text { text: item.lbl; font-size: 9px; color: item.fg; font-weight: 600; vertical-alignment: center; }
+                                        }
                                     }
 
-                                    Rectangle { height: 1px; background: #E0E0E0; }
+                                    Rectangle { width: 1px; height: 14px; background: #90CAF9; }
 
-                                    SummaryRow {
-                                        label:     "Opening Balance";
-                                        value:     root.dash-opening;
-                                        val-color: #1565C0;
-                                    }
-                                    SummaryRow {
-                                        label:     "Total Credits";
-                                        value:     root.dash-credits;
-                                        val-color: #2E7D32;
-                                    }
-                                    SummaryRow {
-                                        label:     "Total Debits";
-                                        value:     root.dash-debits;
-                                        val-color: #C62828;
-                                    }
-                                    SummaryRow {
-                                        label:     "Closing Balance";
-                                        value:     root.dash-closing;
-                                        val-color: #1565C0;
+                                    for tag in [
+                                        {lbl: "GST", bg: #C8E6C9, fg: #1B5E20},
+                                        {lbl: "TAX", bg: #FFE0B2, fg: #BF360C},
+                                        {lbl: "DUP", bg: #FCE4EC, fg: #880E4F},
+                                    ] : Rectangle {
+                                        height: 14px; min-width: 28px;
+                                        background: tag.bg; border-radius: 3px;
+                                        border-width: 1px; border-color: tag.fg;
+                                        Text { text: tag.lbl; font-size: 9px; color: tag.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
                                     }
 
-                                    Rectangle { height: 1px; background: #E0E0E0; }
+                                    Rectangle { width: 1px; height: 14px; background: #90CAF9; }
 
-                                    SummaryRow {
-                                        label:     "Transactions";
-                                        value:     root.dash-txn-count;
-                                        val-color: #546E7A;
-                                    }
-                                    SummaryRow {
-                                        label:     "Vendors";
-                                        value:     root.dash-vendors;
-                                        val-color: #546E7A;
+                                    for chip in [
+                                        {lbl: "HIGH",     bg: #2E7D32},
+                                        {lbl: "REVIEW",   bg: #E65100},
+                                        {lbl: "SUSPENSE", bg: #7B1FA2},
+                                    ] : Rectangle {
+                                        height: 14px; min-width: 30px;
+                                        background: chip.bg; border-radius: 10px;
+                                        HorizontalBox {
+                                            padding-left: 4px; padding-right: 4px;
+                                            padding-top: 0px; padding-bottom: 0px;
+                                            Text { text: chip.lbl; font-size: 9px; color: white; font-weight: 800; vertical-alignment: center; }
+                                        }
                                     }
 
-                                    Rectangle { vertical-stretch: 1; }
-
-                                    if root.status-bank != "" : Text {
-                                        text:                root.status-bank;
-                                        font-size:           10px;
-                                        color:               #90A4AE;
-                                        horizontal-alignment: center;
-                                        wrap:                word-wrap;
-                                    }
+                                    Rectangle { horizontal-stretch: 1; }
                                 }
                             }
                         }
+                    }
 
-                        // Export bar
-                        Rectangle {
-                            height:       44px;
-                            background:   #FFFFFF;
-                            border-width: 1px;
-                            border-color: #E0E0E0;
+                    // Summary panel — background: #F0F7FF, width: 270px
+                    Rectangle {
+                        width: 270px;
+                        background: #F0F7FF;
+                        clip: true;
+                        // Left border only (matches original border-left: 1px solid #BBDEFB)
+                        Rectangle { x: 0px; y: 0px; width: 1px; height: parent.height; background: #BBDEFB; }
 
-                            HorizontalBox {
-                                padding-left:   12px;
-                                padding-right:  12px;
-                                padding-top:    0px;
-                                padding-bottom: 0px;
-                                spacing:         8px;
-                                alignment:       center;
+                        ScrollView {
+                            width: parent.width; height: parent.height;
 
-                                Button { text: "Export to Excel";    enabled: false; }
-                                Button { text: "Export Tally XML";   enabled: false; }
-                                Button { text: "Export Accounting…"; enabled: false; }
-                                Button { text: "Post to Tally";      enabled: false; }
+                            VerticalBox {
+                                padding: 12px; spacing: 5px; width: 258px;
+
+                                // Summary header with 3px bottom border
+                                Text {
+                                    text: "Summary"; font-size: 13px; font-weight: 800;
+                                    color: #0A1929;
+                                }
+                                Rectangle { height: 3px; background: #1565C0; }
+
+                                // No-data placeholder
+                                if root.transaction-rows.length == 0 : Text {
+                                    text: "No data loaded";
+                                    font-size: 12px; color: #AAAAAA;
+                                    horizontal-alignment: center; wrap: word-wrap;
+                                }
+
+                                if root.transaction-rows.length > 0 : SDivider { title: "CLIENT"; }
+                                SR { lbl: "Name";    val: root.dash-client-name != "" ? root.dash-client-name : "\u{2014}"; vcol: #37474F; }
+                                SR { lbl: "Bank";    val: root.dash-bank-name   != "" ? root.dash-bank-name   : "\u{2014}"; vcol: #37474F; }
+                                SR { lbl: "Account"; val: root.dash-account-no  != "" ? root.dash-account-no  : "\u{2014}"; vcol: #37474F; }
+                                SR { lbl: "Period";  val: root.dash-period;  vcol: #546E7A; }
+
+                                SDivider { title: "BALANCES"; }
+                                SR { lbl: "Opening Balance"; val: root.dash-opening;      vcol: #1565C0; }
+                                SR { lbl: "Total Receipts";  val: root.dash-credits;      vcol: #2E7D32; }
+                                SR { lbl: "Total Payments";  val: root.dash-debits;       vcol: #C62828; }
+                                SR { lbl: "Closing Balance"; val: root.dash-closing;      vcol: #1565C0; }
+                                SR { lbl: "Calc. Closing";   val: root.dash-calc-closing; vcol: #546E7A; }
+
+                                if root.dash-has-mismatch : Rectangle {
+                                    height: 28px; background: #FFEBEE;
+                                    border-radius: 5px; border-width: 1px; border-color: #FFCDD2;
+                                    HorizontalBox {
+                                        padding-left: 8px; padding-right: 8px;
+                                        padding-top: 0px; padding-bottom: 0px; spacing: 4px;
+                                        Text {
+                                            text: "\u{2717} MISMATCH"; font-size: 10px; font-weight: 700;
+                                            color: #C62828; vertical-alignment: center; horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: root.dash-mismatch; font-size: 10px; font-weight: 600;
+                                            color: #C62828; vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                if !root.dash-has-mismatch && root.transaction-rows.length > 0 : Rectangle {
+                                    height: 22px; background: #E8F5E9;
+                                    border-radius: 5px; border-width: 1px; border-color: #C8E6C9;
+                                    Text {
+                                        text: "\u{2713} RECONCILED"; font-size: 10px; font-weight: 700;
+                                        color: #2E7D32; horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+
+                                SDivider { title: "TRANSACTIONS"; }
+                                HorizontalBox {
+                                    padding: 0px; spacing: 4px;
+                                    for s in [
+                                        {v: root.dash-txn-count,    lbl: "Total"},
+                                        {v: root.dash-credit-count, lbl: "Credits"},
+                                        {v: root.dash-debit-count,  lbl: "Debits"},
+                                    ] : Rectangle {
+                                        horizontal-stretch: 1; height: 42px;
+                                        background: #FFFFFF; border-radius: 6px;
+                                        border-width: 1px; border-color: #BBDEFB;
+                                        VerticalBox {
+                                            padding: 4px; spacing: 0px; alignment: center;
+                                            Text { text: s.v; font-size: 15px; font-weight: 800; color: #0D47A1; horizontal-alignment: center; }
+                                            Text { text: s.lbl; font-size: 9px; color: #888888; horizontal-alignment: center; }
+                                        }
+                                    }
+                                }
+
+                                SDivider { title: "REVIEW STATUS"; }
+                                SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; }
+                                SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: #E65100; }
+                                SR { lbl: "Suspense";     val: root.dash-suspense;     vcol: #7B1FA2; }
+
+                                SDivider { title: "OTHER"; }
+                                SR { lbl: "Duplicates"; val: root.dash-duplicates; vcol: #C2185B; }
+                                SR { lbl: "GST / Tax";  val: root.dash-gst-count;  vcol: #6A1B9A; }
+                                SR { lbl: "Vendors";    val: root.dash-vendors;    vcol: #546E7A; }
+
+                                Rectangle { height: 6px; }
+                                if root.status-bank != "" : Text {
+                                    text: root.status-bank; font-size: 10px;
+                                    color: #90A4AE; horizontal-alignment: center; wrap: word-wrap;
+                                }
+                                Rectangle { vertical-stretch: 1; }
                             }
                         }
                     }
                 }
             }
 
-            // ─── Dashboard tab ────────────────────────────────────────────────
-            Tab {
-                title: "Dashboard";
+        // ─────────────────────────── DASHBOARD ────────────────────────────────
+        if root.show-dashboard : DashboardScreen {
+            width: parent.width; height: parent.height;
+            // Summary
+            opening-balance: root.dash-opening;
+            total-credits:   root.dash-credits;
+            total-debits:    root.dash-debits;
+            closing-balance: root.dash-closing;
+            net-cash-flow:   root.dash-net-flow;
+            txn-count:       root.dash-txn-count;
+            vendor-count:    root.dash-vendors;
+            top-expense:     root.dash-top-expense;
+            top-expense-amt: root.dash-top-exp-amt;
+            has-data:        root.dash-has-data;
+            // Charts
+            chart-monthly:   root.dash-chart-monthly;
+            chart-expenses:  root.dash-chart-expenses;
+            chart-cashflow:  root.dash-chart-cashflow;
+            chart-vendors:   root.dash-chart-vendors;
+            // Filter options
+            filter-banks:    root.dash-filter-banks;
+            filter-vendors:  root.dash-filter-vendors;
+            filter-heads:    root.dash-filter-heads;
+            // Insights
+            ins-max-dr:       root.dash-ins-max-dr;
+            ins-max-dr-narr:  root.dash-ins-max-dr-narr;
+            ins-max-cr:       root.dash-ins-max-cr;
+            ins-max-cr-narr:  root.dash-ins-max-cr-narr;
+            ins-avg-dr:       root.dash-ins-avg-dr;
+            ins-avg-cr:       root.dash-ins-avg-cr;
+            ins-dr-count:     root.dash-ins-dr-count;
+            ins-cr-count:     root.dash-ins-cr-count;
+            ins-freq-vendor:  root.dash-ins-freq-vendor;
+            // Callbacks
+            dash-filter-changed(f, t, b, v, h) => {
+                root.dash-filter-changed(f, t, b, v, h);
+            }
+            card-credits-clicked => {
+                root.show-dashboard = false;
+                root.active-filter = "all";
+                root.filter-changed("all");
+            }
+            card-debits-clicked => {
+                root.show-dashboard = false;
+                root.active-filter = "all";
+                root.filter-changed("all");
+            }
+            card-txns-clicked => {
+                root.show-dashboard = false;
+                root.active-filter = "all";
+                root.filter-changed("all");
+            }
+        }
 
-                DashboardScreen {
-                    opening-balance: root.dash-opening;
-                    total-credits:   root.dash-credits;
-                    total-debits:    root.dash-debits;
-                    closing-balance: root.dash-closing;
-                    txn-count:       root.dash-txn-count;
-                    vendor-count:    root.dash-vendors;
+        } // end content wrapper Rectangle
+
+        // ─────────────────────────── FOOTER ───────────────────────────────────
+        // background: #E3F2FD, border-top: 2px solid #BBDEFB
+        Rectangle {
+            height: 44px; background: #E3F2FD;
+
+            // Top border
+            Rectangle { y: 0px; height: 2px; background: #BBDEFB; }
+
+            HorizontalBox {
+                padding-left: 14px; padding-right: 14px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 8px; y: 2px; height: 42px;
+
+                // Green buttons
+                FootBtn { text: "Export to Excel";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "excel-export"; } }
+                FootBtn { text: "\u{2193} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.modal-state = "export-wizard"; } }
+                FootBtn { text: "Quick Tally XML";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "tally-export"; } }
+                FootBtn { text: "Re-import Excel";        enabled: false; clicked => { root.reimport-excel(); } }
+                FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => { root.reset-dedupe(); } }
+
+                Rectangle { width: 1px; height: 28px; background: #90CAF9; }
+
+                FootBtn { text: "Reconcile";     enabled: root.transaction-rows.length > 0; bg: #7E57C2; border-clr: #7E57C2; fg: #FFFFFF; clicked => { root.modal-state = "reconcile"; } }
+                FootBtn { text: "Batch Monitor"; enabled: true; clicked => { root.modal-state = "batch-monitor"; } }
+                FootBtn { text: "Audit Trail";   enabled: true; clicked => { root.modal-state = "audit-trail";  } }
+                FootBtn { text: "Settings";      enabled: true; clicked => { root.modal-state = "settings";     } }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MODAL OVERLAYS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    if root.modal-state == "new-client" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 470px) / 2; y: (parent.height - 310px) / 2;
+            width: 470px; height: 310px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Add New Client"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: "Client Name *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit { placeholder-text: "e.g. Acme Pvt Ltd"; height: 34px; }
+                    Text { text: "Bank Ledger Name in Tally *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit { placeholder-text: "e.g. HDFC Bank A/c - 5021"; height: 34px; }
+                    Text { text: "Must exactly match the ledger name in your Tally company (case-sensitive)"; font-size: 10px; color: #999999; wrap: word-wrap; }
+                }
+                MFtr {
+                    MBtn { text: "Save Client"; bg: #1565C0; clicked => { root.modal-state = ""; root.new-client(); } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
+        }
+    }
+
+    if root.modal-state == "ai-settings" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 480px) / 2; y: (parent.height - 360px) / 2;
+            width: 480px; height: 360px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "\u{2605} AI Classifier \u{2014} Settings"; bg: #FFF8E1; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: "AI Provider"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    ComboBox { model: ["OpenAI (GPT-4o-mini)", "Anthropic Claude (Haiku)", "Google Gemini 1.5 Flash"]; height: 34px; }
+                    Text { text: "API Key"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit { placeholder-text: "sk-..."; height: 34px; input-type: password; }
+                    Text { text: "Classify which transactions"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    ComboBox { model: ["Unclassified / low-confidence only (recommended)", "All transactions"]; height: 34px; }
+                    Rectangle {
+                        height: 40px; background: #F3E5F5; border-radius: 4px;
+                        border-width: 1px; border-color: #CE93D8;
+                        HorizontalBox { padding: 10px; Text { text: "\u{2139} AI suggestions are not guaranteed accurate. Always review before exporting."; font-size: 10px; color: #6A1B9A; wrap: word-wrap; vertical-alignment: center; } }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "\u{2605} Start AI Classification"; bg: #6B2FB8; fg: white; clicked => { root.modal-state = ""; root.ai-classify(); } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    if root.modal-state == "tally-export" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 640px) / 2; y: (parent.height - 480px) / 2;
+            width: 640px; height: 480px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Quick Tally XML Export"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: "Tally Company Name *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit { placeholder-text: "Must match Tally exactly (case-sensitive)"; height: 34px; }
+                    Text { text: "GSTIN (optional)"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit { placeholder-text: "e.g. 27AABCU9603R1ZX"; height: 34px; }
+                    HorizontalBox { padding: 0px; spacing: 12px;
+                        VerticalBox { padding: 0px; spacing: 6px; horizontal-stretch: 1;
+                            Text { text: "From Date"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; }
+                        }
+                        VerticalBox { padding: 0px; spacing: 6px; horizontal-stretch: 1;
+                            Text { text: "To Date"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; }
+                        }
+                    }
+                    CheckBox { text: "Export only classified transactions"; checked: true; }
+                    CheckBox { text: "Auto-create ledgers in Tally"; checked: true; }
+                    CheckBox { text: "Include narrations in vouchers"; checked: true; }
+                    CheckBox { text: "Include Opening Balance journal entry"; }
+                    CheckBox { text: "Skip low-confidence entries (<40%)"; }
+                }
+                MFtr {
+                    MBtn { text: "Export Tally XML"; bg: #2E7D32; fg: white; clicked => { root.modal-state = ""; root.export-tally(); } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    if root.modal-state == "excel-export" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 440px) / 2; y: (parent.height - 260px) / 2;
+            width: 440px; height: 260px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "\u{2193} Export to Excel"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: "Choose which transactions to include:"; font-size: 13px; color: #555555; }
+                    // Radio: All transactions (selected by default)
+                    property <bool> xl-all-selected: true;
+                    HorizontalBox { padding: 0px; spacing: 8px;
+                        Rectangle {
+                            width: 16px; height: 16px; border-radius: 8px;
+                            background: xl-all-selected ? #1565C0 : #F5F5F5;
+                            border-width: 2px;
+                            border-color: xl-all-selected ? #1565C0 : #BDBDBD;
+                            TouchArea { clicked => { xl-all-selected = true; } }
+                        }
+                        Text { text: "All transactions (" + root.fc-all + ")";
+                               font-size: 12px; font-weight: 600; color: #37474F; vertical-alignment: center; }
+                    }
+                    HorizontalBox { padding: 0px; spacing: 8px;
+                        Rectangle {
+                            width: 16px; height: 16px; border-radius: 8px;
+                            background: !xl-all-selected ? #1565C0 : #F5F5F5;
+                            border-width: 2px;
+                            border-color: !xl-all-selected ? #1565C0 : #BDBDBD;
+                            TouchArea { clicked => { xl-all-selected = false; } }
+                        }
+                        Text { text: "Filtered transactions only";
+                               font-size: 12px; color: #37474F; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        height: 42px; background: #F0F7FF; border-radius: 6px;
+                        border-width: 1px; border-color: #CCE4FF;
+                        HorizontalBox { padding: 10px; Text { text: "\u{2139} Generates 7 sheets: Transactions, Summary, Ledger Analysis, GST & Tax, Duplicates, Review Required, Audit Summary."; font-size: 11px; color: #1A5276; wrap: word-wrap; } }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "\u{2193} Generate Excel"; bg: #1565C0; clicked => { root.modal-state = ""; root.export-excel(); } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    if root.modal-state == "settings" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 660px) / 2; y: (parent.height - 520px) / 2;
+            width: 660px; height: 520px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Application Settings"; close => { root.modal-state = ""; } }
+                ScrollView { vertical-stretch: 1;
+                    VerticalBox { padding: 18px; spacing: 12px;
+                        // Narration Cleaner section
+                        Rectangle {
+                            height: 1px; background: #E3F2FD;
+                        }
+                        Text { text: "NARRATION CLEANER"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
+                        CheckBox { text: "Enable narration cleaning"; checked: true; }
+                        CheckBox { text: "Convert to Title Case"; }
+                        CheckBox { text: "Preserve original narration"; }
+                        Rectangle { height: 1px; background: #E3F2FD; }
+                        Text { text: "GST ENGINE"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
+                        CheckBox { text: "Enable GST detection"; checked: true; }
+                        CheckBox { text: "Auto-suggest GST ledgers"; checked: true; }
+                        HorizontalBox { padding: 0px; spacing: 8px;
+                            Text { text: "Default State"; font-size: 11px; color: #546E7A; vertical-alignment: center; }
+                            ComboBox { model: ["Maharashtra (MH)", "Gujarat (GJ)", "Delhi (DL)", "Karnataka (KA)"]; min-width: 160px; }
+                        }
+                        Rectangle { height: 1px; background: #E3F2FD; }
+                        Text { text: "RECONCILIATION"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
+                        HorizontalBox { padding: 0px; spacing: 12px;
+                            VerticalBox { padding: 0px; spacing: 4px;
+                                Text { text: "Date Fuzzy Window (days)"; font-size: 11px; color: #546E7A; }
+                                LineEdit { text: "1"; height: 30px; min-width: 70px; max-width: 80px; }
+                            }
+                            VerticalBox { padding: 0px; spacing: 4px;
+                                Text { text: "Amount Tolerance (%)"; font-size: 11px; color: #546E7A; }
+                                LineEdit { text: "0.5"; height: 30px; min-width: 70px; max-width: 80px; }
+                            }
+                        }
+                        Rectangle { height: 1px; background: #E3F2FD; }
+                        Text { text: "LOGGING"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
+                        HorizontalBox { padding: 0px; spacing: 8px;
+                            Text { text: "Log Level"; font-size: 11px; color: #546E7A; vertical-alignment: center; }
+                            ComboBox { model: ["INFO", "DEBUG", "WARN", "ERROR"]; min-width: 100px; }
+                        }
+                        CheckBox { text: "Show logs in browser console"; }
+                        Rectangle {
+                            height: 30px; width: 120px;
+                            background: #C62828; border-radius: 4px;
+                            TouchArea { }
+                            Text { text: "Clear All Logs"; font-size: 11px; color: white;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "Save Settings"; bg: #1565C0; clicked => { root.modal-state = ""; root.open-settings(); } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    if root.modal-state == "import-history" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 700px) / 2; y: (parent.height - 360px) / 2;
+            width: 700px; height: 360px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Import History"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 8px; vertical-stretch: 1;
+                    Text { text: "Stored locally. Up to 20 imports per client. Loading replaces the current session."; font-size: 11px; color: #888888; wrap: word-wrap; }
+                    Rectangle {
+                        vertical-stretch: 1; background: #F5F5F5;
+                        border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
+                        Text { text: "No import history available."; font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    if root.modal-state == "view-rules" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 620px) / 2; y: (parent.height - 360px) / 2;
+            width: 620px; height: 360px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Learned Rules"; close => { root.modal-state = ""; } }
+                Rectangle {
+                    vertical-stretch: 1; background: #F5F5F5;
+                    Text { text: "No learned rules yet. Edit transactions and click \"Save & Learn\" to create rules."; font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
+                }
+                MFtr {
+                    MBtn { text: "Backup Rules"; bg: #1565C0; }
+                    MBtn { text: "Restore Rules"; bg: #F5F5F5; fg: #546E7A; enabled: true; }
+                    MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    if root.modal-state == "batch-monitor" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 620px) / 2; y: (parent.height - 340px) / 2;
+            width: 620px; height: 340px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Batch Processing Monitor"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 8px; vertical-stretch: 1;
+                    HorizontalBox { padding: 0px; spacing: 8px;
+                        MBtn { text: "Start Batch"; bg: #1565C0; clicked => { root.open-batch-monitor(); } }
+                        MBtn { text: "Pause"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
+                        MBtn { text: "Abort"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
+                        MBtn { text: "Load All into Session"; bg: #2E7D32; fg: white; enabled: false; }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1; background: #F5F5F5;
+                        border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
+                        Text { text: "Use \"Batch Process Folder\" to select multiple files, then open this monitor to track progress."; font-size: 12px; color: #90A4AE; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    if root.modal-state == "audit-trail" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 660px) / 2; y: (parent.height - 440px) / 2;
+            width: 660px; height: 440px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Audit Trail"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 14px; spacing: 8px; vertical-stretch: 1;
+                    HorizontalBox { padding: 0px; spacing: 8px;
+                        ComboBox { model: ["All Actions", "Create", "Update", "Delete", "Import", "Export", "Classify", "Rule"]; min-width: 130px; }
+                        ComboBox { model: ["All Types", "Transaction", "Client", "Rule", "Import", "Export"]; min-width: 130px; }
+                        MBtn { text: "Refresh"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.open-audit-trail(); } }
+                        MBtn { text: "Undo Last Edit"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
+                    }
+                    Rectangle {
+                        vertical-stretch: 1; background: #F5F5F5;
+                        border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
+                        Text { text: "No audit events recorded yet."; font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "Download Logs"; bg: #F5F5F5; fg: #546E7A; enabled: true; }
+                    MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // ── Edit Transaction modal ─────────────────────────────────────────────────
+    if root.modal-state == "edit-txn" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 500px) / 2; y: (parent.height - 420px) / 2;
+            width: 500px; height: 420px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Edit Transaction"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    // Read-only info block
+                    Rectangle {
+                        height: 62px; background: #F0F7FF; border-radius: 5px;
+                        border-width: 1px; border-color: #BBDEFB;
+                        VerticalBox { padding: 8px; spacing: 2px;
+                            HorizontalBox { padding: 0px; spacing: 0px;
+                                Text { text: "Date: "; font-size: 12px; font-weight: 700; color: #0A1929; }
+                                Text { text: root.edit-txn-date; font-size: 12px; color: #444444; horizontal-stretch: 1; }
+                                Text { text: "Debit: "; font-size: 12px; font-weight: 700; color: #0A1929; }
+                                Text { text: root.edit-txn-dr; font-size: 12px; color: #B71C1C; }
+                                Text { text: "   Credit: "; font-size: 12px; font-weight: 700; color: #0A1929; }
+                                Text { text: root.edit-txn-cr; font-size: 12px; color: #1B5E20; }
+                            }
+                            Text { text: root.edit-txn-narr; font-size: 12px; color: #444444; wrap: word-wrap; }
+                        }
+                    }
+                    Rectangle { height: 1px; background: #EEEEEE; }
+                    Text { text: "Vendor / Payer / Payee"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit {
+                        placeholder-text: "e.g. Airtel, Self, Bank"; height: 34px;
+                        text: root.etxn-vendor;
+                        edited(v) => { root.etxn-vendor = v; }
+                    }
+                    Text { text: "Account Head"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit {
+                        placeholder-text: "e.g. Telephone Expense"; height: 34px;
+                        text: root.etxn-head;
+                        edited(v) => { root.etxn-head = v; }
+                    }
+                    Text { text: "Type"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    ComboBox {
+                        model: ["-- Select --", "Receipt", "Payment", "Contra"];
+                        current-index: root.etxn-type-idx;
+                        height: 34px;
+                        selected(v) => { root.etxn-type-idx = self.current-index; }
+                    }
+                }
+                MFtr {
+                    MBtn {
+                        text: "Save & Learn"; bg: #1565C0;
+                        clicked => {
+                            root.save-txn(root.edit-txn-idx, root.etxn-vendor, root.etxn-head,
+                                ["","Receipt","Payment","Contra"][root.etxn-type-idx], true);
+                            root.modal-state = "";
+                        }
+                    }
+                    MBtn {
+                        text: "Save (no learn)"; bg: #455A64; fg: white;
+                        clicked => {
+                            root.save-txn(root.edit-txn-idx, root.etxn-vendor, root.etxn-head,
+                                ["","Receipt","Payment","Contra"][root.etxn-type-idx], false);
+                            root.modal-state = "";
+                        }
+                    }
+                    MBtn {
+                        text: "Mark Suspense"; bg: #7B1FA2; fg: white;
+                        clicked => { root.mark-suspense(root.edit-txn-idx); root.modal-state = ""; }
+                    }
+                    MBtn {
+                        text: "Delete"; bg: #C62828; fg: white;
+                        clicked => { root.delete-txn(root.edit-txn-idx); root.modal-state = ""; }
+                    }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // ── Add Transaction modal ──────────────────────────────────────────────────
+    if root.modal-state == "add-txn" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 500px) / 2; y: (parent.height - 520px) / 2;
+            width: 500px; height: 520px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Add Transaction Manually"; close => { root.modal-state = ""; } }
+                ScrollView { vertical-stretch: 1;
+                    VerticalBox { padding: 18px; spacing: 10px;
+                        // Warning banner
+                        Rectangle {
+                            height: 40px; background: #FFF3E0; border-radius: 4px;
+                            border-width: 1px; border-color: #FFB74D;
+                            HorizontalBox { padding: 8px; Text { text: "\u{26A0} You are manually inserting a transaction. It will be marked Manual and will not be skipped by dedupe on future imports."; font-size: 11px; color: #6D3600; wrap: word-wrap; vertical-alignment: center; } }
+                        }
+                        HorizontalBox { padding: 0px; spacing: 12px;
+                            VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                                Text { text: "Date * (DD/MM/YYYY)"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                                LineEdit { placeholder-text: "01/01/2024"; height: 34px; text: root.add-date; edited(v) => { root.add-date = v; } }
+                            }
+                            VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                                Text { text: "Reference / Cheque No."; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                                LineEdit { placeholder-text: "Optional"; height: 34px; text: root.add-ref; edited(v) => { root.add-ref = v; } }
+                            }
+                        }
+                        Text { text: "Narration *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                        LineEdit { placeholder-text: "Transaction description"; height: 34px; text: root.add-narr; edited(v) => { root.add-narr = v; } }
+                        HorizontalBox { padding: 0px; spacing: 12px;
+                            VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                                Text { text: "Debit Amount"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                                LineEdit { placeholder-text: "0.00"; height: 34px; text: root.add-dr; edited(v) => { root.add-dr = v; } }
+                            }
+                            VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                                Text { text: "Credit Amount"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                                LineEdit { placeholder-text: "0.00"; height: 34px; text: root.add-cr; edited(v) => { root.add-cr = v; } }
+                            }
+                        }
+                        Rectangle { height: 1px; background: #EEEEEE; }
+                        Text { text: "Vendor / Payer / Payee"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                        LineEdit { placeholder-text: "e.g. Airtel, Self, Bank"; height: 34px; text: root.add-vendor; edited(v) => { root.add-vendor = v; } }
+                        Text { text: "Account Head"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                        LineEdit { placeholder-text: "e.g. Telephone Expense"; height: 34px; text: root.add-head; edited(v) => { root.add-head = v; } }
+                        Text { text: "Type"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                        ComboBox {
+                            model: ["-- Select --", "Receipt", "Payment", "Contra"];
+                            current-index: root.add-type-idx; height: 34px;
+                            selected(v) => { root.add-type-idx = self.current-index; }
+                        }
+                    }
+                }
+                MFtr {
+                    MBtn {
+                        text: "Add Transaction"; bg: #1565C0;
+                        clicked => {
+                            root.add-txn(root.add-date, root.add-ref, root.add-narr,
+                                root.add-dr, root.add-cr, root.add-vendor, root.add-head,
+                                ["","Receipt","Payment","Contra"][root.add-type-idx]);
+                            root.add-date = ""; root.add-ref = ""; root.add-narr = "";
+                            root.add-dr = ""; root.add-cr = "";
+                            root.add-vendor = ""; root.add-head = "";
+                            root.add-type-idx = 0;
+                            root.modal-state = "";
+                        }
+                    }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // ── Reconciliation modal ───────────────────────────────────────────────────
+    if root.modal-state == "reconcile" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 760px) / 2; y: (parent.height - 500px) / 2;
+            width: 760px; height: 500px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Bank Reconciliation"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 14px; spacing: 8px; vertical-stretch: 1;
+                    // Toolbar
+                    HorizontalBox { padding: 0px; spacing: 8px; height: 36px;
+                        MBtn { text: "Import Tally Export (Excel)"; bg: #F5F5F5; fg: #37474F; enabled: true; clicked => { root.reconcile(); } }
+                        Text { text: "No Tally file loaded"; font-size: 12px; color: #888888; vertical-alignment: center; horizontal-stretch: 1; }
+                        MBtn { text: "Run Reconciliation"; bg: #1565C0; enabled: false; }
+                        MBtn { text: "Export CSV"; bg: #2E7D32; fg: white; enabled: false; }
+                    }
+                    // Summary bar placeholder
+                    Rectangle {
+                        height: 50px; background: #E3F2FD; border-radius: 6px;
+                        HorizontalBox { padding: 10px; spacing: 16px;
+                            for stat in [
+                                {v: "0", lbl: "Matched"},
+                                {v: "0", lbl: "Likely"},
+                                {v: "0", lbl: "Unmatched"},
+                                {v: "0", lbl: "Bank Only"},
+                            ] : VerticalBox { padding: 0px; spacing: 2px; alignment: center;
+                                Text { text: stat.v; font-size: 20px; font-weight: 700; color: #1565C0; horizontal-alignment: center; }
+                                Text { text: stat.lbl; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
+                            }
+                        }
+                    }
+                    // Content area
+                    Rectangle {
+                        vertical-stretch: 1; background: #F5F5F5;
+                        border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
+                        Text { text: "Load a Tally daybook export to begin matching."; font-size: 13px; color: #888888; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // ── Export Accounting Wizard ───────────────────────────────────────────────
+    if root.modal-state == "export-wizard" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 580px) / 2; y: (parent.height - 540px) / 2;
+            width: 580px; height: 540px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "\u{2193} Export for Accounting Software"; close => { root.modal-state = ""; } }
+
+                // Step indicator
+                Rectangle {
+                    height: 52px; background: #F8FAFF; border-width: 1px; border-color: #E3EBF6;
+                    HorizontalBox {
+                        padding-left: 14px; padding-right: 14px; padding-top: 0px; padding-bottom: 0px;
+                        spacing: 6px; alignment: center;
+                        for step in [{n: 1, lbl: "Software"}, {n: 2, lbl: "Company"}, {n: 3, lbl: "Period"}, {n: 4, lbl: "Options"}] :
+                        HorizontalBox { padding: 0px; spacing: 4px;
+                            VerticalBox { padding: 0px; spacing: 2px; alignment: center;
+                                Rectangle {
+                                    width: 28px; height: 28px; border-radius: 14px;
+                                    background: root.wiz-step == step.n ? #1565C0 : (root.wiz-step > step.n ? #2E7D32 : #D8E4F5);
+                                    Text {
+                                        text: root.wiz-step > step.n ? "\u{2713}" : step.n;
+                                        font-size: 12px; font-weight: 700;
+                                        color: root.wiz-step >= step.n ? white : #6B8AB4;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                Text { text: step.lbl; font-size: 10px; color: root.wiz-step == step.n ? #1565C0 : #8AA0BB; horizontal-alignment: center; }
+                            }
+                            if step.n < 4 : Text { text: "\u{2192}"; color: #BDD0E8; font-size: 14px; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                // Step 1: Software selection
+                if root.wiz-step == 1 : VerticalBox { padding: 20px; spacing: 12px; vertical-stretch: 1;
+                    Text { text: "SELECT ACCOUNTING SOFTWARE"; font-size: 12px; font-weight: 600; color: #1565C0; letter-spacing: 0.5px; }
+                    HorizontalBox { padding: 0px; spacing: 10px;
+                        for sw in [{n: 0, ico: "T", nm: "Tally Prime", sub: "ERP9 / Prime"},
+                                   {n: 1, ico: "Z", nm: "Zoho Books", sub: "Journal CSV"},
+                                   {n: 2, ico: "Q", nm: "QuickBooks", sub: "General Journal"}] :
+                        Rectangle {
+                            horizontal-stretch: 1; height: 80px;
+                            background: root.wiz-sw-idx == sw.n ? #EEF4FF : #FFFFFF;
+                            border-radius: 8px; border-width: 2px;
+                            border-color: root.wiz-sw-idx == sw.n ? #1565C0 : #D8E4F5;
+                            TouchArea { clicked => { root.wiz-sw-idx = sw.n; } }
+                            VerticalBox { padding: 10px; spacing: 3px; alignment: center;
+                                Rectangle {
+                                    width: 32px; height: 32px; border-radius: 6px;
+                                    background: root.wiz-sw-idx == sw.n ? #1565C0 : #E3F0FF;
+                                    Text { text: sw.ico; font-size: 15px; font-weight: 800; color: root.wiz-sw-idx == sw.n ? white : #1565C0; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                Text { text: sw.nm; font-size: 11px; font-weight: 600; color: #1A237E; horizontal-alignment: center; }
+                                Text { text: sw.sub; font-size: 10px; color: #7B97B4; horizontal-alignment: center; }
+                            }
+                        }
+                    }
+                    HorizontalBox { padding: 0px; spacing: 10px;
+                        for sw in [{n: 3, ico: "O", nm: "Odoo", sub: "Journal Entry"},
+                                   {n: 4, ico: "\u{2616}", nm: "Excel / CSV", sub: "Generic CSV"},
+                                   {n: 5, ico: "</>", nm: "Generic XML", sub: "Custom import"}] :
+                        Rectangle {
+                            horizontal-stretch: 1; height: 80px;
+                            background: root.wiz-sw-idx == sw.n ? #EEF4FF : #FFFFFF;
+                            border-radius: 8px; border-width: 2px;
+                            border-color: root.wiz-sw-idx == sw.n ? #1565C0 : #D8E4F5;
+                            TouchArea { clicked => { root.wiz-sw-idx = sw.n; } }
+                            VerticalBox { padding: 10px; spacing: 3px; alignment: center;
+                                Rectangle {
+                                    width: 32px; height: 32px; border-radius: 6px;
+                                    background: root.wiz-sw-idx == sw.n ? #1565C0 : #E3F0FF;
+                                    Text { text: sw.ico; font-size: 15px; font-weight: 800; color: root.wiz-sw-idx == sw.n ? white : #1565C0; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                Text { text: sw.nm; font-size: 11px; font-weight: 600; color: #1A237E; horizontal-alignment: center; }
+                                Text { text: sw.sub; font-size: 10px; color: #7B97B4; horizontal-alignment: center; }
+                            }
+                        }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                // Step 2: Company details
+                if root.wiz-step == 2 : VerticalBox { padding: 20px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: "COMPANY DETAILS"; font-size: 12px; font-weight: 600; color: #1565C0; letter-spacing: 0.5px; }
+                    Text { text: "Company Name *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit { placeholder-text: "Must match exactly in accounting software"; height: 34px; text: root.wiz-company; edited(v) => { root.wiz-company = v; } }
+                    Text { text: "GSTIN (optional)"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit { placeholder-text: "e.g. 27AABCU9603R1ZX"; height: 34px; text: root.wiz-gstin; edited(v) => { root.wiz-gstin = v; } }
+                    HorizontalBox { padding: 0px; spacing: 12px;
+                        VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                            Text { text: "Financial Year"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                            ComboBox { model: ["2024-25", "2023-24", "2022-23", "2021-22"]; height: 34px; }
+                        }
+                        VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                            Text { text: "State"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                            ComboBox { model: ["Maharashtra (MH)", "Gujarat (GJ)", "Delhi (DL)", "Karnataka (KA)", "Tamil Nadu (TN)", "Telangana (TG)", "Rajasthan (RJ)", "UP (UP)", "West Bengal (WB)"]; height: 34px; }
+                        }
+                    }
+                    Rectangle {
+                        height: 36px; background: #FFF8E1; border-radius: 4px;
+                        border-width: 1px; border-color: #FFB300;
+                        HorizontalBox { padding: 8px; Text { text: "Company name must exactly match the company name in your accounting software (case-sensitive for Tally)."; font-size: 11px; color: #5A7090; wrap: word-wrap; vertical-alignment: center; } }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                // Step 3: Period
+                if root.wiz-step == 3 : VerticalBox { padding: 20px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: "SELECT EXPORT PERIOD"; font-size: 12px; font-weight: 600; color: #1565C0; letter-spacing: 0.5px; }
+                    HorizontalBox { padding: 0px; spacing: 12px;
+                        VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                            Text { text: "From Date"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; text: root.wiz-from; edited(v) => { root.wiz-from = v; } }
+                        }
+                        VerticalBox { padding: 0px; spacing: 4px; horizontal-stretch: 1;
+                            Text { text: "To Date"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; text: root.wiz-to; edited(v) => { root.wiz-to = v; } }
+                        }
+                    }
+                    Rectangle {
+                        height: 36px; background: #E3F2FD; border-radius: 6px;
+                        HorizontalBox { padding: 10px; Text { text: "Leave dates blank to export all transactions. Use dates to export a partial period (e.g. if you have already posted some months)."; font-size: 11px; color: #0D47A1; wrap: word-wrap; vertical-alignment: center; } }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                // Step 4: Options
+                if root.wiz-step == 4 : VerticalBox { padding: 20px; spacing: 8px; vertical-stretch: 1;
+                    Text { text: "EXPORT OPTIONS"; font-size: 12px; font-weight: 600; color: #1565C0; letter-spacing: 0.5px; }
+                    for opt in [
+                        {lbl: "Include Opening Balance entry", sub: "Creates a Journal entry for the bank opening balance"},
+                        {lbl: "Include GST details", sub: "Adds GST tag notes to narrations where detected"},
+                        {lbl: "Include Ledger Creation entries", sub: "Adds LEDGER CREATE entries before vouchers"},
+                        {lbl: "Include voucher narrations", sub: "Includes original bank narration text in voucher narration field"},
+                        {lbl: "Export only classified transactions", sub: "Skips unreviewed / suspense transactions — recommended"},
+                        {lbl: "Skip low-confidence classifications", sub: "Excludes transactions with confidence < 40% to reduce errors"},
+                    ] : Rectangle {
+                        height: 44px; background: #F8FAFF; border-radius: 7px;
+                        border-width: 1px; border-color: #E0EBF5;
+                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
+                            CheckBox { checked: opt.lbl == "Include GST details" || opt.lbl == "Include Ledger Creation entries" || opt.lbl == "Include voucher narrations" || opt.lbl == "Export only classified transactions"; }
+                            VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
+                                Text { text: opt.lbl; font-size: 12px; font-weight: 600; color: #1A237E; }
+                                Text { text: opt.sub; font-size: 10px; color: #6B84A0; }
+                            }
+                        }
+                    }
+                }
+
+                // Wizard footer
+                MFtr {
+                    MBtn { text: "\u{2190} Back"; bg: #F5F5F5; fg: #546E7A; enabled: root.wiz-step > 1;
+                        clicked => { if root.wiz-step > 1 { root.wiz-step -= 1; } }
+                    }
+                    if root.wiz-step < 4 : MBtn { text: "Next \u{2192}"; bg: #1565C0;
+                        clicked => { root.wiz-step += 1; }
+                    }
+                    if root.wiz-step == 4 : MBtn { text: "\u{2193} Download"; bg: #1A237E; fg: white;
+                        clicked => { root.export-accounting(); root.modal-state = ""; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; root.wiz-step = 1; } }
+                }
+            }
+        }
+    }
+
+    // ── AI Privacy Consent modal ───────────────────────────────────────────────
+    if root.modal-state == "ai-consent" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 580px) / 2; y: (parent.height - 580px) / 2;
+            width: 580px; height: 580px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                // Red header
+                Rectangle {
+                    height: 64px; background: #C62828; border-radius: 4px;
+                    HorizontalBox { padding-left: 18px; padding-right: 12px; padding-top: 0px; padding-bottom: 0px; spacing: 12px;
+                        Text { text: "\u{26A0}"; font-size: 24px; color: white; vertical-alignment: center; }
+                        VerticalBox { padding: 0px; spacing: 2px; alignment: center; horizontal-stretch: 1;
+                            Text { text: "AI Auto-Classify \u{2014} Confidentiality Warning"; font-size: 14px; font-weight: 700; color: white; }
+                            Text { text: "Read carefully before proceeding"; font-size: 11px; color: #FFCDD2; }
+                        }
+                        Rectangle {
+                            width: 28px; height: 28px; border-radius: 14px; background: #00000030;
+                            TouchArea { clicked => { root.modal-state = ""; } }
+                            Text { text: "\u{2715}"; font-size: 13px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+                ScrollView { vertical-stretch: 1;
+                    VerticalBox { padding: 18px; spacing: 12px;
+                        // Lead warning
+                        Rectangle {
+                            height: 70px; background: #FFF3E0; border-radius: 5px;
+                            border-width: 1px; border-color: #E65100;
+                            HorizontalBox { padding: 12px; spacing: 10px;
+                                Text { text: "\u{1F512}"; font-size: 20px; vertical-alignment: center; }
+                                Text { text: "This feature may send transaction narrations and related accounting data to third-party AI platforms for automated classification. Confidentiality of data may be compromised if sensitive, financial, personal, or proprietary business information is submitted to external AI systems."; font-size: 12px; color: #4E342E; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
+                            }
+                        }
+                        // What is transmitted
+                        Rectangle {
+                            background: #FAFAFA; border-radius: 5px; border-width: 1px; border-color: #E0E0E0;
+                            VerticalBox { padding: 10px; spacing: 4px;
+                                Text { text: "WHAT IS TRANSMITTED"; font-size: 11px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
+                                Text { text: "\u{2022} Transaction narration / description text\n\u{2022} Transaction amounts (debit / credit values)\n\u{2022} Extracted vendor or party names"; font-size: 12px; color: #37474F; }
+                                Rectangle { height: 28px; background: #F1F8E9; border-radius: 4px; border-width: 1px; border-color: #AED581;
+                                    HorizontalBox { padding: 6px; Text { text: "\u{2713}  Account numbers, IFSC codes, bank names and balances are not transmitted."; font-size: 11px; color: #2E7D32; vertical-alignment: center; } }
+                                }
+                            }
+                        }
+                        // Risks
+                        Rectangle {
+                            background: #FAFAFA; border-radius: 5px; border-width: 1px; border-color: #E0E0E0;
+                            VerticalBox { padding: 10px; spacing: 4px;
+                                Text { text: "\u{26A0} POTENTIAL RISKS"; font-size: 11px; font-weight: 700; color: #C62828; letter-spacing: 0.5px; }
+                                Text { text: "\u{2022} Unauthorized access or interception during transmission\n\u{2022} Data leakage or retention by third-party AI platforms\n\u{2022} Exposure of confidential business or client information\n\u{2022} Regulatory, privacy, or compliance violations (GDPR, IT Act, etc.)"; font-size: 12px; color: #B71C1C; }
+                            }
+                        }
+                        // Consent checkbox
+                        Rectangle {
+                            height: 50px; background: #FFF8E1; border-radius: 6px;
+                            border-width: 2px; border-color: #F9A825;
+                            HorizontalBox { padding: 12px; spacing: 10px;
+                                CheckBox { }
+                                Text { text: "I have read and understood the above. I acknowledge and accept the confidentiality and compliance risks of using AI classification."; font-size: 12px; font-weight: 600; color: #4E342E; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
+                            }
+                        }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "\u{25BA} Continue with AI"; bg: #6B2FB8; fg: white;
+                        clicked => { root.modal-state = "ai-settings"; }
+                    }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // ── PDF Password modal ─────────────────────────────────────────────────────
+    if root.pdf-pwd-visible : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        Rectangle {
+            x: (parent.width - 380px) / 2; y: (parent.height - 200px) / 2;
+            width: 380px; height: 200px; background: white; border-radius: 8px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Password Protected PDF"; close => { root.pdf-pwd-cancel(); } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: root.pdf-pwd-prompt; font-size: 13px; color: #444444; wrap: word-wrap; }
+                    LineEdit {
+                        placeholder-text: "Enter PDF password"; height: 34px;
+                        input-type: password;
+                        text: root.pdf-pwd-input;
+                        edited(v) => { root.pdf-pwd-input = v; }
+                        accepted => { root.pdf-pwd-confirm(root.pdf-pwd-input); }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "Unlock"; bg: #1565C0; clicked => { root.pdf-pwd-confirm(root.pdf-pwd-input); } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.pdf-pwd-cancel(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+    }
+
+    // ── OCR Progress overlay ───────────────────────────────────────────────────
+    if root.ocr-visible : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000060;
+        Rectangle {
+            x: (parent.width - 360px) / 2; y: (parent.height - 180px) / 2;
+            width: 360px; height: 180px; background: white; border-radius: 10px;
+            drop-shadow-blur: 40px; drop-shadow-color: #0000004D; drop-shadow-offset-y: 12px;
+            Rectangle { x: 0; y: 0; height: 4px; background: #1565C0; }
+            VerticalBox {
+                padding: 28px; spacing: 10px; alignment: center;
+                Text { text: "OCR Processing"; font-size: 15px; font-weight: 700; color: #0A1929; horizontal-alignment: center; }
+                Text { text: root.ocr-msg; font-size: 13px; color: #555555; horizontal-alignment: center; min-height: 18px; }
+                // Progress bar
+                Rectangle {
+                    height: 10px; background: #E3F2FD; border-radius: 5px;
+                    Rectangle {
+                        width: parent.width * root.ocr-pct / 100;
+                        height: parent.height; background: #1565C0; border-radius: 5px;
+                    }
+                }
+                Text {
+                    text: root.ocr-pct + "%";
+                    font-size: 12px; font-weight: 600; color: #1565C0;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // ── AI Classification Progress overlay ─────────────────────────────────────
+    if root.ai-overlay-visible : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000060;
+        Rectangle {
+            x: (parent.width - 360px) / 2; y: (parent.height - 220px) / 2;
+            width: 360px; height: 220px; background: white; border-radius: 10px;
+            drop-shadow-blur: 40px; drop-shadow-color: #0000004D; drop-shadow-offset-y: 12px;
+            Rectangle { x: 0; y: 0; height: 4px; background: #6B2FB8; }
+            VerticalBox {
+                padding: 28px; spacing: 10px; alignment: center;
+                Text { text: "\u{2605} AI Classification in Progress"; font-size: 15px; font-weight: 700; color: #0A1929; horizontal-alignment: center; }
+                Text { text: root.ai-msg; font-size: 13px; color: #555555; horizontal-alignment: center; min-height: 18px; }
+                // Progress bar
+                Rectangle {
+                    height: 10px; background: #EDE7F6; border-radius: 5px;
+                    Rectangle {
+                        width: parent.width * root.ai-pct / 100;
+                        height: parent.height; background: #6B2FB8; border-radius: 5px;
+                    }
+                }
+                Text { text: root.ai-pct + "%"; font-size: 12px; font-weight: 600; color: #6B2FB8; horizontal-alignment: center; }
+                Text { text: "Sending transaction narrations to AI provider…\nDo not close the window."; font-size: 11px; color: #888888; horizontal-alignment: center; wrap: word-wrap; }
+                Rectangle {
+                    height: 30px; width: 100px;
+                    background: #FFFFFF; border-radius: 4px; border-width: 1px; border-color: #90CAF9;
+                    TouchArea { clicked => { root.ai-cancel(); } }
+                    Text { text: "Cancel"; font-size: 12px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+
+    // ── Toast notification ─────────────────────────────────────────────────────
+    if root.toast-msg != "" : Rectangle {
+        x: (root.width - 280px) / 2;
+        y: root.height - 80px;
+        width: 280px; height: 36px;
+        background:
+            root.toast-kind == 1 ? #2E7D32 :
+            root.toast-kind == 2 ? #C62828 :
+            root.toast-kind == 3 ? #E65100 :
+            #0D47A1;
+        border-radius: 5px;
+        drop-shadow-blur: 12px; drop-shadow-color: #00000030; drop-shadow-offset-y: 4px;
+        Text {
+            text: root.toast-msg;
+            font-size: 12px; font-weight: 600; color: white;
+            horizontal-alignment: center; vertical-alignment: center;
         }
     }
 }
