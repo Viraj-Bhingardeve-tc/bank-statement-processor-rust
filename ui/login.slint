@@ -64,6 +64,12 @@ export component LoginScreen inherits Rectangle {
                 height: 36px; border-radius: 5px;
                 border-width: 1px; border-color: email-ti.has-focus ? #1565C0 : #90CAF9;
                 background: #FFFFFF;
+                // Placeholder — visible when empty and not focused
+                if root.email-val == "" && !email-ti.has-focus : Text {
+                    x: 13px; width: parent.width - 26px; height: parent.height;
+                    text: "yourname@company.com";
+                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
+                }
                 email-ti := TextInput {
                     x: 12px; width: parent.width - 24px; height: parent.height;
                     font-size: 13px; color: #0A1929;
@@ -85,6 +91,12 @@ export component LoginScreen inherits Rectangle {
                 height: 36px; border-radius: 5px;
                 border-width: 1px; border-color: pwd-ti.has-focus ? #1565C0 : #90CAF9;
                 background: #FFFFFF;
+                // Placeholder — visible when empty and not focused
+                if root.pwd-val == "" && !pwd-ti.has-focus : Text {
+                    x: 13px; width: parent.width - 26px; height: parent.height;
+                    text: "XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX";
+                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
+                }
                 pwd-ti := TextInput {
                     x: 12px; width: parent.width - 24px; height: parent.height;
                     font-size: 13px; color: #0A1929;

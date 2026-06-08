@@ -700,9 +700,13 @@ export component MainScreen inherits Rectangle {
         width: root.width; height: root.height;
 
         // ─────────────────────────── TOOLBAR ──────────────────────────────────
-        // background: #1565C0, box-shadow via drop-shadow, border-bottom: 2px solid #0D47A1
+        // background: #1565C0, box-shadow: 0 2px 8px rgba(13,71,161,.40), border-bottom: 2px solid #0D47A1
         Rectangle {
             height: 50px; background: #1565C0;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #0D47A166;
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 2px;
 
             // Bottom border
             Rectangle {
@@ -985,7 +989,7 @@ export component MainScreen inherits Rectangle {
                                 alignment: center; spacing: 12px;
                                 Text {
                                     text: "Select a client, then load a bank statement (Excel .xlsx / .xls)";
-                                    font-size: 13px; color: #AAAAAA;
+                                    font-size: 13px; color: #AAAAAA; font-italic: true;
                                     horizontal-alignment: center; wrap: word-wrap;
                                 }
                             }
@@ -1103,10 +1107,11 @@ export component MainScreen inherits Rectangle {
                                 Rectangle { height: 8px; }  // padding-bottom:8px before border
                                 Rectangle { height: 3px; background: #1565C0; }
 
-                                // No-data placeholder
+                                // .sum-placeholder { color:#aaa; font-style:italic; font-size:12px; margin-top:20px; text-align:center }
+                                if root.transaction-rows.length == 0 : Rectangle { height: 20px; }
                                 if root.transaction-rows.length == 0 : Text {
                                     text: "No data loaded";
-                                    font-size: 12px; color: #AAAAAA;
+                                    font-size: 12px; color: #AAAAAA; font-italic: true;
                                     horizontal-alignment: center; wrap: word-wrap;
                                 }
 
@@ -1342,8 +1347,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 480px) / 2; y: (parent.height - 360px) / 2;
-            width: 480px; height: 360px; background: white; border-radius: 8px;
+            x: (parent.width - 470px) / 2; y: (parent.height - 360px) / 2;
+            width: 470px; height: 360px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1375,8 +1380,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 640px) / 2; y: (parent.height - 480px) / 2;
-            width: 640px; height: 480px; background: white; border-radius: 8px;
+            x: (parent.width - 470px) / 2; y: (parent.height - 480px) / 2;
+            width: 470px; height: 480px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1468,8 +1473,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 660px) / 2; y: (parent.height - 520px) / 2;
-            width: 660px; height: 520px; background: white; border-radius: 8px;
+            x: (parent.width - 700px) / 2; y: (parent.height - 520px) / 2;
+            width: 700px; height: 520px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1588,8 +1593,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 640px) / 2; y: (parent.height - 400px) / 2;
-            width: 640px; height: 400px; background: white; border-radius: 8px;
+            x: (parent.width - 700px) / 2; y: (parent.height - 400px) / 2;
+            width: 700px; height: 400px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1638,8 +1643,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 620px) / 2; y: (parent.height - 340px) / 2;
-            width: 620px; height: 340px; background: white; border-radius: 8px;
+            x: (parent.width - 700px) / 2; y: (parent.height - 340px) / 2;
+            width: 700px; height: 340px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1670,8 +1675,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 660px) / 2; y: (parent.height - 440px) / 2;
-            width: 660px; height: 440px; background: white; border-radius: 8px;
+            x: (parent.width - 700px) / 2; y: (parent.height - 440px) / 2;
+            width: 700px; height: 440px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1704,8 +1709,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 500px) / 2; y: (parent.height - 440px) / 2;
-            width: 500px; height: 440px; background: white; border-radius: 8px;
+            x: (parent.width - 470px) / 2; y: (parent.height - 440px) / 2;
+            width: 470px; height: 440px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1770,9 +1775,9 @@ export component MainScreen inherits Rectangle {
                             root.modal-state = "";
                         }
                     }
-                    // Original: class="btn btn-orange" → background:#e65100 (not purple)
+                    // Original: class="btn btn-orange" → background:#e65100
                     MBtn {
-                        text: "Mark Suspense"; bg: #E65100; fg: white;
+                        text: "Mark as Suspense"; bg: #E65100; fg: white;
                         clicked => { root.mark-suspense(root.edit-txn-idx); root.modal-state = ""; }
                     }
                     MBtn {
@@ -1790,8 +1795,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 500px) / 2; y: (parent.height - 520px) / 2;
-            width: 500px; height: 520px; background: white; border-radius: 8px;
+            x: (parent.width - 470px) / 2; y: (parent.height - 520px) / 2;
+            width: 470px; height: 520px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1866,8 +1871,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 760px) / 2; y: (parent.height - 500px) / 2;
-            width: 760px; height: 500px; background: white; border-radius: 8px;
+            x: (parent.width - 700px) / 2; y: (parent.height - 500px) / 2;
+            width: 700px; height: 500px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1916,8 +1921,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 580px) / 2; y: (parent.height - 540px) / 2;
-            width: 580px; height: 540px; background: white; border-radius: 8px;
+            x: (parent.width - 660px) / 2; y: (parent.height - 540px) / 2;
+            width: 660px; height: 540px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -2090,8 +2095,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 580px) / 2; y: (parent.height - 580px) / 2;
-            width: 580px; height: 580px; background: white; border-radius: 8px;
+            x: (parent.width - 470px) / 2; y: (parent.height - 580px) / 2;
+            width: 470px; height: 580px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -2222,11 +2227,12 @@ export component MainScreen inherits Rectangle {
     }
 
     // ── AI Classification Progress overlay ─────────────────────────────────────
+    // .ai-box { width: 380px; } from original CSS
     if root.ai-overlay-visible : Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000060;
         Rectangle {
-            x: (parent.width - 360px) / 2; y: (parent.height - 220px) / 2;
-            width: 360px; height: 220px; background: white; border-radius: 10px;
+            x: (parent.width - 380px) / 2; y: (parent.height - 220px) / 2;
+            width: 380px; height: 220px; background: white; border-radius: 10px;
             drop-shadow-blur: 40px; drop-shadow-color: #0000004D; drop-shadow-offset-y: 12px;
             Rectangle { x: 0; y: 0; height: 4px; background: #6B2FB8; }
             VerticalBox {
