@@ -383,81 +383,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "slint-ui")]
     {
         let app = AppWindow::new()?;
-
-        // DEV: auto-login + auto-load test file for dashboard verification
-        app.set_logged_in(true);
-        app.set_start_dashboard(true);
-
-        // DEV: auto-load HDFC test file to show dashboard with data
-        {
-            let test_path = std::path::PathBuf::from(
-                "C:/Users/ADMIN/Desktop/myproject/bank-statement-processing/assets/HDFC.xls"
-            );
-            if test_path.exists() {
-                match parser::excel_parser::parse_excel_file(&test_path) {
-                    Ok(r) => {
-                        let real: Vec<&parser::Transaction> = r.transactions.iter()
-                            .filter(|t| !t.is_opening_balance).collect();
-                        let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
-                        let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
-                        let bank_set: std::collections::BTreeSet<&String> =
-                            real.iter().map(|t| &t.bank_name).collect();
-                        let row_models: Vec<TxnRow> = real.iter().map(|t| {
-                            let row_color: i32 = match t.status {
-                                parser::TransactionStatus::NeedsReview => 3,
-                                parser::TransactionStatus::Suspense    => 4,
-                                parser::TransactionStatus::Manual      => 6,
-                                _ if t.dup_flag => 5,
-                                parser::TransactionStatus::Classified  => 1,
-                                _ => 0,
-                            };
-                            TxnRow {
-                                bank_name:    SharedString::from(t.bank_name.as_str()),
-                                account_no:   SharedString::from(t.account_no.as_str()),
-                                date:         SharedString::from(t.date.as_str()),
-                                narration:    SharedString::from(t.narration.chars().take(80).collect::<String>().as_str()),
-                                ref_no:       SharedString::from(t.reference.as_str()),
-                                debit:        SharedString::from(fmt_cell(t.debit).as_str()),
-                                credit:       SharedString::from(fmt_cell(t.credit).as_str()),
-                                balance:      SharedString::from(fmt_cell(t.balance).as_str()),
-                                vendor:       SharedString::from(t.vendor.as_str()),
-                                ledger:       SharedString::from(t.account_head.as_str()),
-                                expense_head: SharedString::from(""),
-                                status_text:  SharedString::from(t.status.to_string().as_str()),
-                                tags:         SharedString::from(""),
-                                review:       SharedString::from(""),
-                                row_color,
-                                has_gst: false, has_tax: false, has_dup_tag: t.dup_flag,
-                            }
-                        }).collect();
-                        let mut bank_names: Vec<SharedString> =
-                            std::iter::once(SharedString::from("All Banks"))
-                            .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
-                            .collect();
-                        app.set_transaction_rows(
-                            slint::ModelRc::new(slint::VecModel::from(row_models)));
-                        app.set_bank_names(
-                            slint::ModelRc::new(slint::VecModel::from(bank_names)));
-                        app.set_dash_bank_name(SharedString::from(r.bank_name.as_str()));
-                        app.set_dash_opening(SharedString::from(
-                            ui::AppState::fmt_amount(r.opening_balance).as_str()));
-                        app.set_dash_closing(SharedString::from(
-                            ui::AppState::fmt_amount(r.closing_balance).as_str()));
-                        app.set_dash_credits(SharedString::from(
-                            ui::AppState::fmt_amount(Some(total_cr)).as_str()));
-                        app.set_dash_debits(SharedString::from(
-                            ui::AppState::fmt_amount(Some(total_dr)).as_str()));
-                        app.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
-                        let cnt = real.len().to_string();
-                        app.set_fc_all(SharedString::from(cnt.as_str()));
-                        app.set_status_file(SharedString::from("HDFC.xls"));
-                        push_dashboard(&app, &r.transactions, r.opening_balance);
-                        log::info!("DEV: auto-loaded {} HDFC transactions", real.len());
-                    }
-                    Err(e) => log::warn!("DEV auto-load failed: {}", e),
-                }
-            }
-        }
+        // Login screen shown by default (logged-in = false, set by Slint default)
 
         let app_state: Arc<Mutex<ui::AppState>> =
             Arc::new(Mutex::new(ui::AppState::default()));
@@ -939,26 +865,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ── New Client ────────────────────────────────────────────────────────
         {
             let handle    = app.as_weak();
+            let state_ref = app_state.clone();
             let db_ref    = db_conn.clone();
             app.on_do_new_client(move || {
-                // The modal already collected name+tally-ledger from the UI form fields.
-                // We need those values — for now we read the modal's LineEdit values
-                // via a naming convention that the Slint modal stores internally.
-                // Since Slint doesn't expose inner modal field values to Rust directly,
-                // we store the client with a placeholder and update it when Save is pressed.
-                // The "new-client" callback fires after modal closes; we can't read
-                // the LineEdit values here without adding out-props to the Slint component.
-                // For now, log the action and refresh the client list.
-                log::info!("[NewClient] callback fired — implement field read from modal");
                 let h = match handle.upgrade() { Some(h) => h, None => return };
-                let db = db_ref.lock().unwrap();
-                if let Some(conn) = db.as_ref() {
-                    if let Ok(clients) = db::get_clients(conn) {
-                        let names: Vec<SharedString> =
-                            std::iter::once(SharedString::from("-- Select Client --"))
-                            .chain(clients.iter().map(|c| SharedString::from(c.name.as_str())))
-                            .collect();
-                        h.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                // Read the fields that were synced via the in-out properties
+                let name   = h.get_new_client_name().to_string();
+                let ledger = h.get_new_client_ledger().to_string();
+                if name.trim().is_empty() {
+                    log::warn!("[NewClient] name is empty — skipping");
+                    return;
+                }
+                // Write to DB
+                let new_id = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        match db::add_client(conn, name.trim(), ledger.trim()) {
+                            Ok(id) => { log::info!("[NewClient] created id={} name='{}' ledger='{}'", id, name, ledger); Some(id) }
+                            Err(e) => { log::error!("[NewClient] DB error: {}", e); None }
+                        }
+                    } else { None }
+                };
+                // Update AppState
+                if let Some(id) = new_id {
+                    let mut st = state_ref.lock().unwrap();
+                    st.client_id     = Some(id);
+                    st.client_name   = name.trim().to_string();
+                    st.tally_ledger  = ledger.trim().to_string();
+                }
+                // Refresh client dropdown
+                {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        if let Ok(clients) = db::get_clients(conn) {
+                            let names: Vec<SharedString> =
+                                std::iter::once(SharedString::from("-- Select Client --"))
+                                .chain(clients.iter().map(|c| SharedString::from(c.name.as_str())))
+                                .collect();
+                            h.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                        }
                     }
                 }
             });
@@ -990,11 +935,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             app.on_do_ai_classify(|| stub_callback("ai-classify"));
         }
+        // ── View Rules ────────────────────────────────────────────────────────
         {
-            app.on_do_view_rules(|| stub_callback("view-rules"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_view_rules(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                let client_id = st.client_id.unwrap_or(0);
+                drop(st);
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    match db::get_rules(conn, client_id) {
+                        Ok(rules) => {
+                            // Format: "PATTERN  |  VENDOR  |  HEAD  |  TYPE"
+                            let recs: Vec<SharedString> = rules.iter().map(|r| {
+                                SharedString::from(format!(
+                                    "{}  |  {}  |  {}  |  {}",
+                                    r.pattern,
+                                    if r.vendor.is_empty() { "—" } else { &r.vendor },
+                                    if r.account_head.is_empty() { "—" } else { &r.account_head },
+                                    if r.txn_type.is_empty() { "—" } else { &r.txn_type },
+                                ).as_str())
+                            }).collect();
+                            h.set_rule_records(slint::ModelRc::new(slint::VecModel::from(recs)));
+                            log::info!("[ViewRules] loaded {} rules for client_id={}", rules.len(), client_id);
+                        }
+                        Err(e) => log::error!("[ViewRules] DB error: {}", e),
+                    }
+                }
+            });
         }
+
+        // ── Import History ─────────────────────────────────────────────────────
         {
-            app.on_do_import_history(|| stub_callback("import-history"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_import_history(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                let client_id = st.client_id.unwrap_or(0);
+                drop(st);
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    match db::get_imports(conn, client_id) {
+                        Ok(imports) => {
+                            // Format: "FILENAME  |  DATE  |  TXNS rows"
+                            let recs: Vec<SharedString> = imports.iter().map(|imp| {
+                                // imported_at is ISO datetime e.g. "2024-06-05 14:32:00"
+                                let date = &imp.imported_at[..imp.imported_at.len().min(16)];
+                                SharedString::from(format!(
+                                    "{}  |  {}  |  {} transactions",
+                                    imp.file_name, date, imp.txn_count
+                                ).as_str())
+                            }).collect();
+                            h.set_import_records(slint::ModelRc::new(slint::VecModel::from(recs)));
+                            log::info!("[ImportHistory] loaded {} records for client_id={}", imports.len(), client_id);
+                        }
+                        Err(e) => log::error!("[ImportHistory] DB error: {}", e),
+                    }
+                }
+            });
         }
         {
             app.on_do_import_ledgers(|| stub_callback("import-ledgers"));
@@ -1124,13 +1127,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log::warn!("[ExportAccounting] No transactions to export");
                     return;
                 }
-                // Wizard state lives in MainScreen (not AppWindow), so we read AppState fields
-                // that were synced when the wizard callback fired.
-                let sw_idx  = st.wiz_sw_idx;
-                let company = st.wiz_company.clone();
-                let gstin   = st.wiz_gstin.clone();
-                let from    = st.wiz_date_from.clone();
-                let to      = st.wiz_date_to.clone();
+                // Wizard fields are now exposed on AppWindow via in-out bindings;
+                // read them directly from the handle.
+                let sw_idx  = h.get_wiz_sw_idx();
+                let company = h.get_wiz_company().to_string();
+                let gstin   = h.get_wiz_gstin().to_string();
+                let from    = h.get_wiz_date_from().to_string();
+                let to      = h.get_wiz_date_to().to_string();
 
                 let software = export::accounting::Software::from_idx(sw_idx);
                 let opts = export::accounting::AccountingOpts {
@@ -1246,6 +1249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
 
             app.on_do_save_txn(move |idx, vendor, head, typ, learn| {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
@@ -1265,6 +1269,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     t.status     = parser::TransactionStatus::Classified;
                     t.confidence = 1.0;
+
+                    // Save & Learn: derive a narration pattern and persist as a rule
+                    if learn {
+                        let pattern = {
+                            // Port of JS _pattern(): strip long digit runs, take first 30 chars uppercase
+                            let stripped = regex::Regex::new(r"\b\d{6,}\b").unwrap()
+                                .replace_all(&t.narration, "").to_string();
+                            stripped.trim().to_uppercase().chars().take(30).collect::<String>()
+                        };
+                        if !pattern.is_empty() {
+                            let client_id = st.client_id.unwrap_or(0);
+                            let db = db_ref.lock().unwrap();
+                            if let Some(conn) = db.as_ref() {
+                                match db::add_rule(conn, client_id, &pattern, &vendor, &head, &typ) {
+                                    Ok(_)  => log::info!("[SaveLearn] rule saved: pattern='{}' head='{}' vendor='{}'", pattern, head, vendor),
+                                    Err(e) => log::error!("[SaveLearn] DB error: {}", e),
+                                }
+                            }
+                        }
+                    }
                     log::info!("[SaveTxn] abs={} vendor='{}' head='{}' type='{}' learn={}", abs, vendor, head, typ, learn);
                 }
                 rebuild_rows(&h, &st);

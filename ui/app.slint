@@ -61,6 +61,25 @@ export component AppWindow inherits Window {
     // ── Client list ───────────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
 
+    // ── New Client modal fields (read by Rust in do-new-client) ──────────────
+    in-out property <string> new-client-name:   "";
+    in-out property <string> new-client-ledger: "";
+
+    // ── Export Wizard fields (synced from MainScreen so Rust can read them) ───
+    in-out property <int>    wiz-sw-idx:    0;
+    in-out property <string> wiz-company:   "";
+    in-out property <string> wiz-gstin:     "";
+    in-out property <string> wiz-date-from: "";
+    in-out property <string> wiz-date-to:   "";
+
+    // ── Import History records (set by Rust in do-import-history) ────────────
+    // Each entry: "FILE\tDATE\tCOUNT" tab-separated
+    in property <[string]> import-records: [];
+
+    // ── Rules records (set by Rust in do-view-rules) ─────────────────────────
+    // Each entry: "PATTERN\tVENDOR\tHEAD\tTYPE\tID"
+    in property <[string]> rule-records: [];
+
     // ── Edit Transaction (set by Rust when a row is selected) ─────────────────
     in property <string> edit-txn-date:     "";
     in property <string> edit-txn-narr:     "";
@@ -150,6 +169,15 @@ export component AppWindow inherits Window {
     if root.logged-in : MainScreen {
         width: root.width; height: root.height;
         client-names:      root.client-names;
+        new-client-name   <=> root.new-client-name;
+        new-client-ledger <=> root.new-client-ledger;
+        wiz-sw-idx  <=> root.wiz-sw-idx;
+        wiz-company <=> root.wiz-company;
+        wiz-gstin   <=> root.wiz-gstin;
+        wiz-from    <=> root.wiz-date-from;
+        wiz-to      <=> root.wiz-date-to;
+        import-records:   root.import-records;
+        rule-records:     root.rule-records;
         status-bank:       root.status-bank;
         status-file:       root.status-file;
         transaction-rows:  root.transaction-rows;

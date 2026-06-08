@@ -574,6 +574,12 @@ export component MainScreen inherits Rectangle {
 
     // ── Data ──────────────────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
+    // New client fields — in-out so Rust can read them back in do-new-client
+    in-out property <string> new-client-name:   "";
+    in-out property <string> new-client-ledger: "";
+    // Import history + rules records set by Rust
+    in property <[string]> import-records: [];
+    in property <[string]> rule-records:   [];
     in property <string>   status-bank:  "";
     in property <string>   status-file:  "";
     in property <[TxnRow]>  transaction-rows: [];
@@ -736,7 +742,7 @@ export component MainScreen inherits Rectangle {
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
                 TBtn { text: "Load Single File"; clicked => { root.load-file(); } }
-                TBtn { text: "Batch Process Folder"; enabled: false; clicked => { root.batch-folder(); } }
+                TBtn { text: "Batch Process Folder"; enabled: true; clicked => { root.batch-folder(); } }
 
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
@@ -1305,14 +1311,27 @@ export component MainScreen inherits Rectangle {
                 MHdr { title: "Add New Client"; close => { root.modal-state = ""; } }
                 VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
                     Text { text: "Client Name *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    LineEdit { placeholder-text: "e.g. Acme Pvt Ltd"; height: 34px; }
+                    LineEdit {
+                        placeholder-text: "e.g. Acme Pvt Ltd"; height: 34px;
+                        text: root.new-client-name;
+                        edited(v) => { root.new-client-name = v; }
+                    }
                     Text { text: "Bank Ledger Name in Tally *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    LineEdit { placeholder-text: "e.g. HDFC Bank A/c - 5021"; height: 34px; }
+                    LineEdit {
+                        placeholder-text: "e.g. HDFC Bank A/c - 5021"; height: 34px;
+                        text: root.new-client-ledger;
+                        edited(v) => { root.new-client-ledger = v; }
+                    }
                     // .fg small { font-size:11px; color:#999; margin-top:3px }
                     Text { text: "Must exactly match the ledger name in your Tally company (case-sensitive)"; font-size: 11px; color: #999999; wrap: word-wrap; }
                 }
                 MFtr {
-                    MBtn { text: "Save Client"; bg: #1565C0; clicked => { root.modal-state = ""; root.new-client(); } }
+                    MBtn { text: "Save Client"; bg: #1565C0; clicked => {
+                        root.new-client();
+                        root.modal-state = "";
+                        root.new-client-name = "";
+                        root.new-client-ledger = "";
+                    } }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
@@ -1515,8 +1534,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 700px) / 2; y: (parent.height - 360px) / 2;
-            width: 700px; height: 360px; background: white; border-radius: 8px;
+            x: (parent.width - 700px) / 2; y: (parent.height - 400px) / 2;
+            width: 700px; height: 400px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1524,11 +1543,38 @@ export component MainScreen inherits Rectangle {
                 Rectangle { height: 4px; background: #1565C0; }
                 MHdr { title: "Import History"; close => { root.modal-state = ""; } }
                 VerticalBox { padding: 18px; spacing: 8px; vertical-stretch: 1;
-                    Text { text: "Stored locally. Up to 20 imports per client. Loading replaces the current session."; font-size: 11px; color: #888888; wrap: word-wrap; }
-                    Rectangle {
-                        vertical-stretch: 1; background: #F5F5F5;
+                    Text { text: "Up to 20 imports per client are recorded in the database."; font-size: 11px; color: #888888; wrap: word-wrap; }
+                    if root.import-records.length == 0 : Rectangle {
+                        height: 60px; background: #F5F5F5;
                         border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
-                        Text { text: "No import history available."; font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: "No import history for this client yet."; font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    if root.import-records.length > 0 : Rectangle {
+                        vertical-stretch: 1;
+                        // Header row
+                        Rectangle {
+                            y: 0; height: 28px; background: #1565C0;
+                            HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px;
+                                Text { text: "File / Batch"; font-size: 12px; font-weight: 600; color: white; horizontal-stretch: 2; vertical-alignment: center; }
+                                Text { text: "Date"; font-size: 12px; font-weight: 600; color: white; min-width: 140px; vertical-alignment: center; }
+                                Text { text: "Txns"; font-size: 12px; font-weight: 600; color: white; min-width: 50px; vertical-alignment: center; }
+                            }
+                        }
+                        ListView {
+                            y: 28px; height: parent.height - 28px;
+                            for rec in root.import-records : Rectangle {
+                                height: 26px; background: #FFFFFF;
+                                Rectangle { y: 25px; height: 1px; background: #E3F2FD; }
+                                HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px;
+                                    // Format: "FILE\tDATE\tCOUNT" — split by tab
+                                    Text {
+                                        text: rec;  // show full record; Rust formats nicely
+                                        font-size: 12px; color: #0A1929;
+                                        vertical-alignment: center; overflow: elide;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 MFtr {
@@ -1542,17 +1588,42 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 620px) / 2; y: (parent.height - 360px) / 2;
-            width: 620px; height: 360px; background: white; border-radius: 8px;
+            x: (parent.width - 640px) / 2; y: (parent.height - 400px) / 2;
+            width: 640px; height: 400px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
             VerticalBox { padding: 0px; spacing: 0px;
                 Rectangle { height: 4px; background: #1565C0; }
                 MHdr { title: "Learned Rules"; close => { root.modal-state = ""; } }
-                Rectangle {
+                if root.rule-records.length == 0 : Rectangle {
                     vertical-stretch: 1; background: #F5F5F5;
                     Text { text: "No learned rules yet. Edit transactions and click \"Save & Learn\" to create rules."; font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
+                }
+                if root.rule-records.length > 0 : Rectangle {
+                    vertical-stretch: 1;
+                    Rectangle {
+                        y: 0; height: 28px; background: #1565C0;
+                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px;
+                            Text { text: "Pattern"; font-size: 12px; font-weight: 600; color: white; horizontal-stretch: 2; vertical-alignment: center; }
+                            Text { text: "Vendor"; font-size: 12px; font-weight: 600; color: white; min-width: 110px; vertical-alignment: center; }
+                            Text { text: "Account Head"; font-size: 12px; font-weight: 600; color: white; min-width: 110px; vertical-alignment: center; }
+                            Text { text: "Type"; font-size: 12px; font-weight: 600; color: white; min-width: 60px; vertical-alignment: center; }
+                        }
+                    }
+                    ListView {
+                        y: 28px; height: parent.height - 28px;
+                        for rec in root.rule-records : Rectangle {
+                            height: 26px; background: #FFFFFF;
+                            Rectangle { y: 25px; height: 1px; background: #E3F2FD; }
+                            Text {
+                                x: 10px; width: parent.width - 20px; height: parent.height;
+                                text: rec;
+                                font-size: 11px; color: #0A1929;
+                                vertical-alignment: center; overflow: elide;
+                            }
+                        }
+                    }
                 }
                 MFtr {
                     MBtn { text: "Backup Rules"; bg: #1565C0; }
