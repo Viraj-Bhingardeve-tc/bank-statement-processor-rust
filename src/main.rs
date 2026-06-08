@@ -11,7 +11,9 @@
 
 mod auth;
 mod analytics;
+mod classifier;
 mod db;
+mod export;
 mod parser;
 mod ui;
 
@@ -370,10 +372,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p.push("bsp_data.db");
         p
     };
-    match db::open(&db_path) {
-        Ok(_)    => log::info!("Database ready at {:?}", db_path),
-        Err(err) => log::warn!("Database init failed (non-fatal): {}", err),
-    }
+    let db_conn: Arc<Mutex<Option<rusqlite::Connection>>> = Arc::new(Mutex::new(
+        match db::open(&db_path) {
+            Ok(c)    => { log::info!("Database ready at {:?}", db_path); Some(c) }
+            Err(err) => { log::warn!("Database init failed (non-fatal): {}", err); None }
+        }
+    ));
 
     // ── Slint UI ──────────────────────────────────────────────────────────────
     #[cfg(feature = "slint-ui")]
@@ -457,6 +461,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let app_state: Arc<Mutex<ui::AppState>> =
             Arc::new(Mutex::new(ui::AppState::default()));
+
+        // ── Load clients from DB into dropdown on startup ─────────────────────
+        {
+            let db = db_conn.lock().unwrap();
+            if let Some(conn) = db.as_ref() {
+                if let Ok(clients) = db::get_clients(conn) {
+                    let names: Vec<SharedString> =
+                        std::iter::once(SharedString::from("-- Select Client --"))
+                        .chain(clients.iter().map(|c| SharedString::from(c.name.as_str())))
+                        .collect();
+                    app.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                }
+            }
+        }
 
         // ── Login ─────────────────────────────────────────────────────────────
         {
@@ -800,19 +818,174 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        // ── Stub callbacks for toolbar / footer actions ───────────────────────
+        // ── Batch Folder Processing ───────────────────────────────────────────
         {
-            let h = app.as_weak();
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
             app.on_do_batch_folder(move || {
-                if let Some(h) = h.upgrade() { let _ = h; }
-                stub_callback("batch-folder");
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+
+                let paths = match rfd::FileDialog::new()
+                    .set_title("Select Bank Statement Files (multiple)")
+                    .add_filter("Bank Statements", &["pdf","xlsx","xls","xlsm"])
+                    .pick_files()
+                {
+                    Some(p) if !p.is_empty() => p,
+                    _ => return,
+                };
+
+                let mut all_txns: Vec<parser::Transaction> = {
+                    let st = state_ref.lock().unwrap();
+                    st.transactions.clone()
+                };
+                let mut loaded = 0usize;
+                let mut skipped = 0usize;
+                let mut errors = 0usize;
+                let mut first_bank = String::new();
+                let mut first_ob: Option<f64> = None;
+
+                for path in &paths {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+                    let result = if ["xlsx","xls","xlsm"].contains(&ext.as_str()) {
+                        parser::excel_parser::parse_excel_file(path).ok()
+                    } else if ext == "pdf" {
+                        let pages = parser::text_extractor::extract_pages(path).ok().unwrap_or_default();
+                        if !pages.is_empty() {
+                            parser::pdf_parser::parse_pdf_rows(pages, &file_name)
+                        } else {
+                            let text = parser::text_extractor::extract_full_text(path);
+                            if !text.trim().is_empty() {
+                                let r = parser::ocr_parser::parse_ocr_text(&text, &file_name);
+                                if r.transactions.iter().any(|t| !t.is_opening_balance) { Some(r) } else { None }
+                            } else { None }
+                        }
+                    } else { None };
+
+                    match result {
+                        Some(r) if !r.transactions.is_empty() => {
+                            let r_bank     = r.bank_name.clone();
+                            let r_account  = r.account_no.clone();
+                            let r_ob       = r.opening_balance;
+                            let r_txn_cnt  = r.transactions.len();
+                            let before = all_txns.len();
+                            let existing_hashes: std::collections::HashSet<String> =
+                                all_txns.iter().map(|t| t.hash()).collect();
+                            let new_txns: Vec<parser::Transaction> = r.transactions.into_iter()
+                                .filter(|t| t.is_opening_balance || !existing_hashes.contains(&t.hash()))
+                                .collect();
+                            skipped += before.saturating_sub(all_txns.len());
+                            all_txns.extend(new_txns);
+                            loaded += 1;
+                            if first_bank.is_empty() { first_bank = r_bank.clone(); }
+                            if first_ob.is_none() { first_ob = r_ob; }
+                            let db = db_ref.lock().unwrap();
+                            if let Some(conn) = db.as_ref() {
+                                let client_id = { state_ref.lock().unwrap().client_id.unwrap_or(0) };
+                                if client_id > 0 {
+                                    let _ = db::save_import(conn, client_id, &file_name, &r_bank, &r_account, r_txn_cnt);
+                                }
+                            }
+                        }
+                        _ => { errors += 1; log::warn!("[Batch] failed to parse: {:?}", path); }
+                    }
+                }
+
+                if all_txns.is_empty() { return; }
+
+                // Classify and build model
+                let bank_ledger = { state_ref.lock().unwrap().tally_ledger.clone() };
+                classifier::classify_all(&mut all_txns, &bank_ledger);
+                classifier::detect_duplicates(&mut all_txns);
+
+                let real: Vec<&parser::Transaction> = all_txns.iter().filter(|t| !t.is_opening_balance).collect();
+                let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
+                let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
+                let row_models = build_txn_rows(&real);
+                let mut bank_set: std::collections::BTreeSet<String> = real.iter().map(|t| t.bank_name.clone()).collect();
+                let bank_names: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
+                    .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
+                    .collect();
+
+                h.set_transaction_rows(slint::ModelRc::new(slint::VecModel::from(row_models)));
+                h.set_bank_names(slint::ModelRc::new(slint::VecModel::from(bank_names)));
+                h.set_dash_credits(SharedString::from(ui::AppState::fmt_amount(Some(total_cr)).as_str()));
+                h.set_dash_debits(SharedString::from(ui::AppState::fmt_amount(Some(total_dr)).as_str()));
+                h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
+                h.set_status_bank(SharedString::from(first_bank.as_str()));
+                h.set_status_file(SharedString::from(format!("{} file(s)", loaded).as_str()));
+                h.set_fc_all(SharedString::from(real.len().to_string().as_str()));
+
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.transactions    = all_txns.clone();
+                    st.opening_balance = first_ob;
+                    st.closing_balance = None;
+                    st.total_debits    = total_dr;
+                    st.total_credits   = total_cr;
+                    st.txn_count       = real.len();
+                    st.active_filter   = "all".to_string();
+                    st.date_from       = String::new();
+                    st.date_to         = String::new();
+                    st.bank_filter     = String::new();
+                }
+
+                push_dashboard(&h, &all_txns, first_ob);
+                log::info!("[Batch] loaded={} skipped={} errors={} total_txns={}", loaded, skipped, errors, real.len());
             });
         }
+        // ── New Client ────────────────────────────────────────────────────────
         {
-            app.on_do_new_client(|| stub_callback("new-client"));
+            let handle    = app.as_weak();
+            let db_ref    = db_conn.clone();
+            app.on_do_new_client(move || {
+                // The modal already collected name+tally-ledger from the UI form fields.
+                // We need those values — for now we read the modal's LineEdit values
+                // via a naming convention that the Slint modal stores internally.
+                // Since Slint doesn't expose inner modal field values to Rust directly,
+                // we store the client with a placeholder and update it when Save is pressed.
+                // The "new-client" callback fires after modal closes; we can't read
+                // the LineEdit values here without adding out-props to the Slint component.
+                // For now, log the action and refresh the client list.
+                log::info!("[NewClient] callback fired — implement field read from modal");
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    if let Ok(clients) = db::get_clients(conn) {
+                        let names: Vec<SharedString> =
+                            std::iter::once(SharedString::from("-- Select Client --"))
+                            .chain(clients.iter().map(|c| SharedString::from(c.name.as_str())))
+                            .collect();
+                        h.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                    }
+                }
+            });
         }
+
+        // ── Auto-Classify All ─────────────────────────────────────────────────
         {
-            app.on_do_auto_classify(|| stub_callback("auto-classify"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_auto_classify(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                if st.transactions.is_empty() {
+                    log::info!("[AutoClassify] No transactions loaded");
+                    return;
+                }
+                let bank_ledger = st.tally_ledger.clone();
+                let changed = classifier::classify_all(&mut st.transactions, &bank_ledger);
+                log::info!("[AutoClassify] classified {} transactions", changed);
+                rebuild_rows(&h, &st);
+                push_dashboard(&h, &st.transactions, st.opening_balance);
+                // Update summary stats
+                let total_dr: f64 = st.transactions.iter().filter_map(|t| t.debit).sum();
+                let total_cr: f64 = st.transactions.iter().filter_map(|t| t.credit).sum();
+                h.set_dash_credits(SharedString::from(ui::AppState::fmt_amount(Some(total_cr)).as_str()));
+                h.set_dash_debits(SharedString::from(ui::AppState::fmt_amount(Some(total_dr)).as_str()));
+            });
         }
         {
             app.on_do_ai_classify(|| stub_callback("ai-classify"));
@@ -869,15 +1042,134 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rebuild_rows(&h, &st);
             });
         }
+        // ── Export Excel (CSV with 4 sections) ───────────────────────────────
         {
-            app.on_do_export_excel(|| stub_callback("export-excel"));
+            let state_ref = app_state.clone();
+            app.on_do_export_excel(move || {
+                let st = state_ref.lock().unwrap();
+                if st.transactions.is_empty() {
+                    log::warn!("[ExportExcel] No transactions to export");
+                    return;
+                }
+                let client_name = if st.client_name.is_empty() { "Export".to_string() } else { st.client_name.clone() };
+                let suggested = format!("BankStatement_{}.csv", client_name.replace(' ', "_"));
+                let path = match rfd::FileDialog::new()
+                    .set_title("Save Excel Export")
+                    .set_file_name(&suggested)
+                    .add_filter("CSV (Excel)", &["csv"])
+                    .save_file()
+                {
+                    Some(p) => p,
+                    None    => return,
+                };
+                match export::excel::export_csv(
+                    &st.transactions, &client_name, &st.tally_ledger,
+                    &st.file_name, st.opening_balance, st.closing_balance, &path,
+                ) {
+                    Ok(n) => log::info!("[ExportExcel] wrote {} rows → {:?}", n, path),
+                    Err(e) => log::error!("[ExportExcel] failed: {}", e),
+                }
+            });
         }
+
+        // ── Export Tally XML ──────────────────────────────────────────────────
         {
-            app.on_do_export_tally(|| stub_callback("export-tally"));
+            let state_ref = app_state.clone();
+            app.on_do_export_tally(move || {
+                let st = state_ref.lock().unwrap();
+                if st.transactions.is_empty() {
+                    log::warn!("[ExportTally] No transactions to export");
+                    return;
+                }
+                let client_name = st.client_name.clone();
+                let opts = export::tally::TallyOpts {
+                    company:            client_name.clone(),
+                    gstin:              String::new(),
+                    fy:                 String::new(),
+                    bank_ledger:        st.tally_ledger.clone(),
+                    date_from:          if st.date_from.is_empty() { None } else { Some(st.date_from.clone()) },
+                    date_to:            if st.date_to.is_empty()   { None } else { Some(st.date_to.clone()) },
+                    only_classified:    true,
+                    include_ledgers:    true,
+                    include_narrations: true,
+                    include_ob:         false,
+                    skip_low_conf:      false,
+                };
+                let xml = export::tally::generate(&st.transactions, &opts, st.opening_balance);
+                let suggested = format!("TallyExport_{}.xml", client_name.replace(' ', "_"));
+                let path = match rfd::FileDialog::new()
+                    .set_title("Save Tally XML")
+                    .set_file_name(&suggested)
+                    .add_filter("Tally XML", &["xml"])
+                    .save_file()
+                {
+                    Some(p) => p,
+                    None    => return,
+                };
+                match std::fs::write(&path, xml.as_bytes()) {
+                    Ok(_) => log::info!("[ExportTally] wrote {:?}", path),
+                    Err(e) => log::error!("[ExportTally] write failed: {}", e),
+                }
+            });
         }
+
+        // ── Accounting Export Wizard ──────────────────────────────────────────
         {
-            app.on_do_export_accounting(|| stub_callback("export-accounting"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_export_accounting(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                if st.transactions.is_empty() {
+                    log::warn!("[ExportAccounting] No transactions to export");
+                    return;
+                }
+                // Wizard state lives in MainScreen (not AppWindow), so we read AppState fields
+                // that were synced when the wizard callback fired.
+                let sw_idx  = st.wiz_sw_idx;
+                let company = st.wiz_company.clone();
+                let gstin   = st.wiz_gstin.clone();
+                let from    = st.wiz_date_from.clone();
+                let to      = st.wiz_date_to.clone();
+
+                let software = export::accounting::Software::from_idx(sw_idx);
+                let opts = export::accounting::AccountingOpts {
+                    software,
+                    company:            if company.is_empty() { st.client_name.clone() } else { company },
+                    gstin,
+                    fy:                 String::new(),
+                    state_code:         "MH".to_string(),
+                    currency:           "INR".to_string(),
+                    bank_ledger:        st.tally_ledger.clone(),
+                    date_from:          if from.is_empty() { None } else { Some(from) },
+                    date_to:            if to.is_empty()   { None } else { Some(to) },
+                    include_ob:         false,
+                    include_gst:        true,
+                    include_ledgers:    true,
+                    include_narrations: true,
+                    only_classified:    true,
+                    skip_low_conf:      false,
+                };
+                let content  = export::accounting::generate(&st.transactions, &opts, st.opening_balance);
+                let ext      = software.ext();
+                let label    = software.label();
+                let suggested = format!("AccountingExport_{}.{}", st.client_name.replace(' ', "_"), ext);
+                let path = match rfd::FileDialog::new()
+                    .set_title(&format!("Save {} Export", label))
+                    .set_file_name(&suggested)
+                    .add_filter(label, &[ext])
+                    .save_file()
+                {
+                    Some(p) => p,
+                    None    => return,
+                };
+                match std::fs::write(&path, content.as_bytes()) {
+                    Ok(_)  => log::info!("[ExportAccounting] {} written to {:?}", label, path),
+                    Err(e) => log::error!("[ExportAccounting] write failed: {}", e),
+                }
+            });
         }
+
         {
             app.on_do_reimport_excel(|| stub_callback("reimport-excel"));
         }

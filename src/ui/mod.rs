@@ -7,6 +7,7 @@
 pub struct AppState {
     pub client_id:       Option<i64>,
     pub client_name:     String,
+    pub tally_ledger:    String,   // Tally bank ledger name for the current client
     pub file_name:       String,
     pub bank_name:       String,
     pub account_no:      String,
@@ -28,6 +29,13 @@ pub struct AppState {
     pub date_from:     String,   // DD/MM/YYYY
     pub date_to:       String,   // DD/MM/YYYY
     pub bank_filter:   String,   // "" means All Banks
+
+    // Export wizard state (synced from the UI before generating)
+    pub wiz_sw_idx:    i32,   // 0=Tally 1=Zoho 2=QB 3=Odoo 4=Excel 5=XML
+    pub wiz_company:   String,
+    pub wiz_gstin:     String,
+    pub wiz_date_from: String,  // ISO YYYY-MM-DD
+    pub wiz_date_to:   String,
 }
 
 impl AppState {
