@@ -1743,7 +1743,182 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         {
-            app.on_do_reimport_excel(|| stub_callback("reimport-excel"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_reimport_excel(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let path = match rfd::FileDialog::new()
+                    .set_title("Re-import Classified Excel")
+                    .add_filter("Excel", &["xlsx", "xls", "xlsm"])
+                    .pick_file()
+                {
+                    Some(p) => p,
+                    None    => return,
+                };
+
+                use calamine::{open_workbook_auto, Reader};
+                let mut wb = match open_workbook_auto(&path) {
+                    Ok(wb) => wb,
+                    Err(e) => {
+                        h.set_toast_msg(SharedString::from(format!("Cannot open file: {}", e).as_str()));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                };
+
+                let range = match wb.worksheet_range("Transactions") {
+                    Ok(r) => r,
+                    Err(_) => {
+                        h.set_toast_msg(SharedString::from("'Transactions' sheet not found — export from this app first"));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                };
+
+                let rows: Vec<Vec<String>> = range.rows().map(|row| {
+                    row.iter().map(|c| c.to_string().trim().to_string()).collect()
+                }).collect();
+
+                if rows.len() < 2 {
+                    h.set_toast_msg(SharedString::from("Transactions sheet is empty"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+
+                let hdr: Vec<String> = rows[0].iter().map(|s| s.to_lowercase()).collect();
+                let col = |k: &str| hdr.iter().position(|h| h == k);
+
+                let i_date = col("date");
+                let i_narr = col("narration");
+                let i_ref  = col("reference");
+                let i_dr   = col("debit");
+                let i_cr   = col("credit");
+                let i_bal  = col("balance");
+                let i_vend = col("vendor");
+                let i_head = col("account head");
+                let i_type = col("type");
+                let i_stat = col("status");
+                let i_tags = col("tags");
+                let i_conf = col("confidence");
+                let i_bank = col("bank name");
+                let i_acct = col("account no");
+
+                if i_date.is_none() || i_narr.is_none() {
+                    h.set_toast_msg(SharedString::from("Date or Narration column missing"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+                if i_vend.is_none() || i_head.is_none() {
+                    h.set_toast_msg(SharedString::from("Vendor and Account Head columns required — export from this app first"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+
+                let parse_amt = |s: &str| -> Option<f64> {
+                    if s.is_empty() { return None; }
+                    let clean: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                    clean.parse::<f64>().ok().filter(|v| *v != 0.0)
+                };
+
+                let mut txns: Vec<parser::Transaction> = Vec::new();
+                for row in rows.iter().skip(1) {
+                    let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).cloned().unwrap_or_default();
+                    let narr = get(i_narr);
+                    let date = get(i_date);
+                    if narr.is_empty() && date.is_empty() { continue; }
+
+                    let vendor = get(i_vend);
+                    let head   = get(i_head);
+                    let type_s = get(i_type);
+                    let stat_s = get(i_stat).to_lowercase();
+                    let conf_s = get(i_conf);
+                    let tags_s = get(i_tags);
+
+                    let status = match stat_s.as_str() {
+                        "suspense"     => parser::TransactionStatus::Suspense,
+                        "classified"   => parser::TransactionStatus::Classified,
+                        "needs_review" | "review" => parser::TransactionStatus::NeedsReview,
+                        _ => if vendor.is_empty() && head.is_empty() {
+                            parser::TransactionStatus::Unreviewed
+                        } else {
+                            parser::TransactionStatus::Classified
+                        },
+                    };
+                    let confidence: f64 = conf_s.parse().unwrap_or(if matches!(status, parser::TransactionStatus::Classified) { 1.0 } else { 0.0 });
+                    let txn_type = match type_s.as_str() {
+                        "Payment"  | "payment"  => parser::VoucherType::Payment,
+                        "Receipt"  | "receipt"  => parser::VoucherType::Receipt,
+                        "Contra"   | "contra"   => parser::VoucherType::Contra,
+                        "Journal"  | "journal"  => parser::VoucherType::Journal,
+                        _ => parser::VoucherType::Payment,
+                    };
+                    let tags: Vec<String> = tags_s.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+                    txns.push(parser::Transaction {
+                        id:           format!("ri_{}", txns.len()),
+                        import_id:    None,
+                        date:         date.clone(),
+                        date_ts:      0,
+                        narration:    narr,
+                        reference:    get(i_ref),
+                        debit:        parse_amt(&get(i_dr)),
+                        credit:       parse_amt(&get(i_cr)),
+                        balance:      parse_amt(&get(i_bal)),
+                        vendor:       vendor.clone(),
+                        account_head: head.clone(),
+                        txn_type,
+                        status,
+                        confidence,
+                        tags,
+                        bank_name:    get(i_bank),
+                        account_no:   get(i_acct),
+                        is_opening_balance: false,
+                        dup_flag:     false,
+                        prev_balance: None,
+                        balance_ok:   None,
+                    });
+                }
+
+                if txns.is_empty() {
+                    h.set_toast_msg(SharedString::from("No transactions found in sheet"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+
+                let classified_cnt = txns.iter().filter(|t| matches!(t.status, parser::TransactionStatus::Classified)).count();
+                let total_cnt = txns.len();
+                let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.transactions  = txns.clone();
+                    st.active_filter = "all".to_string();
+                    st.date_from     = String::new();
+                    st.date_to       = String::new();
+                    st.bank_filter   = String::new();
+                    st.file_name     = file_name.clone();
+                }
+
+                let result = parser::ParseResult {
+                    transactions:       txns,
+                    bank_name:          String::new(),
+                    account_no:         String::new(),
+                    opening_balance:    None,
+                    closing_balance:    None,
+                    source_name:        file_name.clone(),
+                    col_map:            parser::ColumnMap::default(),
+                    header_row_idx:     0,
+                    noise_row_count:    0,
+                    rejected_row_count: 0,
+                };
+                apply_parse_result(&h, &state_ref, &db_ref, result, &file_name);
+
+                let msg = format!("Re-imported {} transactions ({} pre-classified)", total_cnt, classified_cnt);
+                h.set_toast_msg(SharedString::from(msg.as_str()));
+                h.set_toast_kind(1);
+                log::info!("[ReimportExcel] {}", msg);
+            });
         }
 
         // ── Reset Dedupe ──────────────────────────────────────────────────────
