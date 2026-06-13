@@ -5,3 +5,4 @@ pub mod classifier;
 pub mod export;
 pub mod db;
 pub mod narration_cleaner;
+pub mod tally_group_engine;

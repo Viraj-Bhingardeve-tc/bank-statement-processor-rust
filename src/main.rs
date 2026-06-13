@@ -15,6 +15,7 @@ mod classifier;
 mod db;
 mod export;
 mod narration_cleaner;
+mod tally_group_engine;
 mod parser;
 mod settings;
 mod ui;
@@ -605,6 +606,15 @@ fn apply_parse_result(
     let narration_strs: Vec<String> = real.iter().map(|t| t.narration.clone()).collect();
     let cleaned_narrations = narration_cleaner::clean_batch(&narration_strs);
 
+    // Compute Tally group for each transaction.
+    let tally_inputs: Vec<(String, String, bool, f64)> = real.iter().enumerate().map(|(idx, t)| {
+        let narr = cleaned_narrations[idx].cleaned.clone();
+        let is_credit = t.credit.is_some();
+        let amount = t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0);
+        (t.account_head.clone(), narr, is_credit, amount)
+    }).collect();
+    let tally_groups = tally_group_engine::classify_batch(&tally_inputs, None);
+
     let mut bank_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let row_models: Vec<TxnRow> = real
         .iter()
@@ -635,6 +645,7 @@ fn apply_parse_result(
                 }
                 _ => 0,
             };
+            let tally_group = tally_groups[idx].as_str();
             TxnRow {
                 bank_name:    SharedString::from(t.bank_name.as_str()),
                 account_no:   SharedString::from(t.account_no.as_str()),
@@ -646,7 +657,7 @@ fn apply_parse_result(
                 balance:      SharedString::from(fmt_cell(t.balance).as_str()),
                 vendor:       SharedString::from(vendor_display.as_str()),
                 ledger:       SharedString::from(t.account_head.as_str()),
-                expense_head: SharedString::from(""),
+                expense_head: SharedString::from(tally_group),
                 status_text:  SharedString::from(t.status.to_string().as_str()),
                 tags:         SharedString::from(t.tags.join(" ").as_str()),
                 review:       SharedString::from(""),
