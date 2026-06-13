@@ -1623,12 +1623,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bank_ledger:        st.tally_ledger.clone(),
                     date_from:          if from.is_empty() { None } else { Some(from) },
                     date_to:            if to.is_empty()   { None } else { Some(to) },
-                    include_ob:         false,
-                    include_gst:        true,
-                    include_ledgers:    true,
-                    include_narrations: true,
-                    only_classified:    true,
-                    skip_low_conf:      false,
+                    include_ob:         h.get_wiz_opt_ob(),
+                    include_gst:        h.get_wiz_opt_gst(),
+                    include_ledgers:    h.get_wiz_opt_ledger(),
+                    include_narrations: h.get_wiz_opt_narr(),
+                    only_classified:    h.get_wiz_opt_classified(),
+                    skip_low_conf:      h.get_wiz_opt_skip_low(),
                 };
                 let content  = export::accounting::generate(&st.transactions, &opts, st.opening_balance);
                 let ext      = software.ext();

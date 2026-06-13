@@ -75,6 +75,12 @@ export component AppWindow inherits Window {
     in-out property <string> wiz-gstin:     "";
     in-out property <string> wiz-date-from: "";
     in-out property <string> wiz-date-to:   "";
+    in-out property <bool>   wiz-opt-ob:         false;
+    in-out property <bool>   wiz-opt-gst:         true;
+    in-out property <bool>   wiz-opt-ledger:      true;
+    in-out property <bool>   wiz-opt-narr:        true;
+    in-out property <bool>   wiz-opt-classified:  true;
+    in-out property <bool>   wiz-opt-skip-low:    false;
 
     // ── Import History records (set by Rust in do-import-history) ────────────
     // Each entry: "FILE\tDATE\tCOUNT" tab-separated
@@ -224,6 +230,12 @@ export component AppWindow inherits Window {
         wiz-gstin   <=> root.wiz-gstin;
         wiz-from    <=> root.wiz-date-from;
         wiz-to      <=> root.wiz-date-to;
+        wiz-opt-ob          <=> root.wiz-opt-ob;
+        wiz-opt-gst         <=> root.wiz-opt-gst;
+        wiz-opt-ledger      <=> root.wiz-opt-ledger;
+        wiz-opt-narr        <=> root.wiz-opt-narr;
+        wiz-opt-classified  <=> root.wiz-opt-classified;
+        wiz-opt-skip-low    <=> root.wiz-opt-skip-low;
         import-records:   root.import-records;
         rule-records:     root.rule-records;
         status-bank:       root.status-bank;

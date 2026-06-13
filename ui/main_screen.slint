@@ -722,6 +722,13 @@ export component MainScreen inherits Rectangle {
     in-out property <string> wiz-gstin:     "";
     in-out property <string> wiz-from:      "";
     in-out property <string> wiz-to:        "";
+    // Export wizard step 4 option flags
+    in-out property <bool>   wiz-opt-ob:           false;  // include opening balance entry
+    in-out property <bool>   wiz-opt-gst:          true;   // include GST details
+    in-out property <bool>   wiz-opt-ledger:       true;   // include ledger creation entries
+    in-out property <bool>   wiz-opt-narr:         true;   // include voucher narrations
+    in-out property <bool>   wiz-opt-classified:   true;   // export only classified transactions
+    in-out property <bool>   wiz-opt-skip-low:     false;  // skip low-confidence (<40%)
 
     // Edit client fields — in-out so Rust can read them back
     in-out property <string> edit-client-name:   "";
@@ -2170,21 +2177,63 @@ export component MainScreen inherits Rectangle {
                 // Step 4: Options
                 if root.wiz-step == 4 : VerticalBox { padding: 20px; spacing: 8px; vertical-stretch: 1;
                     Text { text: "EXPORT OPTIONS"; font-size: 12px; font-weight: 600; color: #1565C0; letter-spacing: 0.5px; }
-                    for opt in [
-                        {lbl: "Include Opening Balance entry", sub: "Creates a Journal entry for the bank opening balance"},
-                        {lbl: "Include GST details", sub: "Adds GST tag notes to narrations where detected"},
-                        {lbl: "Include Ledger Creation entries", sub: "Adds LEDGER CREATE entries before vouchers"},
-                        {lbl: "Include voucher narrations", sub: "Includes original bank narration text in voucher narration field"},
-                        {lbl: "Export only classified transactions", sub: "Skips unreviewed / suspense transactions — recommended"},
-                        {lbl: "Skip low-confidence classifications", sub: "Excludes transactions with confidence < 40% to reduce errors"},
-                    ] : Rectangle {
-                        height: 44px; background: #F8FAFF; border-radius: 7px;
-                        border-width: 1px; border-color: #E0EBF5;
+                    Rectangle {
+                        height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
                         HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
-                            CheckBox { checked: opt.lbl == "Include GST details" || opt.lbl == "Include Ledger Creation entries" || opt.lbl == "Include voucher narrations" || opt.lbl == "Export only classified transactions"; }
+                            CheckBox { checked <=> root.wiz-opt-ob; }
                             VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
-                                Text { text: opt.lbl; font-size: 12px; font-weight: 600; color: #1A237E; }
-                                Text { text: opt.sub; font-size: 10px; color: #6B84A0; }
+                                Text { text: "Include Opening Balance entry"; font-size: 12px; font-weight: 600; color: #1A237E; }
+                                Text { text: "Creates a Journal entry for the bank opening balance"; font-size: 10px; color: #6B84A0; }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
+                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
+                            CheckBox { checked <=> root.wiz-opt-gst; }
+                            VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
+                                Text { text: "Include GST details"; font-size: 12px; font-weight: 600; color: #1A237E; }
+                                Text { text: "Adds GST tag notes to narrations where detected"; font-size: 10px; color: #6B84A0; }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
+                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
+                            CheckBox { checked <=> root.wiz-opt-ledger; }
+                            VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
+                                Text { text: "Include Ledger Creation entries"; font-size: 12px; font-weight: 600; color: #1A237E; }
+                                Text { text: "Adds LEDGER CREATE entries before vouchers (Tally will skip if ledger exists)"; font-size: 10px; color: #6B84A0; }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
+                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
+                            CheckBox { checked <=> root.wiz-opt-narr; }
+                            VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
+                                Text { text: "Include voucher narrations"; font-size: 12px; font-weight: 600; color: #1A237E; }
+                                Text { text: "Includes original bank narration text in voucher narration field"; font-size: 10px; color: #6B84A0; }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
+                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
+                            CheckBox { checked <=> root.wiz-opt-classified; }
+                            VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
+                                Text { text: "Export only classified transactions"; font-size: 12px; font-weight: 600; color: #1A237E; }
+                                Text { text: "Skips unreviewed / suspense transactions — recommended for accounting import"; font-size: 10px; color: #6B84A0; }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
+                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
+                            CheckBox { checked <=> root.wiz-opt-skip-low; }
+                            VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
+                                Text { text: "Skip low-confidence classifications"; font-size: 12px; font-weight: 600; color: #1A237E; }
+                                Text { text: "Excludes transactions with confidence < 40% to reduce errors"; font-size: 10px; color: #6B84A0; }
                             }
                         }
                     }
