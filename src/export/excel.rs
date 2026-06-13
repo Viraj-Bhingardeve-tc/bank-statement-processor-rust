@@ -1,7 +1,4 @@
-// export/excel.rs — Export transactions to a CSV file (opens in Excel).
-// Generates 4 sheets as separate sections in one CSV, or as a proper XLSX
-// when the excel-export feature is enabled.
-// Mirrors the original app.js _exportExcel() which uses SheetJS.
+// export/excel.rs — Export transactions to CSV or real XLSX.
 
 use crate::parser::Transaction;
 use std::path::Path;
@@ -173,5 +170,134 @@ pub fn export_csv(
     f.write_all(b"\xEF\xBB\xBF")?;
     f.write_all(content.as_bytes())?;
 
+    Ok(real.len())
+}
+
+// ── Real XLSX export (rust_xlsxwriter) ───────────────────────────────────────
+
+/// Export transactions to a genuine .xlsx workbook with 4 worksheets:
+/// Transactions, Summary, Receipt Heads, Payment Heads.
+pub fn export_xlsx(
+    txns:        &[Transaction],
+    client_name: &str,
+    bank_ledger: &str,
+    file_name:   &str,
+    opening_bal: Option<f64>,
+    closing_bal: Option<f64>,
+    path:        impl AsRef<Path>,
+) -> anyhow::Result<usize> {
+    use rust_xlsxwriter::Workbook;
+
+    let real: Vec<&Transaction> = txns.iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+
+    let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
+
+    let mut workbook = Workbook::new();
+
+    // ── Sheet 1: Transactions ─────────────────────────────────────────────────
+    let ws = workbook.add_worksheet();
+    ws.set_name("Transactions")?;
+    let txn_headers = [
+        "Date","Narration","Reference","Debit","Credit","Balance",
+        "Vendor","Account Head","Type","Status","Tags","Confidence",
+        "Bank Name","Account No",
+    ];
+    for (c, h) in txn_headers.iter().enumerate() {
+        ws.write(0, c as u16, *h)?;
+    }
+    for (r, t) in real.iter().enumerate() {
+        let row = (r + 1) as u32;
+        ws.write(row, 0,  t.date.as_str())?;
+        ws.write(row, 1,  t.narration.as_str())?;
+        ws.write(row, 2,  t.reference.as_str())?;
+        if let Some(v) = t.debit   { ws.write(row, 3, v)?; }
+        if let Some(v) = t.credit  { ws.write(row, 4, v)?; }
+        if let Some(v) = t.balance { ws.write(row, 5, v)?; }
+        ws.write(row, 6,  t.vendor.as_str())?;
+        ws.write(row, 7,  t.account_head.as_str())?;
+        ws.write(row, 8,  t.txn_type.to_string().as_str())?;
+        ws.write(row, 9,  t.status.to_string().as_str())?;
+        ws.write(row, 10, t.tags.join("; ").as_str())?;
+        ws.write(row, 11, t.confidence)?;
+        ws.write(row, 12, t.bank_name.as_str())?;
+        ws.write(row, 13, t.account_no.as_str())?;
+    }
+
+    // ── Sheet 2: Summary ──────────────────────────────────────────────────────
+    let ws2 = workbook.add_worksheet();
+    ws2.set_name("Summary")?;
+    let calc_cl = opening_bal.map(|ob| (ob + total_cr - total_dr).round());
+    let recon = match (calc_cl, closing_bal) {
+        (Some(c), Some(s)) if (c - s).abs() < 0.5 => "RECONCILED",
+        (Some(_), Some(_))                          => "MISMATCH",
+        _                                           => "N/A",
+    };
+    let dup_count = real.iter().filter(|t| t.dup_flag).count();
+    let gst_count = real.iter().filter(|t| t.tags.iter().any(|g| g == "GST")).count();
+    let summary: Vec<(&str, String)> = vec![
+        ("Client",                   client_name.to_string()),
+        ("Bank Ledger",              bank_ledger.to_string()),
+        ("Source File",              file_name.to_string()),
+        ("Total Credits",            format!("{:.2}", total_cr)),
+        ("Total Debits",             format!("{:.2}", total_dr)),
+        ("Net",                      format!("{:.2}", total_cr - total_dr)),
+        ("Opening Balance",          opening_bal.map_or(String::new(), |v| format!("{:.2}", v))),
+        ("Closing Balance (Stated)", closing_bal.map_or(String::new(), |v| format!("{:.2}", v))),
+        ("Closing Balance (Calc.)",  calc_cl.map_or(String::new(), |v| format!("{:.2}", v))),
+        ("Reconciliation",           recon.to_string()),
+        ("Duplicate Transactions",   dup_count.to_string()),
+        ("GST Transactions",         gst_count.to_string()),
+    ];
+    for (r, (k, v)) in summary.iter().enumerate() {
+        ws2.write(r as u32, 0, *k)?;
+        ws2.write(r as u32, 1, v.as_str())?;
+    }
+
+    // ── Sheet 3: Receipt Heads ────────────────────────────────────────────────
+    let ws3 = workbook.add_worksheet();
+    ws3.set_name("Receipt Heads")?;
+    ws3.write(0, 0, "Account Head")?;
+    ws3.write(0, 1, "Amount")?;
+    let mut rec_map: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    for t in &real {
+        if t.credit.is_some() && !t.account_head.is_empty()
+            && (t.txn_type.to_string() == "Receipt"
+                || t.account_head.to_lowercase().contains("income"))
+        {
+            *rec_map.entry(t.account_head.as_str()).or_default() += t.credit.unwrap_or(0.0);
+        }
+    }
+    let mut rec_vec: Vec<_> = rec_map.iter().collect();
+    rec_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (r, (head, amt)) in rec_vec.iter().enumerate() {
+        ws3.write((r + 1) as u32, 0, **head)?;
+        ws3.write((r + 1) as u32, 1, **amt)?;
+    }
+
+    // ── Sheet 4: Payment Heads ────────────────────────────────────────────────
+    let ws4 = workbook.add_worksheet();
+    ws4.set_name("Payment Heads")?;
+    ws4.write(0, 0, "Account Head")?;
+    ws4.write(0, 1, "Amount")?;
+    let mut pay_map: std::collections::BTreeMap<&str, f64> = std::collections::BTreeMap::new();
+    for t in &real {
+        if t.debit.is_some() && !t.account_head.is_empty()
+            && (t.txn_type.to_string() == "Payment"
+                || t.account_head.to_lowercase().contains("expense"))
+        {
+            *pay_map.entry(t.account_head.as_str()).or_default() += t.debit.unwrap_or(0.0);
+        }
+    }
+    let mut pay_vec: Vec<_> = pay_map.iter().collect();
+    pay_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (r, (head, amt)) in pay_vec.iter().enumerate() {
+        ws4.write((r + 1) as u32, 0, **head)?;
+        ws4.write((r + 1) as u32, 1, **amt)?;
+    }
+
+    workbook.save(path.as_ref())?;
     Ok(real.len())
 }

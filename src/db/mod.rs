@@ -283,6 +283,24 @@ pub fn upsert_transaction_classification(
     Ok(())
 }
 
+pub fn update_dup_flags(conn: &Connection, txns: &[Transaction]) -> Result<()> {
+    for t in txns {
+        conn.execute(
+            "UPDATE transactions SET dup_flag = ?1 WHERE id = ?2",
+            rusqlite::params![if t.dup_flag { 1i64 } else { 0i64 }, t.id],
+        ).context("update_dup_flag")?;
+    }
+    Ok(())
+}
+
+pub fn delete_transaction(conn: &Connection, txn_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM transactions WHERE id = ?1",
+        rusqlite::params![txn_id],
+    ).context("delete_transaction")?;
+    Ok(())
+}
+
 // ── Import history CRUD ───────────────────────────────────────────────────────
 
 pub fn save_import(
