@@ -582,6 +582,9 @@ export component MainScreen inherits Rectangle {
     callback reload-import(int);
     // Settings save (provider, api-key, enabled)
     callback settings-save(string, string, bool);
+    // Rules backup / restore
+    callback backup-rules();
+    callback restore-rules();
 
     // ── Data ──────────────────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
@@ -725,6 +728,18 @@ export component MainScreen inherits Rectangle {
     in property <[string]>   audit-records: [];
     in-out property <int>    audit-action-idx: 0;
     in-out property <int>    audit-type-idx:   0;
+
+    // ── Application Settings fields (persisted via settings-save-all) ──────────
+    in-out property <bool>   settings-narr-enabled:    true;
+    in-out property <bool>   settings-narr-title-case: true;
+    in-out property <bool>   settings-narr-preserve:   false;
+    in-out property <bool>   settings-gst-enabled:     true;
+    in-out property <bool>   settings-gst-auto-ledgers:true;
+    in-out property <string> settings-recon-days:      "3";
+    in-out property <string> settings-recon-pct:       "0.5";
+    in-out property <int>    settings-log-level:       0;  // 0=INFO 1=DEBUG 2=WARN 3=ERROR
+    callback settings-save-all();
+    callback clear-logs();
 
     // ── MAIN LAYOUT ───────────────────────────────────────────────────────────
     VerticalLayout {
@@ -1542,13 +1557,13 @@ export component MainScreen inherits Rectangle {
                             height: 1px; background: #E3F2FD;
                         }
                         Text { text: "NARRATION CLEANER"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
-                        CheckBox { text: "Enable narration cleaning"; checked: true; }
-                        CheckBox { text: "Convert to Title Case"; }
-                        CheckBox { text: "Preserve original narration"; }
+                        CheckBox { text: "Enable narration cleaning"; checked <=> root.settings-narr-enabled; }
+                        CheckBox { text: "Convert to Title Case"; checked <=> root.settings-narr-title-case; }
+                        CheckBox { text: "Preserve original narration"; checked <=> root.settings-narr-preserve; }
                         Rectangle { height: 1px; background: #E3F2FD; }
                         Text { text: "GST ENGINE"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
-                        CheckBox { text: "Enable GST detection"; checked: true; }
-                        CheckBox { text: "Auto-suggest GST ledgers"; checked: true; }
+                        CheckBox { text: "Enable GST detection"; checked <=> root.settings-gst-enabled; }
+                        CheckBox { text: "Auto-suggest GST ledgers"; checked <=> root.settings-gst-auto-ledgers; }
                         HorizontalBox { padding: 0px; spacing: 8px;
                             Text { text: "Default State"; font-size: 11px; color: #546E7A; vertical-alignment: center; }
                             ComboBox { model: ["Maharashtra (MH)", "Gujarat (GJ)", "Delhi (DL)", "Karnataka (KA)"]; min-width: 160px; }
@@ -1558,31 +1573,30 @@ export component MainScreen inherits Rectangle {
                         HorizontalBox { padding: 0px; spacing: 12px;
                             VerticalBox { padding: 0px; spacing: 4px;
                                 Text { text: "Date Fuzzy Window (days)"; font-size: 11px; color: #546E7A; }
-                                LineEdit { text: "1"; height: 30px; min-width: 70px; max-width: 80px; }
+                                LineEdit { text <=> root.settings-recon-days; height: 30px; min-width: 70px; max-width: 80px; }
                             }
                             VerticalBox { padding: 0px; spacing: 4px;
                                 Text { text: "Amount Tolerance (%)"; font-size: 11px; color: #546E7A; }
-                                LineEdit { text: "0.5"; height: 30px; min-width: 70px; max-width: 80px; }
+                                LineEdit { text <=> root.settings-recon-pct; height: 30px; min-width: 70px; max-width: 80px; }
                             }
                         }
                         Rectangle { height: 1px; background: #E3F2FD; }
                         Text { text: "LOGGING"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
                         HorizontalBox { padding: 0px; spacing: 8px;
                             Text { text: "Log Level"; font-size: 11px; color: #546E7A; vertical-alignment: center; }
-                            ComboBox { model: ["INFO", "DEBUG", "WARN", "ERROR"]; min-width: 100px; }
+                            ComboBox { model: ["INFO", "DEBUG", "WARN", "ERROR"]; current-index <=> root.settings-log-level; min-width: 100px; }
                         }
-                        CheckBox { text: "Show logs in browser console"; }
                         Rectangle {
-                            height: 30px; width: 120px;
+                            height: 30px; width: 140px;
                             background: #C62828; border-radius: 4px;
-                            TouchArea { }
+                            TouchArea { clicked => { root.clear-logs(); } }
                             Text { text: "Clear All Logs"; font-size: 11px; color: white;
                                    horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
                 MFtr {
-                    MBtn { text: "Save Settings"; bg: #1565C0; clicked => { root.modal-state = ""; root.open-settings(); } }
+                    MBtn { text: "Save Settings"; bg: #1565C0; clicked => { root.modal-state = ""; root.settings-save-all(); } }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
@@ -1689,8 +1703,8 @@ export component MainScreen inherits Rectangle {
                     }
                 }
                 MFtr {
-                    MBtn { text: "Backup Rules"; bg: #1565C0; }
-                    MBtn { text: "Restore Rules"; bg: #F5F5F5; fg: #546E7A; enabled: true; }
+                    MBtn { text: "Backup Rules"; bg: #1565C0; clicked => { root.backup-rules(); } }
+                    MBtn { text: "Restore Rules"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.restore-rules(); } }
                     MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }

@@ -184,20 +184,26 @@ fn parse_cell_amount(cell: &calamine::Data) -> f64 {
 #[cfg(feature = "slint-ui")]
 // Returns (exact, likely, unmatched_tally, tally_status["Matched"|"Likely"|"Unmatched"], bank_used)
 fn reconcile_match(
-    tally: &[(String, f64)],
-    bank:  &[(String, f64)],
+    tally:      &[(String, f64)],
+    bank:       &[(String, f64)],
+    days_window: i64,
+    amt_tol:     f64,
 ) -> (usize, usize, usize, Vec<&'static str>, Vec<bool>) {
     let mut bank_used   = vec![false; bank.len()];
     let mut tally_used  = vec![false; tally.len()];
     let mut tally_exact = vec![false; tally.len()];
     let mut exact  = 0usize;
     let mut likely = 0usize;
+    let amt_tolerance = |a: f64, b: f64| -> bool {
+        if a == 0.0 { return (b - a).abs() <= 0.01; }
+        (a - b).abs() <= 0.01 || (a - b).abs() / a * 100.0 <= amt_tol
+    };
 
-    // Exact pass: same date + same amount
+    // Exact pass: same date + same amount (within tolerance)
     for (ti, (td, ta)) in tally.iter().enumerate() {
         for (bi, (bd, ba)) in bank.iter().enumerate() {
             if bank_used[bi] { continue; }
-            if (ta - ba).abs() <= 0.01 && td == bd {
+            if amt_tolerance(*ta, *ba) && td == bd {
                 bank_used[bi]   = true;
                 tally_used[ti]  = true;
                 tally_exact[ti] = true;
@@ -206,14 +212,14 @@ fn reconcile_match(
             }
         }
     }
-    // Likely pass: same amount, date within 7 days
+    // Likely pass: same amount (within tolerance), date within days_window
     for (ti, (td, ta)) in tally.iter().enumerate() {
         if tally_used[ti] { continue; }
         for (bi, (bd, ba)) in bank.iter().enumerate() {
             if bank_used[bi] { continue; }
-            if (ta - ba).abs() <= 0.01 {
+            if amt_tolerance(*ta, *ba) {
                 if let (Some(td_ymd), Some(bd_ymd)) = (parse_date_for_recon(td), parse_date_for_recon(bd)) {
-                    if (td_ymd as i64 - bd_ymd as i64).abs() <= 7 {
+                    if (td_ymd as i64 - bd_ymd as i64).abs() <= days_window {
                         bank_used[bi]  = true;
                         tally_used[ti] = true;
                         likely += 1;
@@ -799,12 +805,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .collect();
                     app.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
                 }
-                // Restore AI settings
+                // Restore all settings
                 let cfg = settings::Settings::load(conn);
                 app.set_ai_provider_idx(match cfg.ai_provider.as_str() {
                     "claude" => 1, "gemini" => 2, _ => 0,
                 });
                 app.set_ai_api_key(SharedString::from(cfg.ai_api_key.as_str()));
+                // Populate Application Settings UI properties
+                app.set_settings_narr_enabled(cfg.narr_enabled);
+                app.set_settings_narr_title_case(cfg.narr_title_case);
+                app.set_settings_narr_preserve(cfg.narr_preserve);
+                app.set_settings_gst_enabled(cfg.gst_enabled);
+                app.set_settings_gst_auto_ledgers(cfg.gst_auto_ledgers);
+                app.set_settings_recon_days(SharedString::from(cfg.recon_days.to_string().as_str()));
+                app.set_settings_recon_pct(SharedString::from(cfg.recon_pct.to_string().as_str()));
+                app.set_settings_log_level(match cfg.log_level.as_str() {
+                    "DEBUG" => 1, "WARN" => 2, "ERROR" => 3, _ => 0,
+                });
                 {
                     let mut st = app_state.lock().unwrap();
                     st.ai_provider = cfg.ai_provider;
@@ -1620,12 +1637,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|t| (t.date.clone(), t.debit.or(t.credit).unwrap_or(0.0)))
                     .collect();
 
+                // Load recon tolerance from settings
+                let (recon_days, recon_pct) = {
+                    let dbc = db_ref.lock().unwrap();
+                    if let Some(c) = dbc.as_ref() {
+                        let cfg = settings::Settings::load(c);
+                        (cfg.recon_days as i64, cfg.recon_pct)
+                    } else { (3, 0.5) }
+                };
+
                 let (matched, likely, unmatched_tally, tally_status, bank_used) =
-                    reconcile_match(&tally_entries, &bank);
+                    reconcile_match(&tally_entries, &bank, recon_days, recon_pct);
                 let bank_only = bank.len().saturating_sub(matched + likely);
                 let status = format!(
-                    "Tally: {} entries | Bank: {} transactions\n\u{2022} Exact matches: {}\n\u{2022} Likely matches (±7 days): {}\n\u{2022} Tally entries unmatched: {}\n\u{2022} Bank-only entries (no Tally): {}",
-                    tally_entries.len(), bank.len(), matched, likely, unmatched_tally, bank_only
+                    "Tally: {} entries | Bank: {} transactions\n\u{2022} Exact matches: {}\n\u{2022} Likely matches (\u{00B1}{} days): {}\n\u{2022} Tally entries unmatched: {}\n\u{2022} Bank-only entries (no Tally): {}",
+                    tally_entries.len(), bank.len(), matched, recon_days, likely, unmatched_tally, bank_only
                 );
 
                 // Build CSV for later export
@@ -1871,8 +1897,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let db_ref    = db_conn.clone();
             let state_ref = app_state.clone();
             app.on_do_settings(move || {
-                // Load settings from DB and sync AI credentials to UI properties
-                // (modal state is already set to "settings" by the Slint footer button)
                 let db = db_ref.lock().unwrap();
                 if let Some(conn) = db.as_ref() {
                     let cfg = settings::Settings::load(conn);
@@ -1881,11 +1905,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.ai_api_key  = cfg.ai_api_key.clone();
                     st.ai_enabled  = cfg.ai_enabled;
                     log::info!("[Settings] loaded: provider='{}' enabled={}", cfg.ai_provider, cfg.ai_enabled);
+                    drop(db); drop(st);
                 }
             });
         }
 
-        // ── Settings Save ─────────────────────────────────────────────────────
+        // ── Settings Save (AI modal) ──────────────────────────────────────────
         {
             let db_ref    = db_conn.clone();
             let state_ref = app_state.clone();
@@ -1897,20 +1922,162 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "2" => "gemini",
                         _   => "openai",
                     };
-                    let cfg = settings::Settings {
-                        ai_provider:    provider_str.to_string(),
-                        ai_api_key:     key.to_string(),
-                        ai_enabled:     enabled,
-                        last_client_id: None,
-                    };
+                    let mut cfg = settings::Settings::load(conn);
+                    cfg.ai_provider = provider_str.to_string();
+                    cfg.ai_api_key  = key.to_string();
+                    cfg.ai_enabled  = enabled;
                     match cfg.save(conn) {
-                        Ok(_)  => log::info!("[SettingsSave] saved provider='{}' enabled={}", provider_str, enabled),
+                        Ok(_)  => log::info!("[SettingsSave] provider='{}' enabled={}", provider_str, enabled),
                         Err(e) => log::error!("[SettingsSave] error: {}", e),
                     }
                     let mut st = state_ref.lock().unwrap();
                     st.ai_provider = provider_str.to_string();
                     st.ai_api_key  = key.to_string();
                     st.ai_enabled  = enabled;
+                }
+            });
+        }
+
+        // ── Settings Save All (Application Settings modal) ────────────────────
+        {
+            let handle    = app.as_weak();
+            let db_ref    = db_conn.clone();
+            app.on_do_settings_save_all(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    let mut cfg = settings::Settings::load(conn);
+                    cfg.narr_enabled     = h.get_settings_narr_enabled();
+                    cfg.narr_title_case  = h.get_settings_narr_title_case();
+                    cfg.narr_preserve    = h.get_settings_narr_preserve();
+                    cfg.gst_enabled      = h.get_settings_gst_enabled();
+                    cfg.gst_auto_ledgers = h.get_settings_gst_auto_ledgers();
+                    cfg.recon_days       = h.get_settings_recon_days().parse::<i32>().unwrap_or(3);
+                    cfg.recon_pct        = h.get_settings_recon_pct().parse::<f64>().unwrap_or(0.5);
+                    let log_idx = h.get_settings_log_level();
+                    cfg.log_level = match log_idx {
+                        1 => "DEBUG",
+                        2 => "WARN",
+                        3 => "ERROR",
+                        _ => "INFO",
+                    }.to_string();
+                    match cfg.save(conn) {
+                        Ok(_)  => log::info!("[SettingsSaveAll] saved recon_days={} recon_pct={}", cfg.recon_days, cfg.recon_pct),
+                        Err(e) => log::error!("[SettingsSaveAll] error: {}", e),
+                    }
+                }
+            });
+        }
+
+        // ── Clear Logs ────────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let db_ref    = db_conn.clone();
+            let state_ref = app_state.clone();
+            app.on_do_clear_logs(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    let client_id = state_ref.lock().unwrap().client_id;
+                    let result = if let Some(cid) = client_id {
+                        db::clear_audit_events(conn, cid)
+                    } else {
+                        db::clear_all_audit_events(conn)
+                    };
+                    match result {
+                        Ok(_)  => {
+                            log::info!("[ClearLogs] cleared");
+                            h.set_toast_msg(slint::SharedString::from("Logs cleared"));
+                            h.set_toast_kind(1);
+                        }
+                        Err(e) => log::error!("[ClearLogs] error: {}", e),
+                    }
+                }
+            });
+        }
+
+        // ── Backup Rules ──────────────────────────────────────────────────────
+        {
+            let db_ref    = db_conn.clone();
+            let state_ref = app_state.clone();
+            let handle    = app.as_weak();
+            app.on_do_backup_rules(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let client_id = state_ref.lock().unwrap().client_id;
+                let Some(cid) = client_id else {
+                    h.set_toast_msg(slint::SharedString::from("Select a client first"));
+                    h.set_toast_kind(2);
+                    return;
+                };
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    match db::export_rules_json(conn, cid) {
+                        Ok(json) => {
+                            let path = format!("rules_backup_{}.json", cid);
+                            match std::fs::write(&path, json) {
+                                Ok(_) => {
+                                    log::info!("[BackupRules] saved to {}", path);
+                                    h.set_toast_msg(slint::SharedString::from(format!("Rules backed up to {}", path).as_str()));
+                                    h.set_toast_kind(1);
+                                }
+                                Err(e) => {
+                                    log::error!("[BackupRules] write error: {}", e);
+                                    h.set_toast_msg(slint::SharedString::from("Backup write failed"));
+                                    h.set_toast_kind(2);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("[BackupRules] export error: {}", e);
+                            h.set_toast_msg(slint::SharedString::from("Rules export failed"));
+                            h.set_toast_kind(2);
+                        }
+                    }
+                }
+            });
+        }
+
+        // ── Restore Rules ─────────────────────────────────────────────────────
+        {
+            let db_ref    = db_conn.clone();
+            let state_ref = app_state.clone();
+            let handle    = app.as_weak();
+            app.on_do_restore_rules(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let client_id = state_ref.lock().unwrap().client_id;
+                let Some(cid) = client_id else {
+                    h.set_toast_msg(slint::SharedString::from("Select a client first"));
+                    h.set_toast_kind(2);
+                    return;
+                };
+                let path = rfd::FileDialog::new()
+                    .set_title("Select Rules Backup JSON")
+                    .add_filter("JSON", &["json"])
+                    .pick_file();
+                let Some(path) = path else { return; };
+                match std::fs::read_to_string(&path) {
+                    Ok(json) => {
+                        let db = db_ref.lock().unwrap();
+                        if let Some(conn) = db.as_ref() {
+                            match db::import_rules_json(conn, cid, &json) {
+                                Ok(n) => {
+                                    log::info!("[RestoreRules] imported {} rules", n);
+                                    h.set_toast_msg(slint::SharedString::from(format!("{} rules restored", n).as_str()));
+                                    h.set_toast_kind(1);
+                                }
+                                Err(e) => {
+                                    log::error!("[RestoreRules] error: {}", e);
+                                    h.set_toast_msg(slint::SharedString::from("Rules restore failed"));
+                                    h.set_toast_kind(2);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("[RestoreRules] read error: {}", e);
+                        h.set_toast_msg(slint::SharedString::from("Could not read backup file"));
+                        h.set_toast_kind(2);
+                    }
                 }
             });
         }

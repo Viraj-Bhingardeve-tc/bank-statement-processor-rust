@@ -186,6 +186,21 @@ export component AppWindow inherits Window {
     callback do-reload-import(int);
     // Settings save
     callback do-settings-save(string, string, bool);
+    // Application settings save-all (reads from in-out properties)
+    callback do-settings-save-all();
+    callback do-clear-logs();
+    // Rules backup / restore
+    callback do-backup-rules();
+    callback do-restore-rules();
+    // Settings properties exposed so Rust can read/write them
+    in-out property <bool>   settings-narr-enabled:    true;
+    in-out property <bool>   settings-narr-title-case: true;
+    in-out property <bool>   settings-narr-preserve:   false;
+    in-out property <bool>   settings-gst-enabled:     true;
+    in-out property <bool>   settings-gst-auto-ledgers:true;
+    in-out property <string> settings-recon-days:      "3";
+    in-out property <string> settings-recon-pct:       "0.5";
+    in-out property <int>    settings-log-level:       0;
 
     // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
@@ -335,5 +350,17 @@ export component AppWindow inherits Window {
         edit-client        => { root.do-edit-client();      }
         reload-import(i)   => { root.do-reload-import(i);   }
         settings-save(p,k,e) => { root.do-settings-save(p, k, e); }
+        settings-save-all  => { root.do-settings-save-all(); }
+        clear-logs         => { root.do-clear-logs();        }
+        backup-rules       => { root.do-backup-rules();      }
+        restore-rules      => { root.do-restore-rules();     }
+        settings-narr-enabled    <=> root.settings-narr-enabled;
+        settings-narr-title-case <=> root.settings-narr-title-case;
+        settings-narr-preserve   <=> root.settings-narr-preserve;
+        settings-gst-enabled     <=> root.settings-gst-enabled;
+        settings-gst-auto-ledgers<=> root.settings-gst-auto-ledgers;
+        settings-recon-days      <=> root.settings-recon-days;
+        settings-recon-pct       <=> root.settings-recon-pct;
+        settings-log-level       <=> root.settings-log-level;
     }
 }

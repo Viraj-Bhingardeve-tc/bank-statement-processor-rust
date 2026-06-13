@@ -380,6 +380,55 @@ pub fn delete_rule(conn: &Connection, rule_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Serialize all rules for `client_id` to a JSON string for backup.
+pub fn export_rules_json(conn: &Connection, client_id: i64) -> Result<String> {
+    let rules = get_rules(conn, client_id)?;
+    let items: Vec<String> = rules.iter().map(|r| {
+        format!(
+            r#"{{"pattern":{p},"vendor":{v},"account_head":{h},"txn_type":{t}}}"#,
+            p = json_str(&r.pattern),
+            v = json_str(&r.vendor),
+            h = json_str(&r.account_head),
+            t = json_str(&r.txn_type),
+        )
+    }).collect();
+    Ok(format!(r#"{{"version":1,"rules":[{}]}}"#, items.join(",")))
+}
+
+fn json_str(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Import rules from a JSON backup string into `client_id`.
+/// Existing rules for this client are replaced.
+pub fn import_rules_json(conn: &Connection, client_id: i64, json: &str) -> Result<usize> {
+    // Minimal hand-rolled parse: find "rules":[...] array and extract objects
+    let rules_start = json.find("\"rules\"").and_then(|p| json[p..].find('[').map(|o| p + o + 1));
+    if rules_start.is_none() { anyhow::bail!("no 'rules' array in backup JSON"); }
+    let rs = rules_start.unwrap();
+    // Delete existing client rules first
+    conn.execute("DELETE FROM classification_rules WHERE client_id = ?1", rusqlite::params![client_id])
+        .context("import_rules_json delete")?;
+
+    let obj_re = regex::Regex::new(r#""pattern"\s*:\s*"([^"]*)"\s*,\s*"vendor"\s*:\s*"([^"]*)"\s*,\s*"account_head"\s*:\s*"([^"]*)"\s*,\s*"txn_type"\s*:\s*"([^"]*)""#).unwrap();
+    let slice = &json[rs..];
+    let mut count = 0usize;
+    for cap in obj_re.captures_iter(slice) {
+        let pattern = cap.get(1).map_or("", |m| m.as_str());
+        let vendor   = cap.get(2).map_or("", |m| m.as_str());
+        let head     = cap.get(3).map_or("", |m| m.as_str());
+        let typ      = cap.get(4).map_or("", |m| m.as_str());
+        if pattern.is_empty() { continue; }
+        conn.execute(
+            "INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            rusqlite::params![client_id, pattern, vendor, head, typ],
+        ).context("import_rules_json insert")?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 // ── Audit log CRUD ────────────────────────────────────────────────────────────
 
 pub fn push_audit_event(conn: &Connection, client_id: i64, event: &str) -> Result<()> {
@@ -397,6 +446,18 @@ pub fn get_audit_events(conn: &Connection, client_id: i64) -> Result<Vec<String>
     let rows = stmt.query_map(rusqlite::params![client_id], |r| r.get(0))
         .context("get_audit_events query")?;
     rows.collect::<rusqlite::Result<Vec<String>>>().context("get_audit_events collect")
+}
+
+pub fn clear_audit_events(conn: &Connection, client_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM audit_log WHERE client_id = ?1", rusqlite::params![client_id])
+        .context("clear_audit_events")?;
+    Ok(())
+}
+
+pub fn clear_all_audit_events(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM audit_log", [])
+        .context("clear_all_audit_events")?;
+    Ok(())
 }
 
 // ── Settings CRUD ─────────────────────────────────────────────────────────────
