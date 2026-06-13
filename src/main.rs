@@ -1646,26 +1646,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // ── Export Tally XML ──────────────────────────────────────────────────
         {
+            let handle    = app.as_weak();
             let state_ref = app_state.clone();
             app.on_do_export_tally(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
                 let st = state_ref.lock().unwrap();
                 if st.transactions.is_empty() {
                     log::warn!("[ExportTally] No transactions to export");
                     return;
                 }
-                let client_name = st.client_name.clone();
+                let company = h.get_wiz_company().to_string();
+                let client_name = if company.is_empty() { st.client_name.clone() } else { company };
+                let gstin   = h.get_wiz_gstin().to_string();
+                let from    = h.get_wiz_date_from().to_string();
+                let to      = h.get_wiz_date_to().to_string();
                 let opts = export::tally::TallyOpts {
                     company:            client_name.clone(),
-                    gstin:              String::new(),
+                    gstin,
                     fy:                 String::new(),
                     bank_ledger:        st.tally_ledger.clone(),
-                    date_from:          if st.date_from.is_empty() { None } else { Some(st.date_from.clone()) },
-                    date_to:            if st.date_to.is_empty()   { None } else { Some(st.date_to.clone()) },
-                    only_classified:    true,
-                    include_ledgers:    true,
-                    include_narrations: true,
-                    include_ob:         false,
-                    skip_low_conf:      false,
+                    date_from:          if from.is_empty() { None } else { Some(from) },
+                    date_to:            if to.is_empty()   { None } else { Some(to) },
+                    only_classified:    h.get_wiz_opt_classified(),
+                    include_ledgers:    h.get_wiz_opt_ledger(),
+                    include_narrations: h.get_wiz_opt_narr(),
+                    include_ob:         h.get_wiz_opt_ob(),
+                    skip_low_conf:      h.get_wiz_opt_skip_low(),
                 };
                 let xml = export::tally::generate(&st.transactions, &opts, st.opening_balance);
                 let suggested = format!("TallyExport_{}.xml", client_name.replace(' ', "_"));

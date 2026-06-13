@@ -1479,24 +1479,24 @@ export component MainScreen inherits Rectangle {
                 MHdr { title: "Quick Tally XML Export"; close => { root.modal-state = ""; } }
                 VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
                     Text { text: "Tally Company Name *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    LineEdit { placeholder-text: "Must match Tally exactly (case-sensitive)"; height: 34px; }
+                    LineEdit { placeholder-text: "Must match Tally exactly (case-sensitive)"; height: 34px; text <=> root.wiz-company; }
                     Text { text: "GSTIN (optional)"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    LineEdit { placeholder-text: "e.g. 27AABCU9603R1ZX"; height: 34px; }
+                    LineEdit { placeholder-text: "e.g. 27AABCU9603R1ZX"; height: 34px; text <=> root.wiz-gstin; }
                     HorizontalBox { padding: 0px; spacing: 12px;
                         VerticalBox { padding: 0px; spacing: 6px; horizontal-stretch: 1;
                             Text { text: "From Date"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; }
+                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; text <=> root.wiz-from; }
                         }
                         VerticalBox { padding: 0px; spacing: 6px; horizontal-stretch: 1;
                             Text { text: "To Date"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; }
+                            LineEdit { placeholder-text: "DD/MM/YYYY"; height: 34px; text <=> root.wiz-to; }
                         }
                     }
-                    CheckBox { text: "Export only classified transactions"; checked: true; }
-                    CheckBox { text: "Auto-create ledgers in Tally"; checked: true; }
-                    CheckBox { text: "Include narrations in vouchers"; checked: true; }
-                    CheckBox { text: "Include Opening Balance journal entry"; }
-                    CheckBox { text: "Skip low-confidence entries (<40%)"; }
+                    CheckBox { text: "Export only classified transactions"; checked <=> root.wiz-opt-classified; }
+                    CheckBox { text: "Auto-create ledgers in Tally"; checked <=> root.wiz-opt-ledger; }
+                    CheckBox { text: "Include narrations in vouchers"; checked <=> root.wiz-opt-narr; }
+                    CheckBox { text: "Include Opening Balance journal entry"; checked <=> root.wiz-opt-ob; }
+                    CheckBox { text: "Skip low-confidence entries (<40%)"; checked <=> root.wiz-opt-skip-low; }
                 }
                 MFtr {
                     MBtn { text: "Export Tally XML"; bg: #2E7D32; fg: white; clicked => { root.modal-state = ""; root.export-tally(); } }
