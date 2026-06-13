@@ -14,6 +14,7 @@ mod analytics;
 mod classifier;
 mod db;
 mod export;
+mod narration_cleaner;
 mod parser;
 mod settings;
 mod ui;
@@ -600,12 +601,27 @@ fn apply_parse_result(
         result.opening_balance, result.closing_balance
     );
 
+    // Run narration cleaner on all transactions.
+    let narration_strs: Vec<String> = real.iter().map(|t| t.narration.clone()).collect();
+    let cleaned_narrations = narration_cleaner::clean_batch(&narration_strs);
+
     let mut bank_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let row_models: Vec<TxnRow> = real
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(idx, t)| {
             bank_set.insert(t.bank_name.clone());
-            let narr: String = t.narration.chars().take(80).collect();
+            let meta = &cleaned_narrations[idx];
+            let narr: String = if meta.confidence >= 0.4 && !meta.cleaned.is_empty() {
+                meta.cleaned.chars().take(80).collect()
+            } else {
+                t.narration.chars().take(80).collect()
+            };
+            let vendor_display = if t.vendor.is_empty() && !meta.party.is_empty() {
+                meta.party.chars().take(40).collect::<String>()
+            } else {
+                t.vendor.clone()
+            };
             let has_gst = t.tags.iter().any(|tag| tag.to_uppercase().contains("GST"));
             let has_tax = t.tags.iter().any(|tag| tag.to_uppercase().contains("TAX"));
             let has_dup = t.tags.iter().any(|tag| tag.to_uppercase().contains("DUP")) || t.dup_flag;
@@ -628,7 +644,7 @@ fn apply_parse_result(
                 debit:        SharedString::from(fmt_cell(t.debit).as_str()),
                 credit:       SharedString::from(fmt_cell(t.credit).as_str()),
                 balance:      SharedString::from(fmt_cell(t.balance).as_str()),
-                vendor:       SharedString::from(t.vendor.as_str()),
+                vendor:       SharedString::from(vendor_display.as_str()),
                 ledger:       SharedString::from(t.account_head.as_str()),
                 expense_head: SharedString::from(""),
                 status_text:  SharedString::from(t.status.to_string().as_str()),
