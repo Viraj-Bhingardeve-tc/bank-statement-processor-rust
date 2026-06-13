@@ -180,13 +180,15 @@ fn parse_cell_amount(cell: &calamine::Data) -> f64 {
 /// Exact = same date + same amount (±0.01).
 /// Likely = amount matches but date differs by ≤7 days.
 #[cfg(feature = "slint-ui")]
+// Returns (exact, likely, unmatched_tally, tally_status["Matched"|"Likely"|"Unmatched"], bank_used)
 fn reconcile_match(
     tally: &[(String, f64)],
     bank:  &[(String, f64)],
-) -> (usize, usize, usize) {
-    let mut bank_used = vec![false; bank.len()];
-    let mut tally_used = vec![false; tally.len()];
-    let mut exact = 0usize;
+) -> (usize, usize, usize, Vec<&'static str>, Vec<bool>) {
+    let mut bank_used   = vec![false; bank.len()];
+    let mut tally_used  = vec![false; tally.len()];
+    let mut tally_exact = vec![false; tally.len()];
+    let mut exact  = 0usize;
     let mut likely = 0usize;
 
     // Exact pass: same date + same amount
@@ -194,8 +196,9 @@ fn reconcile_match(
         for (bi, (bd, ba)) in bank.iter().enumerate() {
             if bank_used[bi] { continue; }
             if (ta - ba).abs() <= 0.01 && td == bd {
-                bank_used[bi] = true;
-                tally_used[ti] = true;
+                bank_used[bi]   = true;
+                tally_used[ti]  = true;
+                tally_exact[ti] = true;
                 exact += 1;
                 break;
             }
@@ -208,9 +211,8 @@ fn reconcile_match(
             if bank_used[bi] { continue; }
             if (ta - ba).abs() <= 0.01 {
                 if let (Some(td_ymd), Some(bd_ymd)) = (parse_date_for_recon(td), parse_date_for_recon(bd)) {
-                    let diff = (td_ymd as i64 - bd_ymd as i64).abs();
-                    if diff <= 7 {
-                        bank_used[bi] = true;
+                    if (td_ymd as i64 - bd_ymd as i64).abs() <= 7 {
+                        bank_used[bi]  = true;
                         tally_used[ti] = true;
                         likely += 1;
                         break;
@@ -219,7 +221,12 @@ fn reconcile_match(
             }
         }
     }
-    (exact, likely, tally.len().saturating_sub(exact + likely))
+    let tally_status: Vec<&'static str> = (0..tally.len()).map(|i| {
+        if tally_exact[i]      { "Matched" }
+        else if tally_used[i]  { "Likely"  }
+        else                   { "Unmatched" }
+    }).collect();
+    (exact, likely, tally.len().saturating_sub(exact + likely), tally_status, bank_used)
 }
 
 fn parse_date_for_recon(s: &str) -> Option<u32> {
@@ -1561,28 +1568,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|t| (t.date.clone(), t.debit.or(t.credit).unwrap_or(0.0)))
                     .collect();
 
-                let (matched, likely, unmatched_tally) = reconcile_match(&tally_entries, &bank);
+                let (matched, likely, unmatched_tally, tally_status, bank_used) =
+                    reconcile_match(&tally_entries, &bank);
                 let bank_only = bank.len().saturating_sub(matched + likely);
-                let tally_unmatched = tally_entries.len().saturating_sub(matched + likely);
                 let status = format!(
                     "Tally: {} entries | Bank: {} transactions\n\u{2022} Exact matches: {}\n\u{2022} Likely matches (±7 days): {}\n\u{2022} Tally entries unmatched: {}\n\u{2022} Bank-only entries (no Tally): {}",
-                    tally_entries.len(), bank.len(), matched, likely, tally_unmatched, bank_only
+                    tally_entries.len(), bank.len(), matched, likely, unmatched_tally, bank_only
                 );
+
+                // Build CSV for later export
+                let mut csv = String::from("Source,Date,Amount,Status\n");
+                for (i, (td, ta)) in tally_entries.iter().enumerate() {
+                    csv.push_str(&format!("Tally,{},{:.2},{}\n", td, ta, tally_status[i]));
+                }
+                for (i, (bd, ba)) in bank.iter().enumerate() {
+                    let s = if bank_used[i] { "Matched" } else { "Bank-only" };
+                    csv.push_str(&format!("Bank,{},{:.2},{}\n", bd, ba, s));
+                }
 
                 drop(st);
                 h.set_recon_matched(SharedString::from(matched.to_string().as_str()));
                 h.set_recon_likely(SharedString::from(likely.to_string().as_str()));
-                h.set_recon_unmatched(SharedString::from(tally_unmatched.to_string().as_str()));
+                h.set_recon_unmatched(SharedString::from(unmatched_tally.to_string().as_str()));
                 h.set_recon_bank_only(SharedString::from(bank_only.to_string().as_str()));
                 h.set_recon_status(SharedString::from(status.as_str()));
 
-                let event_str = format!("[{}] Reconcile — {} matched, {} likely, {} unmatched", audit_now(), matched, likely, tally_unmatched);
+                let event_str = format!("[{}] Reconcile — {} matched, {} likely, {} unmatched", audit_now(), matched, likely, unmatched_tally);
                 let client_id = {
                     let mut st2 = state_ref.lock().unwrap();
                     st2.audit_events.push(event_str.clone());
+                    st2.recon_csv = csv;
                     st2.client_id
                 };
-                log::info!("[Reconcile] matched={} likely={} unmatched={} bank_only={}", matched, likely, tally_unmatched, bank_only);
+                log::info!("[Reconcile] matched={} likely={} unmatched={} bank_only={}", matched, likely, unmatched_tally, bank_only);
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
@@ -1713,6 +1731,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 h.set_audit_records(slint::ModelRc::new(slint::VecModel::from(filtered)));
                 log::info!("[AuditTrail] action_idx={} type_idx={} total_events={}", action_idx, type_idx, all_events.len());
+            });
+        }
+
+        // ── Export Reconciliation CSV ─────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_export_recon_csv(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let csv = state_ref.lock().unwrap().recon_csv.clone();
+                if csv.is_empty() {
+                    h.set_status_bank(SharedString::from("Run a reconciliation first before exporting."));
+                    return;
+                }
+                let path = match rfd::FileDialog::new()
+                    .set_title("Save Reconciliation CSV")
+                    .set_file_name("Reconciliation.csv")
+                    .add_filter("CSV", &["csv"])
+                    .save_file()
+                {
+                    Some(p) => p,
+                    None    => return,
+                };
+                match std::fs::write(&path, csv.as_bytes()) {
+                    Ok(_)  => {
+                        h.set_status_bank(SharedString::from("Reconciliation CSV exported."));
+                        log::info!("[ExportReconCSV] written → {:?}", path);
+                    }
+                    Err(e) => {
+                        h.set_status_bank(SharedString::from("Export failed — check logs."));
+                        log::error!("[ExportReconCSV] write failed: {}", e);
+                    }
+                }
+            });
+        }
+
+        // ── Download Audit Logs ────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_download_logs(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let client_id = state_ref.lock().unwrap().client_id;
+                let events: Vec<String> = if let Some(cid) = client_id {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_audit_events(conn, cid).unwrap_or_default()
+                    } else {
+                        state_ref.lock().unwrap().audit_events.iter().rev().cloned().collect()
+                    }
+                } else {
+                    state_ref.lock().unwrap().audit_events.iter().rev().cloned().collect()
+                };
+                if events.is_empty() {
+                    h.set_status_bank(SharedString::from("No audit events to export."));
+                    return;
+                }
+                let path = match rfd::FileDialog::new()
+                    .set_title("Save Audit Log")
+                    .set_file_name("AuditLog.txt")
+                    .add_filter("Text file", &["txt"])
+                    .save_file()
+                {
+                    Some(p) => p,
+                    None    => return,
+                };
+                let content = events.join("\n");
+                match std::fs::write(&path, content.as_bytes()) {
+                    Ok(_)  => {
+                        h.set_status_bank(SharedString::from(
+                            format!("Audit log exported — {} events.", events.len()).as_str()
+                        ));
+                        log::info!("[DownloadLogs] {} events written → {:?}", events.len(), path);
+                    }
+                    Err(e) => {
+                        h.set_status_bank(SharedString::from("Export failed — check logs."));
+                        log::error!("[DownloadLogs] write failed: {}", e);
+                    }
+                }
             });
         }
 

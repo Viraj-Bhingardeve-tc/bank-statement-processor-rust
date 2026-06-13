@@ -166,6 +166,8 @@ export component AppWindow inherits Window {
     callback do-settings();
     callback do-add-row();
     callback do-load-all();
+    callback do-download-logs();
+    callback do-export-recon-csv();
     // Row editing callbacks
     callback do-row-click(int);
     callback do-save-txn(int, string, string, string, bool);   // idx, vendor, head, type, learn
@@ -318,6 +320,8 @@ export component AppWindow inherits Window {
         open-settings       => { root.do-settings();            }
         add-row             => { root.do-add-row();             }
         load-all            => { root.do-load-all();            }
+        download-logs       => { root.do-download-logs();       }
+        export-recon-csv    => { root.do-export-recon-csv();    }
         row-click(idx)      => { root.do-row-click(idx);        }
         save-txn(i,v,h,t,l) => { root.do-save-txn(i,v,h,t,l); }
         delete-txn(i)       => { root.do-delete-txn(i);        }

@@ -49,6 +49,9 @@ pub struct AppState {
 
     // Audit trail — in-memory event log, newest appended last
     pub audit_events: Vec<String>,
+
+    // Reconcile — CSV text built after the last run; empty until first reconcile
+    pub recon_csv: String,
 }
 
 impl AppState {

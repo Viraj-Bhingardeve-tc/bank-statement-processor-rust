@@ -566,6 +566,8 @@ export component MainScreen inherits Rectangle {
     callback open-settings();
     callback add-row();
     callback load-all();
+    callback download-logs();
+    callback export-recon-csv();
     // Row editing
     callback row-click(int);
     callback save-txn(int, string, string, string, bool);
@@ -1772,7 +1774,7 @@ export component MainScreen inherits Rectangle {
                     }
                 }
                 MFtr {
-                    MBtn { text: "Download Logs"; bg: #F5F5F5; fg: #546E7A; enabled: true; }
+                    MBtn { text: "Download Logs"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.download-logs(); } }
                     MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
@@ -1960,7 +1962,7 @@ export component MainScreen inherits Rectangle {
                         MBtn { text: "Import Tally Export (Excel)"; bg: #F5F5F5; fg: #37474F; enabled: true; clicked => { root.reconcile(); } }
                         Text { text: "No Tally file loaded"; font-size: 12px; color: #888888; vertical-alignment: center; horizontal-stretch: 1; }
                         MBtn { text: "Run Reconciliation"; bg: #1565C0; enabled: false; }
-                        MBtn { text: "Export CSV"; bg: #2E7D32; fg: white; enabled: false; }
+                        MBtn { text: "Export CSV"; bg: #2E7D32; fg: white; enabled: root.recon-status != ""; clicked => { root.export-recon-csv(); } }
                     }
                     // Summary bar — bound to Rust recon properties
                     Rectangle {
