@@ -16,6 +16,7 @@ pub mod date_parser;
 pub mod excel_parser;
 pub mod narration_cleaner;
 pub mod noise_filter;
+pub mod ocr_extractor;
 pub mod ocr_parser;
 pub mod party_master;
 pub mod pdf_parser;
@@ -117,6 +118,7 @@ impl ColumnMap {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: String,
+    pub import_id: Option<i64>,
 
     /// Display date in "DD/MM/YYYY" format.
     pub date: String,
@@ -179,6 +181,7 @@ impl Transaction {
     pub fn new(id: impl Into<String>) -> Self {
         Transaction {
             id: id.into(),
+            import_id: None,
             date: String::new(),
             date_ts: 0,
             narration: String::new(),

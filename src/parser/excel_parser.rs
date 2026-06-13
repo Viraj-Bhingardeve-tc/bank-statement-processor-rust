@@ -499,6 +499,7 @@ pub fn prepend_opening_balance_row(
 
     let ob_row = Transaction {
         id:               "opening_balance".to_owned(),
+        import_id:        None,
         date:             String::new(),
         date_ts:          0,
         narration:        "Opening Balance".to_owned(),

@@ -36,6 +36,19 @@ pub struct AppState {
     pub wiz_gstin:     String,
     pub wiz_date_from: String,  // ISO YYYY-MM-DD
     pub wiz_date_to:   String,
+
+    // Import history: parallel vec to the UI import-records list (DB import ids)
+    pub import_ids: Vec<i64>,
+    // Rules: parallel vec to the UI rule-records list (DB rule ids)
+    pub rule_ids: Vec<i64>,
+
+    // AI settings (loaded from DB settings table)
+    pub ai_provider:  String,   // "openai" | "claude" | "gemini"
+    pub ai_api_key:   String,
+    pub ai_enabled:   bool,
+
+    // Audit trail — in-memory event log, newest appended last
+    pub audit_events: Vec<String>,
 }
 
 impl AppState {

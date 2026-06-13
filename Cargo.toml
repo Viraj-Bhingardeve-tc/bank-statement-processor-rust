@@ -54,7 +54,7 @@ once_cell = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 # ── HTTP client (AI classifier — Phase 8+) ───────────────────────────────────
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
 
 # ── XML export (Tally TDML — Phase 8+) ───────────────────────────────────────
 quick-xml = { version = "0.36", features = ["serialize"] }
@@ -80,7 +80,7 @@ rayon = "1"
 [features]
 # "slint-ui" gates the entire Slint + window subsystem.
 # Use `--no-default-features` to run parser unit tests without compiling Slint.
-default      = ["slint-ui"]
+default      = ["slint-ui", "ai"]
 slint-ui     = ["dep:slint", "dep:slint-build", "dep:rfd"]
 ai           = ["dep:reqwest"]
 excel-export = ["dep:umya-spreadsheet"]

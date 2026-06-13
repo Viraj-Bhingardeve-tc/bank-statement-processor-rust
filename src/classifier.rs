@@ -3,12 +3,14 @@
 // _extractPartyName(), and _detectDuplicates() from the original app.js.
 
 use crate::parser::{Transaction, TransactionStatus, VoucherType};
+use crate::db::ClassificationRule;
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
 /// Run full auto-classification pipeline on all transactions in place.
+/// Applies stored `rules` first, then falls back to keyword heuristics.
 /// Returns the number of transactions whose status changed.
-pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str) -> usize {
+pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str, rules: &[ClassificationRule]) -> usize {
     let mut changed = 0;
     for t in txns.iter_mut() {
         if t.is_opening_balance { continue; }
@@ -18,7 +20,7 @@ pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str) -> usize {
         if matches!(t.status, TransactionStatus::Suspense) { continue; }
 
         let before_status = t.status.clone();
-        classify_one(t, bank_ledger);
+        classify_one(t, bank_ledger, rules);
         if t.status != before_status { changed += 1; }
     }
     // Detect duplicates across the full list
@@ -26,19 +28,38 @@ pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str) -> usize {
     changed
 }
 
-/// Classify a single transaction using keyword heuristics.
-fn classify_one(t: &mut Transaction, bank_ledger: &str) {
+/// Apply stored classification rules — returns matched rule or None.
+fn apply_rules<'a>(upper: &str, rules: &'a [ClassificationRule]) -> Option<&'a ClassificationRule> {
+    rules.iter().find(|r| !r.pattern.is_empty() && upper.contains(&r.pattern.to_uppercase()))
+}
+
+/// Classify a single transaction: stored rules → keyword heuristics.
+fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationRule]) {
     let upper = t.narration.to_uppercase();
 
-    // 1. Keyword heuristics
-    if let Some(kw) = kw_match(&upper, t, bank_ledger) {
+    // 1. Stored user rules (highest priority)
+    if let Some(rule) = apply_rules(&upper, rules) {
+        if !rule.vendor.is_empty()       { t.vendor       = rule.vendor.clone(); }
+        if !rule.account_head.is_empty() { t.account_head = rule.account_head.clone(); }
+        if !rule.txn_type.is_empty() {
+            t.txn_type = match rule.txn_type.as_str() {
+                "Payment"  => VoucherType::Payment,
+                "Receipt"  => VoucherType::Receipt,
+                "Contra"   => VoucherType::Contra,
+                _          => t.txn_type.clone(),
+            };
+        }
+        t.confidence = 0.85;
+        t.status     = TransactionStatus::Classified;
+    // 2. Keyword heuristics
+    } else if let Some(kw) = kw_match(&upper, t, bank_ledger) {
         t.vendor       = kw.vendor;
         t.account_head = kw.head;
         t.txn_type     = kw.txn_type;
         t.confidence   = 0.45;
         t.status       = TransactionStatus::Classified;
     } else {
-        // 2. Extract party name for unreviewed
+        // 3. Extract party name for unreviewed
         let party = extract_party_name(&t.narration);
         if !party.is_empty() {
             t.vendor = party;
