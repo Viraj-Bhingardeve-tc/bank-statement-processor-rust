@@ -581,6 +581,7 @@ export component MainScreen inherits Rectangle {
     callback export-excel();
     callback export-tally();
     callback export-accounting();
+    callback export-preview();    // recomputes the export summary line for wizard step 4
     callback reimport-excel();
     callback reset-dedupe();
     callback reconcile();
@@ -751,6 +752,8 @@ export component MainScreen inherits Rectangle {
     // Batch monitor status line set by Rust after processing
     in property <string>          batch-log: "";
     in property <[BatchFileRow]>  batch-file-rows: [];
+    // Export wizard step 4 preview (set by Rust via do-export-preview callback)
+    in property <string>          export-preview-text: "";
     // Reconcile counters set by Rust after reconcile()
     in property <string>     recon-matched:    "0";
     in property <string>     recon-likely:     "0";
@@ -2235,6 +2238,14 @@ export component MainScreen inherits Rectangle {
                 // Step 4: Options
                 if root.wiz-step == 4 : VerticalBox { padding: 20px; spacing: 8px; vertical-stretch: 1;
                     Text { text: "EXPORT OPTIONS"; font-size: 12px; font-weight: 600; color: #1565C0; letter-spacing: 0.5px; }
+                    // Export summary preview bar
+                    if root.export-preview-text != "" : Rectangle {
+                        height: 32px; background: #E3F2FD; border-radius: 6px; border-width: 1px; border-color: #90CAF9;
+                        HorizontalLayout { padding: 10px; spacing: 6px; alignment: center;
+                            Text { text: "\u{1F4CA}"; font-size: 13px; vertical-alignment: center; }
+                            Text { text: root.export-preview-text; font-size: 12px; color: #0D47A1; font-weight: 600; vertical-alignment: center; }
+                        }
+                    }
                     Rectangle {
                         height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
                         HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
@@ -2278,7 +2289,7 @@ export component MainScreen inherits Rectangle {
                     Rectangle {
                         height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
                         HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
-                            CheckBox { checked <=> root.wiz-opt-classified; }
+                            CheckBox { checked <=> root.wiz-opt-classified; toggled => { root.export-preview(); } }
                             VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
                                 Text { text: "Export only classified transactions"; font-size: 12px; font-weight: 600; color: #1A237E; }
                                 Text { text: "Skips unreviewed / suspense transactions — recommended for accounting import"; font-size: 10px; color: #6B84A0; }
@@ -2288,7 +2299,7 @@ export component MainScreen inherits Rectangle {
                     Rectangle {
                         height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
                         HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
-                            CheckBox { checked <=> root.wiz-opt-skip-low; }
+                            CheckBox { checked <=> root.wiz-opt-skip-low; toggled => { root.export-preview(); } }
                             VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
                                 Text { text: "Skip low-confidence classifications"; font-size: 12px; font-weight: 600; color: #1A237E; }
                                 Text { text: "Excludes transactions with confidence < 40% to reduce errors"; font-size: 10px; color: #6B84A0; }
@@ -2303,7 +2314,7 @@ export component MainScreen inherits Rectangle {
                         clicked => { if root.wiz-step > 1 { root.wiz-step -= 1; } }
                     }
                     if root.wiz-step < 4 : MBtn { text: "Next \u{2192}"; bg: #1565C0;
-                        clicked => { root.wiz-step += 1; }
+                        clicked => { root.wiz-step += 1; if root.wiz-step == 4 { root.export-preview(); } }
                     }
                     if root.wiz-step == 4 : MBtn { text: "\u{2193} Download"; bg: #1A237E; fg: white;
                         clicked => { root.export-accounting(); root.modal-state = ""; }

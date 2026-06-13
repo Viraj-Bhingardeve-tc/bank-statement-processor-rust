@@ -127,6 +127,8 @@ export component AppWindow inherits Window {
     // ── Batch monitor log + per-file rows ─────────────────────────────────────
     in property <string>          batch-log: "";
     in property <[BatchFileRow]>  batch-file-rows: [];
+    // ── Export wizard step 4 preview ──────────────────────────────────────────
+    in property <string>          export-preview-text: "";
     // ── Reconcile counters ────────────────────────────────────────────────────
     in property <string>     recon-matched:    "0";
     in property <string>     recon-likely:     "0";
@@ -165,6 +167,7 @@ export component AppWindow inherits Window {
     callback do-export-excel();
     callback do-export-tally();
     callback do-export-accounting();
+    callback do-export-preview();
     callback do-reimport-excel();
     callback do-reset-dedupe();
     callback do-reconcile();
@@ -308,6 +311,7 @@ export component AppWindow inherits Window {
         dash-client-ledger:    root.dash-client-ledger;
         batch-log:             root.batch-log;
         batch-file-rows:       root.batch-file-rows;
+        export-preview-text:   root.export-preview-text;
         recon-matched:         root.recon-matched;
         recon-likely:          root.recon-likely;
         recon-unmatched:       root.recon-unmatched;
@@ -343,6 +347,7 @@ export component AppWindow inherits Window {
         export-excel        => { root.do-export-excel();        }
         export-tally        => { root.do-export-tally();        }
         export-accounting   => { root.do-export-accounting();   }
+        export-preview      => { root.do-export-preview();      }
         reimport-excel      => { root.do-reimport-excel();      }
         reset-dedupe        => { root.do-reset-dedupe();        }
         reconcile           => { root.do-reconcile();           }

@@ -1791,6 +1791,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        // ── Export wizard preview ─────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_export_preview(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                if st.transactions.is_empty() {
+                    h.set_export_preview_text(SharedString::from("No transactions loaded"));
+                    return;
+                }
+                let from = h.get_wiz_date_from().to_string();
+                let to   = h.get_wiz_date_to().to_string();
+                let opts = export::tally::TallyOpts {
+                    only_classified: h.get_wiz_opt_classified(),
+                    skip_low_conf:   h.get_wiz_opt_skip_low(),
+                    date_from: if from.is_empty() { None } else { Some(from) },
+                    date_to:   if to.is_empty()   { None } else { Some(to) },
+                    ..Default::default()
+                };
+                let p = export::tally::count_preview(&st.transactions, &opts);
+                let mut parts = vec![
+                    format!("{} transactions", p.total),
+                    format!("{} Payments", p.payment),
+                    format!("{} Receipts", p.receipt),
+                ];
+                if p.contra > 0 { parts.push(format!("{} Contra", p.contra)); }
+                if p.gst    > 0 { parts.push(format!("{} GST", p.gst)); }
+                if p.skipped > 0 { parts.push(format!("{} skipped", p.skipped)); }
+                let text = parts.join("  •  ");
+                h.set_export_preview_text(SharedString::from(text.as_str()));
+                log::info!("[ExportPreview] {}", text);
+            });
+        }
+
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
