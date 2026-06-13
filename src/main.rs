@@ -2454,6 +2454,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "duplicates"   => t.dup_flag,
                     "gst"          => t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }),
                     "needs_review" => matches!(t.status, parser::TransactionStatus::NeedsReview),
+                    "credits"      => t.credit.is_some() && t.debit.is_none(),
+                    "debits"       => t.debit.is_some() && t.credit.is_none(),
                     _              => true,
                 };
                 if !pass { continue; }

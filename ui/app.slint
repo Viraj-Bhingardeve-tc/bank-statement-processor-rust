@@ -321,6 +321,7 @@ export component AppWindow inherits Window {
         import-history      => { root.do-import-history();      }
         import-ledgers      => { root.do-import-ledgers();      }
         filter-changed(f)   => { root.do-filter-changed(f);     }
+        drill-filter(f)     => { root.do-filter-changed(f);     }
         date-filter-apply(a,b) => { root.do-date-filter-apply(a, b); }
         date-preset(p)      => { root.do-date-preset(p);        }
         bank-filter-changed(b) => { root.do-bank-filter(b);     }

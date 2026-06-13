@@ -177,18 +177,28 @@ component FootBtn inherits Rectangle {
 }
 
 // ── Summary label / value row ──────────────────────────────────────────────────
-component SR inherits HorizontalBox {
+component SR inherits Rectangle {
     in property <string> lbl:  "";
     in property <string> val:  "\u{2014}";
     in property <color>  vcol: #37474F;
-    padding: 0px; spacing: 0px; height: 18px;
-    Text {
-        text: root.lbl; font-size: 12px; color: #607D8B;
-        horizontal-stretch: 1; vertical-alignment: center;
+    in property <bool>   clickable: false;
+    callback clicked();
+    height: 18px;
+    HorizontalLayout {
+        padding: 0px; spacing: 0px; width: parent.width; height: parent.height;
+        Text {
+            text: root.lbl; font-size: 12px; color: #607D8B;
+            horizontal-stretch: 1; vertical-alignment: center;
+        }
+        Text {
+            text: root.val; font-size: 12px; font-weight: 600;
+            color: root.vcol; horizontal-alignment: right; vertical-alignment: center;
+        }
     }
-    Text {
-        text: root.val; font-size: 12px; font-weight: 600;
-        color: root.vcol; horizontal-alignment: right; vertical-alignment: center;
+    if root.clickable : TouchArea {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -555,6 +565,7 @@ export component MainScreen inherits Rectangle {
     callback date-filter-apply(string, string);
     callback date-preset(string);
     callback bank-filter-changed(string);
+    callback drill-filter(string);  // dashboard stat row drill-down: sets filter + switches to txns view
     callback export-excel();
     callback export-tally();
     callback export-accounting();
@@ -1183,8 +1194,8 @@ export component MainScreen inherits Rectangle {
 
                                 SDivider { title: "BALANCES"; }
                                 SR { lbl: "Opening Balance"; val: root.dash-opening;      vcol: #1565C0; }
-                                SR { lbl: "Total Receipts";  val: root.dash-credits;      vcol: #2E7D32; }
-                                SR { lbl: "Total Payments";  val: root.dash-debits;       vcol: #C62828; }
+                                SR { lbl: "Total Receipts";  val: root.dash-credits;      vcol: #2E7D32; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "credits";      root.drill-filter("credits"); } }
+                                SR { lbl: "Total Payments";  val: root.dash-debits;       vcol: #C62828; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "debits";       root.drill-filter("debits"); } }
                                 SR { lbl: "Closing Balance"; val: root.dash-closing;      vcol: #1565C0; }
                                 SR { lbl: "Calc. Closing";   val: root.dash-calc-closing; vcol: #546E7A; }
 
@@ -1248,13 +1259,13 @@ export component MainScreen inherits Rectangle {
                                 }
 
                                 SDivider { title: "REVIEW STATUS"; }
-                                SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; }
-                                SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: #E65100; }
-                                SR { lbl: "Suspense";     val: root.dash-suspense;     vcol: #7B1FA2; }
+                                SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "unreviewed";   root.drill-filter("unreviewed"); } }
+                                SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: #E65100; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "needs_review"; root.drill-filter("needs_review"); } }
+                                SR { lbl: "Suspense";     val: root.dash-suspense;     vcol: #7B1FA2; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense";     root.drill-filter("suspense"); } }
 
                                 SDivider { title: "OTHER"; }
-                                SR { lbl: "Duplicates"; val: root.dash-duplicates; vcol: #C2185B; }
-                                SR { lbl: "GST / Tax";  val: root.dash-gst-count;  vcol: #6A1B9A; }
+                                SR { lbl: "Duplicates"; val: root.dash-duplicates; vcol: #C2185B; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "duplicates"; root.drill-filter("duplicates"); } }
+                                SR { lbl: "GST / Tax";  val: root.dash-gst-count;  vcol: #6A1B9A; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "gst";        root.drill-filter("gst"); } }
                                 SR { lbl: "Vendors";    val: root.dash-vendors;    vcol: #546E7A; }
 
                                 Rectangle { height: 6px; }
@@ -1308,18 +1319,18 @@ export component MainScreen inherits Rectangle {
             }
             card-credits-clicked => {
                 root.show-dashboard = false;
-                root.active-filter = "all";
-                root.filter-changed("all");
+                root.active-filter = "credits";
+                root.drill-filter("credits");
             }
             card-debits-clicked => {
                 root.show-dashboard = false;
-                root.active-filter = "all";
-                root.filter-changed("all");
+                root.active-filter = "debits";
+                root.drill-filter("debits");
             }
             card-txns-clicked => {
                 root.show-dashboard = false;
                 root.active-filter = "all";
-                root.filter-changed("all");
+                root.drill-filter("all");
             }
         }
 
