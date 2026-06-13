@@ -694,7 +694,8 @@ export component MainScreen inherits Rectangle {
     // ── Internal state ─────────────────────────────────────────────────────────
     in-out property <bool>   show-dashboard:  true;
     in-out property <string> active-filter:   "all";
-    in-out property <bool>   dedup-enabled:   true;
+    in-out property <bool>   dedup-enabled:       true;
+    in-out property <bool>   ai-consent-checked:  false;
     in-out property <string> date-from:      "";
     in-out property <string> date-to:        "";
     in-out property <string> active-preset:  "";
@@ -832,7 +833,7 @@ export component MainScreen inherits Rectangle {
                     text: "\u{2605} AI Classify";
                     bg: #6B2FB8; fg: #FFFFFF; fw: 700;
                     enabled: root.transaction-rows.length > 0;
-                    clicked => { root.modal-state = "ai-consent"; }
+                    clicked => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
                 }
 
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
@@ -2319,7 +2320,7 @@ export component MainScreen inherits Rectangle {
                             height: 50px; background: #FFF8E1; border-radius: 6px;
                             border-width: 2px; border-color: #F9A825;
                             HorizontalBox { padding: 12px; spacing: 10px;
-                                CheckBox { }
+                                CheckBox { checked <=> root.ai-consent-checked; }
                                 Text { text: "I have read and understood the above. I acknowledge and accept the confidentiality and compliance risks of using AI classification."; font-size: 12px; font-weight: 600; color: #4E342E; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
                             }
                         }
@@ -2327,9 +2328,12 @@ export component MainScreen inherits Rectangle {
                 }
                 MFtr {
                     MBtn { text: "\u{25BA} Continue with AI"; bg: #6B2FB8; fg: white;
-                        clicked => { root.modal-state = "ai-settings"; }
+                        enabled: root.ai-consent-checked;
+                        clicked => { root.ai-consent-checked = false; root.modal-state = "ai-settings"; }
                     }
-                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true;
+                        clicked => { root.ai-consent-checked = false; root.modal-state = ""; }
+                    }
                 }
             }
         }
