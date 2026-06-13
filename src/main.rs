@@ -621,6 +621,35 @@ fn apply_parse_result(
     }).collect();
     let tally_groups = tally_group_engine::classify_batch(&tally_inputs, None);
 
+    // Validate each transaction (port of Electron _validateTransaction).
+    // Returns: (is_valid, reasons_string)
+    let validation: Vec<(bool, String)> = real.iter().map(|t| {
+        let mut reasons: Vec<&str> = Vec::new();
+        // 1. Date must be present
+        if t.date.is_empty() || t.date.len() < 8 {
+            reasons.push("Missing or invalid date");
+        }
+        // 2. Amount must exist and be sane
+        let amt = t.debit.or(t.credit);
+        match amt {
+            None => reasons.push("No amount (debit or credit)"),
+            Some(a) => {
+                if !a.is_finite() || a.abs() > 2e9 { reasons.push("Amount exceeds \u{20B9}200 crore"); }
+                if a < 0.0 { reasons.push("Negative amount — check column detection"); }
+            }
+        }
+        // 3. Narration must not be empty
+        if t.narration.trim().len() < 2 { reasons.push("Empty or very short narration"); }
+        // 4. Balance sanity
+        if let Some(bal) = t.balance {
+            if bal < -1_000_000.0 { reasons.push("Suspiciously negative balance"); }
+        }
+        // 5. Duplicate risk
+        if t.dup_flag { reasons.push("Possible duplicate transaction"); }
+        let valid = reasons.is_empty();
+        (valid, reasons.join("; "))
+    }).collect();
+
     let mut bank_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let row_models: Vec<TxnRow> = real
         .iter()
@@ -641,17 +670,31 @@ fn apply_parse_result(
             let has_gst = t.tags.iter().any(|tag| tag.to_uppercase().contains("GST"));
             let has_tax = t.tags.iter().any(|tag| tag.to_uppercase().contains("TAX"));
             let has_dup = t.tags.iter().any(|tag| tag.to_uppercase().contains("DUP")) || t.dup_flag;
-            let row_color: i32 = match t.status {
-                parser::TransactionStatus::NeedsReview => 3,
-                parser::TransactionStatus::Suspense    => 4,
-                parser::TransactionStatus::Manual      => 6,
-                _ if t.dup_flag                        => 5,
-                parser::TransactionStatus::Classified  => {
-                    if t.confidence >= 0.7 { 1 } else { 2 }
+            let (val_ok, ref val_reasons) = validation[idx];
+            // Treat as NeedsReview if validation fails and not already suspense/manual
+            let effective_needs_review = !val_ok
+                && !matches!(t.status, parser::TransactionStatus::Suspense | parser::TransactionStatus::Manual);
+            let row_color: i32 = if effective_needs_review && !matches!(t.status, parser::TransactionStatus::NeedsReview) {
+                3  // yellow — validation failure
+            } else {
+                match t.status {
+                    parser::TransactionStatus::NeedsReview => 3,
+                    parser::TransactionStatus::Suspense    => 4,
+                    parser::TransactionStatus::Manual      => 6,
+                    _ if t.dup_flag                        => 5,
+                    parser::TransactionStatus::Classified  => {
+                        if t.confidence >= 0.7 { 1 } else { 2 }
+                    }
+                    _ => 0,
                 }
-                _ => 0,
             };
             let tally_group = tally_groups[idx].as_str();
+            let review_text = if !val_ok { val_reasons.as_str() } else { "" };
+            let status_display = if effective_needs_review && matches!(t.status, parser::TransactionStatus::Unreviewed) {
+                "needs_review"
+            } else {
+                &t.status.to_string()
+            };
             TxnRow {
                 bank_name:    SharedString::from(t.bank_name.as_str()),
                 account_no:   SharedString::from(t.account_no.as_str()),
@@ -664,9 +707,9 @@ fn apply_parse_result(
                 vendor:       SharedString::from(vendor_display.as_str()),
                 ledger:       SharedString::from(t.account_head.as_str()),
                 expense_head: SharedString::from(tally_group),
-                status_text:  SharedString::from(t.status.to_string().as_str()),
+                status_text:  SharedString::from(status_display),
                 tags:         SharedString::from(t.tags.join(" ").as_str()),
-                review:       SharedString::from(""),
+                review:       SharedString::from(review_text),
                 row_color,
                 has_gst,
                 has_tax,
@@ -699,10 +742,16 @@ fn apply_parse_result(
     h.set_dash_credit_count(SharedString::from(credit_cnt.to_string().as_str()));
     h.set_dash_debit_count(SharedString::from(debit_cnt.to_string().as_str()));
     h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
-    h.set_dash_suspense(SharedString::from("0"));
-    h.set_dash_needs_review(SharedString::from("0"));
-    h.set_dash_duplicates(SharedString::from("0"));
-    h.set_dash_gst_count(SharedString::from("0"));
+    let suspense_cnt = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::Suspense)).count();
+    let needs_review_cnt = real.iter().zip(validation.iter())
+        .filter(|(t, (ok, _))| matches!(t.status, parser::TransactionStatus::NeedsReview) || !ok)
+        .count();
+    let dup_cnt = real.iter().filter(|t| t.dup_flag).count();
+    let gst_cnt = real.iter().filter(|t| t.tags.iter().any(|g| g == "GST" || g == "TAX")).count();
+    h.set_dash_suspense(SharedString::from(suspense_cnt.to_string().as_str()));
+    h.set_dash_needs_review(SharedString::from(needs_review_cnt.to_string().as_str()));
+    h.set_dash_duplicates(SharedString::from(dup_cnt.to_string().as_str()));
+    h.set_dash_gst_count(SharedString::from(gst_cnt.to_string().as_str()));
     h.set_dash_calc_closing(SharedString::from(ui::AppState::fmt_amount(calc_closing).as_str()));
     h.set_dash_has_mismatch(has_mismatch);
     h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
