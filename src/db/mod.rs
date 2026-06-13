@@ -476,6 +476,12 @@ pub fn import_ledgers(conn: &Connection, client_id: i64, entries: &[(String, Str
     Ok(added)
 }
 
+/// Automatically seed ledger entries from classified transaction account heads.
+/// Skips names that are already present for this client.
+pub fn auto_seed_ledgers(conn: &Connection, client_id: i64, heads_with_groups: &[(String, String)]) -> Result<usize> {
+    import_ledgers(conn, client_id, heads_with_groups)
+}
+
 // ── Settings CRUD ─────────────────────────────────────────────────────────────
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {

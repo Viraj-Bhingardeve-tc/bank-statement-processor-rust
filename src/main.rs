@@ -769,6 +769,19 @@ fn apply_parse_result(
                     let _ = db::upsert_transactions(conn, cid, Some(iid), &result.transactions);
                     log::info!("[LoadFile] persisted {} txns import_id={}", real.len(), iid);
                 }
+                // Auto-seed unique account heads into the ledgers table
+                let mut heads_seen = std::collections::HashSet::new();
+                let heads_with_groups: Vec<(String, String)> = real.iter()
+                    .filter(|t| !t.account_head.is_empty())
+                    .filter(|t| heads_seen.insert(t.account_head.to_lowercase()))
+                    .map(|t| (t.account_head.clone(), tally_group_engine::classify(
+                        &t.account_head, &t.narration, t.credit.is_some(),
+                        t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0), None,
+                    )))
+                    .collect();
+                if !heads_with_groups.is_empty() {
+                    let _ = db::auto_seed_ledgers(conn, cid, &heads_with_groups);
+                }
                 imp_id
             } else { None }
         } else { None }
