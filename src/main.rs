@@ -1462,7 +1462,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         {
-            app.on_do_import_ledgers(|| stub_callback("import-ledgers"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_import_ledgers(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let cid = { state_ref.lock().unwrap().client_id.unwrap_or(0) };
+                if cid == 0 {
+                    h.set_toast_msg(SharedString::from("Select a client first"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+                let path = match rfd::FileDialog::new()
+                    .set_title("Import Ledgers (Excel or CSV)")
+                    .add_filter("Excel / CSV", &["xlsx", "xls", "xlsm", "csv"])
+                    .pick_file()
+                {
+                    Some(p) => p,
+                    None    => return,
+                };
+
+                use calamine::{open_workbook_auto, Reader};
+                let mut wb = match open_workbook_auto(&path) {
+                    Ok(wb) => wb,
+                    Err(e) => {
+                        log::error!("[ImportLedgers] open failed: {}", e);
+                        h.set_toast_msg(SharedString::from("Could not open file"));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                };
+                let sheet_name = match wb.sheet_names().first() {
+                    Some(n) => n.clone(),
+                    None => { h.set_toast_msg(SharedString::from("File has no sheets")); h.set_toast_kind(2); return; }
+                };
+                let range = match wb.worksheet_range(&sheet_name) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log::error!("[ImportLedgers] sheet error: {}", e);
+                        h.set_toast_msg(SharedString::from("Could not read sheet"));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                };
+
+                let rows: Vec<Vec<String>> = range.rows().map(|row| {
+                    row.iter().map(|c| c.to_string().trim().to_string()).collect()
+                }).collect();
+
+                if rows.len() < 2 {
+                    h.set_toast_msg(SharedString::from("File appears empty"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+
+                let header: Vec<String> = rows[0].iter().map(|s| s.to_lowercase()).collect();
+                let name_keys  = ["name","ledger name","ledger","ledgername"];
+                let group_keys = ["under","group","under group","ledger group","group name","parent"];
+                let name_col  = header.iter().position(|h| name_keys.iter().any(|k| h == k));
+                let group_col = header.iter().position(|h| group_keys.iter().any(|k| h == k));
+
+                let name_col = match name_col {
+                    Some(c) => c,
+                    None => {
+                        h.set_toast_msg(SharedString::from("No 'Name' or 'Ledger Name' column found"));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                };
+
+                let mut entries: Vec<(String, String)> = Vec::new();
+                for row in rows.iter().skip(1) {
+                    let name  = row.get(name_col).cloned().unwrap_or_default();
+                    let group = group_col.and_then(|c| row.get(c)).cloned().unwrap_or_default();
+                    if !name.is_empty() { entries.push((name, group)); }
+                }
+
+                if entries.is_empty() {
+                    h.set_toast_msg(SharedString::from("No ledger rows found"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+
+                let db = db_ref.lock().unwrap();
+                let added = match db.as_ref() {
+                    Some(conn) => db::import_ledgers(conn, cid, &entries).unwrap_or(0),
+                    None => 0,
+                };
+                let total = entries.len();
+                let msg = format!("Imported {} new ledgers ({} already existed)", added, total - added);
+                log::info!("[ImportLedgers] {}", msg);
+                h.set_toast_msg(SharedString::from(msg.as_str()));
+                h.set_toast_kind(1);
+            });
         }
         {
             let handle    = app.as_weak();

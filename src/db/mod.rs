@@ -460,6 +460,22 @@ pub fn clear_all_audit_events(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ── Ledger Import ─────────────────────────────────────────────────────────────
+
+/// Insert ledger entries for `client_id`. Each entry is (name, group).
+/// Skips duplicates (UNIQUE(client_id, name)). Returns count of newly inserted rows.
+pub fn import_ledgers(conn: &Connection, client_id: i64, entries: &[(String, String)]) -> Result<usize> {
+    let mut added = 0usize;
+    for (name, group) in entries {
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO ledgers (client_id, name, group_name) VALUES (?1, ?2, ?3)",
+            rusqlite::params![client_id, name, group],
+        ).context("import_ledgers insert")?;
+        added += n;
+    }
+    Ok(added)
+}
+
 // ── Settings CRUD ─────────────────────────────────────────────────────────────
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
