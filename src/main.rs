@@ -841,7 +841,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Login screen shown by default (logged-in = false, set by Slint default)
 
         let app_state: Arc<Mutex<ui::AppState>> =
-            Arc::new(Mutex::new(ui::AppState::default()));
+            Arc::new(Mutex::new(ui::AppState { dedup_enabled: true, ..Default::default() }));
 
         // ── Load clients from DB into dropdown on startup ─────────────────────
         {
@@ -1197,8 +1197,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         db::get_rules(conn, client_id2).unwrap_or_default()
                     } else { vec![] }
                 };
-                classifier::classify_all(&mut all_txns, &bank_ledger, &rules);
-                classifier::detect_duplicates(&mut all_txns);
+                let dedup_on = h.get_dedup_enabled();
+                classifier::classify_all(&mut all_txns, &bank_ledger, &rules, dedup_on);
 
                 let real: Vec<&parser::Transaction> = all_txns.iter().filter(|t| !t.is_opening_balance).collect();
                 let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
@@ -1319,7 +1319,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         db::get_rules(conn, client_id).unwrap_or_default()
                     } else { vec![] }
                 };
-                let changed = classifier::classify_all(&mut st.transactions, &bank_ledger, &rules);
+                let dedup_on2 = h.get_dedup_enabled();
+                let changed = classifier::classify_all(&mut st.transactions, &bank_ledger, &rules, dedup_on2);
                 log::info!("[AutoClassify] classified {} transactions (rules={})", changed, rules.len());
                 rebuild_rows(&h, &st);
                 push_dashboard(&h, &st.transactions, st.opening_balance);

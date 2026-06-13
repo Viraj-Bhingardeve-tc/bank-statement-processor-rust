@@ -193,6 +193,7 @@ export component AppWindow inherits Window {
     callback do-backup-rules();
     callback do-restore-rules();
     // Settings properties exposed so Rust can read/write them
+    in-out property <bool>   dedup-enabled:             true;
     in-out property <bool>   settings-narr-enabled:    true;
     in-out property <bool>   settings-narr-title-case: true;
     in-out property <bool>   settings-narr-preserve:   false;
@@ -355,6 +356,7 @@ export component AppWindow inherits Window {
         clear-logs         => { root.do-clear-logs();        }
         backup-rules       => { root.do-backup-rules();      }
         restore-rules      => { root.do-restore-rules();     }
+        dedup-enabled            <=> root.dedup-enabled;
         settings-narr-enabled    <=> root.settings-narr-enabled;
         settings-narr-title-case <=> root.settings-narr-title-case;
         settings-narr-preserve   <=> root.settings-narr-preserve;

@@ -9,8 +9,9 @@ use crate::db::ClassificationRule;
 
 /// Run full auto-classification pipeline on all transactions in place.
 /// Applies stored `rules` first, then falls back to keyword heuristics.
+/// `run_dedup`: when false, duplicate detection is skipped.
 /// Returns the number of transactions whose status changed.
-pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str, rules: &[ClassificationRule]) -> usize {
+pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str, rules: &[ClassificationRule], run_dedup: bool) -> usize {
     let mut changed = 0;
     for t in txns.iter_mut() {
         if t.is_opening_balance { continue; }
@@ -23,8 +24,7 @@ pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str, rules: &[Cla
         classify_one(t, bank_ledger, rules);
         if t.status != before_status { changed += 1; }
     }
-    // Detect duplicates across the full list
-    detect_duplicates(txns);
+    if run_dedup { detect_duplicates(txns); }
     changed
 }
 

@@ -25,10 +25,11 @@ pub struct AppState {
     pub transactions:    Vec<crate::parser::Transaction>,
 
     // Active filter state — kept in sync with Slint UI
-    pub active_filter: String,   // "all" | "unreviewed" | "suspense" | "high" | "duplicates" | "gst" | "needs_review"
-    pub date_from:     String,   // DD/MM/YYYY
-    pub date_to:       String,   // DD/MM/YYYY
-    pub bank_filter:   String,   // "" means All Banks
+    pub active_filter:  String,   // "all" | "unreviewed" | "suspense" | "high" | "duplicates" | "gst" | "needs_review"
+    pub date_from:      String,   // DD/MM/YYYY
+    pub date_to:        String,   // DD/MM/YYYY
+    pub bank_filter:    String,   // "" means All Banks
+    pub dedup_enabled:  bool,     // mirrors the Dedupe checkbox in the toolbar
 
     // Export wizard state (synced from the UI before generating)
     pub wiz_sw_idx:    i32,   // 0=Tally 1=Zoho 2=QB 3=Odoo 4=Excel 5=XML
