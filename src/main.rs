@@ -542,6 +542,195 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "slint-ui")]
+fn apply_parse_result(
+    h: &AppWindow,
+    state_ref: &Arc<Mutex<ui::AppState>>,
+    db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
+    result: parser::ParseResult,
+    file_name: &str,
+) {
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+
+    let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
+
+    let dates: Vec<&str> = real.iter()
+        .filter(|t| !t.date.is_empty())
+        .map(|t| t.date.as_str())
+        .collect();
+    let period = if dates.len() >= 2 {
+        format!("{} \u{2013} {}", dates[0], dates[dates.len() - 1])
+    } else if dates.len() == 1 {
+        dates[0].to_string()
+    } else {
+        "\u{2014}".to_string()
+    };
+
+    let unreviewed_cnt = real.iter()
+        .filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed))
+        .count();
+    let credit_cnt = real.iter().filter(|t| t.credit.is_some()).count();
+    let debit_cnt  = real.iter().filter(|t| t.debit.is_some()).count();
+
+    let calc_closing = match result.opening_balance {
+        Some(ob) => Some((ob + total_cr - total_dr).round() / 1.0),
+        None     => None,
+    };
+    let has_mismatch = match (result.closing_balance, calc_closing) {
+        (Some(stated), Some(calc)) => (stated - calc).abs() >= 0.5,
+        _ => false,
+    };
+    let mismatch_str = if has_mismatch {
+        match (result.closing_balance, calc_closing) {
+            (Some(stated), Some(calc)) => format!("Diff: {}", ui::fmt_inr((stated - calc).abs())),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    log::info!(
+        "Summary: bank='{}' txns={} dr={:.2} cr={:.2} ob={:?} cb={:?}",
+        result.bank_name, real.len(), total_dr, total_cr,
+        result.opening_balance, result.closing_balance
+    );
+
+    let mut bank_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let row_models: Vec<TxnRow> = real
+        .iter()
+        .map(|t| {
+            bank_set.insert(t.bank_name.clone());
+            let narr: String = t.narration.chars().take(80).collect();
+            let has_gst = t.tags.iter().any(|tag| tag.to_uppercase().contains("GST"));
+            let has_tax = t.tags.iter().any(|tag| tag.to_uppercase().contains("TAX"));
+            let has_dup = t.tags.iter().any(|tag| tag.to_uppercase().contains("DUP")) || t.dup_flag;
+            let row_color: i32 = match t.status {
+                parser::TransactionStatus::NeedsReview => 3,
+                parser::TransactionStatus::Suspense    => 4,
+                parser::TransactionStatus::Manual      => 6,
+                _ if t.dup_flag                        => 5,
+                parser::TransactionStatus::Classified  => {
+                    if t.confidence >= 0.7 { 1 } else { 2 }
+                }
+                _ => 0,
+            };
+            TxnRow {
+                bank_name:    SharedString::from(t.bank_name.as_str()),
+                account_no:   SharedString::from(t.account_no.as_str()),
+                date:         SharedString::from(t.date.as_str()),
+                narration:    SharedString::from(narr.as_str()),
+                ref_no:       SharedString::from(t.reference.as_str()),
+                debit:        SharedString::from(fmt_cell(t.debit).as_str()),
+                credit:       SharedString::from(fmt_cell(t.credit).as_str()),
+                balance:      SharedString::from(fmt_cell(t.balance).as_str()),
+                vendor:       SharedString::from(t.vendor.as_str()),
+                ledger:       SharedString::from(t.account_head.as_str()),
+                expense_head: SharedString::from(""),
+                status_text:  SharedString::from(t.status.to_string().as_str()),
+                tags:         SharedString::from(t.tags.join(" ").as_str()),
+                review:       SharedString::from(""),
+                row_color,
+                has_gst,
+                has_tax,
+                has_dup_tag: has_dup,
+            }
+        })
+        .collect();
+
+    let bank_names: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
+        .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
+        .collect();
+
+    let table_model = slint::ModelRc::new(slint::VecModel::from(row_models));
+    let banks_model = slint::ModelRc::new(slint::VecModel::from(bank_names));
+
+    h.set_transaction_rows(table_model);
+    h.set_bank_names(banks_model);
+    h.set_status_file(SharedString::from(file_name));
+    h.set_status_bank(SharedString::from(result.bank_name.as_str()));
+
+    h.set_dash_bank_name(SharedString::from(result.bank_name.as_str()));
+    h.set_dash_opening(SharedString::from(ui::AppState::fmt_amount(result.opening_balance).as_str()));
+    h.set_dash_closing(SharedString::from(ui::AppState::fmt_amount(result.closing_balance).as_str()));
+    h.set_dash_credits(SharedString::from(ui::AppState::fmt_amount(Some(total_cr)).as_str()));
+    h.set_dash_debits(SharedString::from(ui::AppState::fmt_amount(Some(total_dr)).as_str()));
+    h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
+    h.set_dash_vendors(SharedString::from("\u{2014}"));
+    h.set_dash_account_no(SharedString::from(result.account_no.as_str()));
+    h.set_dash_period(SharedString::from(period.as_str()));
+    h.set_dash_credit_count(SharedString::from(credit_cnt.to_string().as_str()));
+    h.set_dash_debit_count(SharedString::from(debit_cnt.to_string().as_str()));
+    h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
+    h.set_dash_suspense(SharedString::from("0"));
+    h.set_dash_needs_review(SharedString::from("0"));
+    h.set_dash_duplicates(SharedString::from("0"));
+    h.set_dash_gst_count(SharedString::from("0"));
+    h.set_dash_calc_closing(SharedString::from(ui::AppState::fmt_amount(calc_closing).as_str()));
+    h.set_dash_has_mismatch(has_mismatch);
+    h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
+
+    let import_id_persisted: Option<i64> = {
+        let client_id = state_ref.lock().unwrap().client_id;
+        if let Some(cid) = client_id {
+            let db = db_ref.lock().unwrap();
+            if let Some(conn) = db.as_ref() {
+                let imp_id = db::save_import(
+                    conn, cid, file_name, &result.bank_name,
+                    &result.account_no, real.len(),
+                ).ok();
+                if let Some(iid) = imp_id {
+                    let _ = db::upsert_transactions(conn, cid, Some(iid), &result.transactions);
+                    log::info!("[LoadFile] persisted {} txns import_id={}", real.len(), iid);
+                }
+                imp_id
+            } else { None }
+        } else { None }
+    };
+
+    {
+        let mut st = state_ref.lock().unwrap();
+        st.bank_name       = result.bank_name.clone();
+        st.account_no      = result.account_no.clone();
+        st.file_name       = file_name.to_owned();
+        st.opening_balance = result.opening_balance;
+        st.closing_balance = result.closing_balance;
+        st.total_debits    = total_dr;
+        st.total_credits   = total_cr;
+        st.txn_count       = real.len();
+        st.unreviewed      = unreviewed_cnt;
+        st.transactions    = result.transactions.clone();
+        st.active_filter   = "all".to_string();
+        st.date_from       = String::new();
+        st.date_to         = String::new();
+        st.bank_filter     = String::new();
+        st.pending_pdf_path = None;
+        st.pending_pdf_name = String::new();
+        if let Some(iid) = import_id_persisted {
+            st.import_ids.push(iid);
+        }
+    }
+
+    let [all_cnt, unreview_cnt2, susp_cnt, high_cnt, dup_cnt, gst_cnt, rev_cnt] =
+        compute_filter_counts(&result.transactions);
+    h.set_fc_all(SharedString::from(all_cnt.to_string().as_str()));
+    h.set_fc_unreviewed(SharedString::from(unreview_cnt2.to_string().as_str()));
+    h.set_fc_suspense(SharedString::from(susp_cnt.to_string().as_str()));
+    h.set_fc_high(SharedString::from(high_cnt.to_string().as_str()));
+    h.set_fc_duplicates(SharedString::from(dup_cnt.to_string().as_str()));
+    h.set_fc_gst(SharedString::from(gst_cnt.to_string().as_str()));
+    h.set_fc_review(SharedString::from(rev_cnt.to_string().as_str()));
+
+    let txns_all: Vec<parser::Transaction> = result.transactions.clone();
+    push_dashboard(h, &txns_all, result.opening_balance);
+
+    log::info!("UI updated with {} transactions", real.len());
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
@@ -693,7 +882,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 else { parser::pdf_parser::parse_pdf_rows(rows, &file_name) }
                             }
                             Err(e) => {
-                                log::error!("PDF extract error: {}", e);
+                                let emsg = e.to_string();
+                                if emsg.contains("password-protected") || emsg.to_lowercase().contains("encrypt") {
+                                    {
+                                        let mut st = state_ref.lock().unwrap();
+                                        st.pending_pdf_path = Some(path.clone());
+                                        st.pending_pdf_name = file_name.clone();
+                                    }
+                                    h.set_pdf_pwd_visible(true);
+                                    h.set_pdf_pwd_prompt(SharedString::from(
+                                        format!("'{}' is password-protected. Enter the PDF password:", file_name).as_str(),
+                                    ));
+                                    h.set_status_bank(SharedString::from("PDF password required\u{2026}"));
+                                    return;
+                                }
+                                log::error!("PDF extract error: {}", emsg);
                                 None
                             }
                         };
@@ -766,208 +969,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                // ── Build summary statistics ───────────────────────────────────
-                let real: Vec<&parser::Transaction> = result
-                    .transactions
-                    .iter()
-                    .filter(|t| !t.is_opening_balance)
-                    .collect();
-
-                let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
-                let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
-
-                // Period (first–last date)
-                let dates: Vec<&str> = real.iter()
-                    .filter(|t| !t.date.is_empty())
-                    .map(|t| t.date.as_str())
-                    .collect();
-                let period = if dates.len() >= 2 {
-                    format!("{} – {}", dates[0], dates[dates.len() - 1])
-                } else if dates.len() == 1 {
-                    dates[0].to_string()
-                } else {
-                    "—".to_string()
-                };
-
-                // Counts
-                let unreviewed_cnt = real.iter()
-                    .filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed))
-                    .count();
-                let credit_cnt = real.iter().filter(|t| t.credit.is_some()).count();
-                let debit_cnt  = real.iter().filter(|t| t.debit.is_some()).count();
-
-                // Calculated closing balance
-                let calc_closing = match result.opening_balance {
-                    Some(ob) => Some((ob + total_cr - total_dr).round() / 1.0),
-                    None     => None,
-                };
-                let has_mismatch = match (result.closing_balance, calc_closing) {
-                    (Some(stated), Some(calc)) => (stated - calc).abs() >= 0.5,
-                    _ => false,
-                };
-                let mismatch_str = if has_mismatch {
-                    match (result.closing_balance, calc_closing) {
-                        (Some(stated), Some(calc)) => {
-                            format!("Diff: {}", ui::fmt_inr((stated - calc).abs()))
-                        }
-                        _ => String::new(),
-                    }
-                } else {
-                    String::new()
-                };
-
-                log::info!(
-                    "Summary: bank='{}' txns={} dr={:.2} cr={:.2} ob={:?} cb={:?}",
-                    result.bank_name, real.len(), total_dr, total_cr,
-                    result.opening_balance, result.closing_balance
-                );
-
-                // ── Build TxnRow table rows ───────────────────────────────────
-                let mut bank_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-                let row_models: Vec<TxnRow> = real
-                    .iter()
-                    .map(|t| {
-                        bank_set.insert(t.bank_name.clone());
-                        let narr: String = t.narration.chars().take(80).collect();
-                        let has_gst = t.tags.iter().any(|tag| tag.to_uppercase().contains("GST"));
-                        let has_tax = t.tags.iter().any(|tag| tag.to_uppercase().contains("TAX"));
-                        let has_dup = t.tags.iter().any(|tag| tag.to_uppercase().contains("DUP")) || t.dup_flag;
-                        let row_color: i32 = match t.status {
-                            parser::TransactionStatus::NeedsReview => 3,
-                            parser::TransactionStatus::Suspense    => 4,
-                            parser::TransactionStatus::Manual      => 6,
-                            _ if t.dup_flag                        => 5,
-                            parser::TransactionStatus::Classified  => {
-                                if t.confidence >= 0.7 { 1 } else { 2 }
-                            }
-                            _ => 0,
-                        };
-                        TxnRow {
-                            bank_name:    SharedString::from(t.bank_name.as_str()),
-                            account_no:   SharedString::from(t.account_no.as_str()),
-                            date:         SharedString::from(t.date.as_str()),
-                            narration:    SharedString::from(narr.as_str()),
-                            ref_no:       SharedString::from(t.reference.as_str()),
-                            debit:        SharedString::from(fmt_cell(t.debit).as_str()),
-                            credit:       SharedString::from(fmt_cell(t.credit).as_str()),
-                            balance:      SharedString::from(fmt_cell(t.balance).as_str()),
-                            vendor:       SharedString::from(t.vendor.as_str()),
-                            ledger:       SharedString::from(t.account_head.as_str()),
-                            expense_head: SharedString::from(""),
-                            status_text:  SharedString::from(t.status.to_string().as_str()),
-                            tags:         SharedString::from(t.tags.join(" ").as_str()),
-                            review:       SharedString::from(""),
-                            row_color,
-                            has_gst,
-                            has_tax,
-                            has_dup_tag: has_dup,
-                        }
-                    })
-                    .collect();
-
-                let mut bank_names: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
-                    .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
-                    .collect();
-                let _ = bank_names.len(); // suppress unused
-
-                let table_model = slint::ModelRc::new(slint::VecModel::from(row_models));
-                let banks_model = slint::ModelRc::new(slint::VecModel::from(bank_names));
-
-                // ── Push to Slint UI ───────────────────────────────────────────
-                h.set_transaction_rows(table_model);
-                h.set_bank_names(banks_model);
-                h.set_status_file(SharedString::from(file_name.as_str()));
-                h.set_status_bank(SharedString::from(result.bank_name.as_str()));
-
-                // Basic summary
-                h.set_dash_bank_name(SharedString::from(result.bank_name.as_str()));
-                h.set_dash_opening(SharedString::from(
-                    ui::AppState::fmt_amount(result.opening_balance).as_str(),
-                ));
-                h.set_dash_closing(SharedString::from(
-                    ui::AppState::fmt_amount(result.closing_balance).as_str(),
-                ));
-                h.set_dash_credits(SharedString::from(
-                    ui::AppState::fmt_amount(Some(total_cr)).as_str(),
-                ));
-                h.set_dash_debits(SharedString::from(
-                    ui::AppState::fmt_amount(Some(total_dr)).as_str(),
-                ));
-                h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
-                h.set_dash_vendors(SharedString::from("—"));
-
-                // Enhanced summary
-                h.set_dash_account_no(SharedString::from(result.account_no.as_str()));
-                h.set_dash_period(SharedString::from(period.as_str()));
-                h.set_dash_credit_count(SharedString::from(credit_cnt.to_string().as_str()));
-                h.set_dash_debit_count(SharedString::from(debit_cnt.to_string().as_str()));
-                h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
-                h.set_dash_suspense(SharedString::from("0"));
-                h.set_dash_needs_review(SharedString::from("0"));
-                h.set_dash_duplicates(SharedString::from("0"));
-                h.set_dash_gst_count(SharedString::from("0"));
-                h.set_dash_calc_closing(SharedString::from(
-                    ui::AppState::fmt_amount(calc_closing).as_str(),
-                ));
-                h.set_dash_has_mismatch(has_mismatch);
-                h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
-
-                // ── Persist transactions to DB ─────────────────────────────────────────
-                let import_id_persisted: Option<i64> = {
-                    let client_id = state_ref.lock().unwrap().client_id;
-                    if let Some(cid) = client_id {
-                        let db = db_ref.lock().unwrap();
-                        if let Some(conn) = db.as_ref() {
-                            let imp_id = db::save_import(
-                                conn, cid, &file_name, &result.bank_name,
-                                &result.account_no, real.len(),
-                            ).ok();
-                            if let Some(iid) = imp_id {
-                                let _ = db::upsert_transactions(conn, cid, Some(iid), &result.transactions);
-                                log::info!("[LoadFile] persisted {} txns import_id={}", real.len(), iid);
-                            }
-                            imp_id
-                        } else { None }
-                    } else { None }
-                };
-                let _ = import_id_persisted; // used above
-
-                // Update in-memory app state and reset filters on new file load
-                {
-                    let mut st = state_ref.lock().unwrap();
-                    st.bank_name       = result.bank_name.clone();
-                    st.account_no      = result.account_no.clone();
-                    st.file_name       = file_name.clone();
-                    st.opening_balance = result.opening_balance;
-                    st.closing_balance = result.closing_balance;
-                    st.total_debits    = total_dr;
-                    st.total_credits   = total_cr;
-                    st.txn_count       = real.len();
-                    st.unreviewed      = unreviewed_cnt;
-                    st.transactions    = result.transactions.clone();
-                    // Reset filters whenever a new file is loaded
-                    st.active_filter   = "all".to_string();
-                    st.date_from       = String::new();
-                    st.date_to         = String::new();
-                    st.bank_filter     = String::new();
-                }
-
-                // Build filter badge counts from the full transaction list
-                let [all_cnt, unreview_cnt2, susp_cnt, high_cnt, dup_cnt, gst_cnt, rev_cnt] =
-                    compute_filter_counts(&result.transactions);
-                h.set_fc_all(SharedString::from(all_cnt.to_string().as_str()));
-                h.set_fc_unreviewed(SharedString::from(unreview_cnt2.to_string().as_str()));
-                h.set_fc_suspense(SharedString::from(susp_cnt.to_string().as_str()));
-                h.set_fc_high(SharedString::from(high_cnt.to_string().as_str()));
-                h.set_fc_duplicates(SharedString::from(dup_cnt.to_string().as_str()));
-                h.set_fc_gst(SharedString::from(gst_cnt.to_string().as_str()));
-                h.set_fc_review(SharedString::from(rev_cnt.to_string().as_str()));
-
-                // ── Dashboard analytics ────────────────────────────────────────
-                let txns_all: Vec<parser::Transaction> = result.transactions.clone();
-                push_dashboard(&h, &txns_all, result.opening_balance);
-
-                log::info!("UI updated with {} transactions", real.len());
+                apply_parse_result(&h, &state_ref, &db_ref, result, &file_name);
             });
         }
 
@@ -997,6 +999,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut errors = 0usize;
                 let mut first_bank = String::new();
                 let mut first_ob: Option<f64> = None;
+                let mut new_import_ids: Vec<i64> = vec![];
 
                 for path in &paths {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -1041,6 +1044,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if client_id > 0 {
                                     if let Ok(iid) = db::save_import(conn, client_id, &file_name, &r_bank, &r_account, r_cnt) {
                                         let _ = db::upsert_transactions(conn, client_id, Some(iid), &new_txns);
+                                        new_import_ids.push(iid);
                                     }
                                 }
                             }
@@ -1095,6 +1099,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.date_from       = String::new();
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
+                    st.import_ids.extend(new_import_ids.iter());
                 }
 
                 push_dashboard(&h, &all_txns, first_ob);
@@ -1136,12 +1141,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     } else { None }
                 };
-                // Update AppState
+                // Update AppState and sync dashboard properties so Edit Client modal pre-fills
                 if let Some(id) = new_id {
                     let mut st = state_ref.lock().unwrap();
                     st.client_id     = Some(id);
                     st.client_name   = name.trim().to_string();
                     st.tally_ledger  = ledger.trim().to_string();
+                    drop(st);
+                    h.set_dash_client_name(SharedString::from(name.trim()));
+                    h.set_dash_client_ledger(SharedString::from(ledger.trim()));
                 }
                 // Refresh client dropdown
                 {
@@ -1367,7 +1375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rebuild_rows(&h, &st);
             });
         }
-        // ── Export Excel (CSV with 4 sections) ───────────────────────────────
+        // ── Export Excel (XLSX primary, CSV fallback) ─────────────────────────
         {
             let state_ref = app_state.clone();
             app.on_do_export_excel(move || {
@@ -1377,22 +1385,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 let client_name = if st.client_name.is_empty() { "Export".to_string() } else { st.client_name.clone() };
-                let suggested = format!("BankStatement_{}.csv", client_name.replace(' ', "_"));
+                let suggested = format!("BankStatement_{}.xlsx", client_name.replace(' ', "_"));
                 let path = match rfd::FileDialog::new()
-                    .set_title("Save Excel Export")
+                    .set_title("Save Export")
                     .set_file_name(&suggested)
+                    .add_filter("Excel Workbook", &["xlsx"])
                     .add_filter("CSV (Excel)", &["csv"])
                     .save_file()
                 {
                     Some(p) => p,
                     None    => return,
                 };
-                match export::excel::export_csv(
-                    &st.transactions, &client_name, &st.tally_ledger,
-                    &st.file_name, st.opening_balance, st.closing_balance, &path,
-                ) {
-                    Ok(n) => log::info!("[ExportExcel] wrote {} rows → {:?}", n, path),
-                    Err(e) => log::error!("[ExportExcel] failed: {}", e),
+                let ext = path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if ext == "csv" {
+                    match export::excel::export_csv(
+                        &st.transactions, &client_name, &st.tally_ledger,
+                        &st.file_name, st.opening_balance, st.closing_balance, &path,
+                    ) {
+                        Ok(n)  => log::info!("[ExportExcel] CSV: {} rows → {:?}", n, path),
+                        Err(e) => log::error!("[ExportExcel] CSV failed: {}", e),
+                    }
+                } else {
+                    match export::excel::export_xlsx(
+                        &st.transactions, &client_name, &st.tally_ledger,
+                        &st.file_name, st.opening_balance, st.closing_balance, &path,
+                    ) {
+                        Ok(n)  => log::info!("[ExportExcel] XLSX: {} rows → {:?}", n, path),
+                        Err(e) => log::error!("[ExportExcel] XLSX failed: {}", e),
+                    }
                 }
             });
         }
@@ -1516,6 +1539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let dup_count  = st.transactions.iter().filter(|t| t.dup_flag).count();
                 let event_str  = format!("[{}] Reset Dedupe — {} duplicate(s) redetected", audit_now(), dup_count);
                 let client_id  = st.client_id;
+                let txns_snap  = st.transactions.clone();
                 st.audit_events.push(event_str.clone());
                 rebuild_rows(&h, &st);
                 h.set_status_bank(SharedString::from(
@@ -1526,6 +1550,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
+                        let _ = db::update_dup_flags(conn, &txns_snap);
                         let _ = db::push_audit_event(conn, cid, &event_str);
                     }
                 }
@@ -2247,16 +2272,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
 
             app.on_do_delete_txn(move |idx| {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 let mut st = state_ref.lock().unwrap();
+                let mut audit: Option<(i64, String, String)> = None;
 
                 if let Some(abs) = visible_to_abs(&st, idx as usize) {
+                    let t = &st.transactions[abs];
+                    let txn_id = t.id.clone();
+                    let narr: String = t.narration.chars().take(60).collect();
+                    let event_str = format!("[{}] Delete Transaction — id='{}' narr='{}'",
+                        audit_now(), txn_id, narr);
+                    if let Some(cid) = st.client_id {
+                        audit = Some((cid, event_str.clone(), txn_id));
+                    }
+                    st.audit_events.push(event_str);
                     st.transactions.remove(abs);
                     log::info!("[DeleteTxn] abs={} removed", abs);
                 }
                 rebuild_rows(&h, &st);
+                drop(st);
+                if let Some((cid, event_str, txn_id)) = audit {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::push_audit_event(conn, cid, &event_str);
+                        let _ = db::delete_transaction(conn, &txn_id);
+                    }
+                }
             });
         }
         {
@@ -2333,13 +2377,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         {
-            app.on_do_pdf_pwd_confirm(|pwd| {
-                log::info!("[PdfPwd] password entered (len={})", pwd.len());
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+
+            app.on_do_pdf_pwd_confirm(move |pwd: SharedString| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                h.set_pdf_pwd_visible(false);
+
+                let (pending_path, pending_name) = {
+                    let mut st = state_ref.lock().unwrap();
+                    (st.pending_pdf_path.take(), std::mem::take(&mut st.pending_pdf_name))
+                };
+
+                let Some(path) = pending_path else {
+                    log::warn!("[PdfPwd] confirm fired but no pending path");
+                    return;
+                };
+
+                let pwd_bytes: Vec<u8> = pwd.as_str().as_bytes().to_vec();
+                let file_name = if pending_name.is_empty() {
+                    path.file_name().map_or_else(
+                        || "unknown".to_string(),
+                        |n| n.to_string_lossy().into_owned(),
+                    )
+                } else {
+                    pending_name
+                };
+
+                h.set_status_bank(SharedString::from("Unlocking PDF\u{2026}"));
+
+                let stage1 = match parser::text_extractor::extract_pages_with_password(&path, &pwd_bytes) {
+                    Ok(rows) if !rows.is_empty() => parser::pdf_parser::parse_pdf_rows(rows, &file_name),
+                    Ok(_) => None,
+                    Err(e) => {
+                        let emsg = e.to_string();
+                        let msg = if emsg.to_lowercase().contains("incorrect") {
+                            "Incorrect PDF password \u{2014} please try again".to_string()
+                        } else {
+                            format!("PDF unlock failed: {}", emsg)
+                        };
+                        h.set_status_bank(SharedString::from(msg.as_str()));
+                        return;
+                    }
+                };
+
+                let parse_result = if stage1.is_some() {
+                    stage1
+                } else {
+                    let full_text = parser::text_extractor::extract_full_text_with_password(&path, &pwd_bytes);
+                    if full_text.trim().is_empty() {
+                        h.set_status_bank(SharedString::from("PDF unlocked but no text found"));
+                        return;
+                    }
+                    let ocr = parser::ocr_parser::parse_ocr_text(&full_text, &file_name);
+                    let real_count = ocr.transactions.iter().filter(|t| !t.is_opening_balance).count();
+                    if real_count > 0 {
+                        Some(ocr)
+                    } else {
+                        let preprocessed = parser::ocr_parser::preprocess_multiline(&full_text);
+                        if !preprocessed.trim().is_empty() {
+                            let ml = parser::ocr_parser::parse_ocr_text(&preprocessed, &file_name);
+                            let ml_count = ml.transactions.iter().filter(|t| !t.is_opening_balance).count();
+                            if ml_count > 0 { Some(ml) } else { None }
+                        } else { None }
+                    }
+                };
+
+                let result = match parse_result {
+                    Some(r) => r,
+                    None => {
+                        h.set_status_bank(SharedString::from("No transactions found after unlock"));
+                        return;
+                    }
+                };
+
+                apply_parse_result(&h, &state_ref, &db_ref, result, &file_name);
             });
         }
         {
-            app.on_do_pdf_pwd_cancel(|| {
-                log::info!("[PdfPwd] cancelled");
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_pdf_pwd_cancel(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                h.set_pdf_pwd_visible(false);
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.pending_pdf_path = None;
+                    st.pending_pdf_name = String::new();
+                }
+                h.set_status_bank(SharedString::from("PDF unlock cancelled"));
             });
         }
         {

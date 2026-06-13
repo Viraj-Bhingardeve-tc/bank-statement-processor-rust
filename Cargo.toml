@@ -66,7 +66,8 @@ csv = "1"
 calamine = { version = "0.24", features = ["dates"] }
 
 # ── Excel writing (Phase 8+) ─────────────────────────────────────────────────
-umya-spreadsheet = { version = "2", optional = true }
+umya-spreadsheet  = { version = "2", optional = true }
+rust_xlsxwriter   = "0.95"
 
 # ── PDF text extraction (Phase 3+) ───────────────────────────────────────────
 # Note: lopdf gives raw text content. X/Y layout positions require pdfium-render

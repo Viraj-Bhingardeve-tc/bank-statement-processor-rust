@@ -34,6 +34,9 @@ use crate::parser::{
 /// the object IDs returned by `page_iter()`.
 pub fn extract_pages(path: &Path) -> Result<Vec<Vec<PdfItem>>> {
     let doc = lopdf::Document::load(path)?;
+    if doc.is_encrypted() {
+        anyhow::bail!("PDF is password-protected");
+    }
 
     // get_pages() → BTreeMap<page_number (1-based), ObjectId>
     let pages = doc.get_pages();
@@ -102,6 +105,62 @@ pub fn extract_full_text(path: &Path) -> String {
         full.len()
     );
     full
+}
+
+// ── Password-aware extraction ─────────────────────────────────────────────────
+
+pub fn extract_pages_with_password(path: &Path, password: &[u8]) -> Result<Vec<Vec<PdfItem>>> {
+    let mut doc = lopdf::Document::load(path)?;
+    if doc.is_encrypted() {
+        doc.decrypt(password)?;
+    }
+
+    let pages = doc.get_pages();
+    if pages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut all_raw: Vec<RawPdfItem> = Vec::new();
+
+    for (page_num, _object_id) in &pages {
+        let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
+        let y_offset = (*page_num as f64 - 1.0) * 10_000.0;
+        for (line_idx, line) in page_text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let y = y_offset + (line_idx as f64 * 15.0);
+            all_raw.push(RawPdfItem::new(line, 0.0, y, (line.len() as f64) * 6.0));
+        }
+    }
+
+    log::debug!("[TextExtractor] (pwd) {} pages → {} raw lines", pages.len(), all_raw.len());
+
+    Ok(cluster_into_rows(all_raw, 5.0))
+}
+
+pub fn extract_full_text_with_password(path: &Path, password: &[u8]) -> String {
+    let mut doc = match lopdf::Document::load(path) {
+        Ok(d)  => d,
+        Err(e) => { log::warn!("[TextExtractor] load failed: {}", e); return String::new(); }
+    };
+    if doc.is_encrypted() {
+        if let Err(e) = doc.decrypt(password) {
+            log::warn!("[TextExtractor] decrypt failed: {}", e);
+            return String::new();
+        }
+    }
+
+    let pages = doc.get_pages();
+    let mut parts = Vec::with_capacity(pages.len());
+
+    for (page_num, _) in &pages {
+        match doc.extract_text(&[*page_num]) {
+            Ok(t)  => parts.push(t),
+            Err(e) => log::debug!("[TextExtractor] (pwd) page {} error: {}", page_num, e),
+        }
+    }
+
+    parts.join("\n")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

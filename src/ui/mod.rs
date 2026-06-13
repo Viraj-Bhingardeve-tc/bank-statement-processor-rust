@@ -52,6 +52,10 @@ pub struct AppState {
 
     // Reconcile — CSV text built after the last run; empty until first reconcile
     pub recon_csv: String,
+
+    // PDF password — path waiting for a password prompt
+    pub pending_pdf_path: Option<std::path::PathBuf>,
+    pub pending_pdf_name: String,
 }
 
 impl AppState {
