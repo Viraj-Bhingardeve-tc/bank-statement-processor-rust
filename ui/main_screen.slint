@@ -5,6 +5,18 @@ import { Button, VerticalBox, HorizontalBox, ComboBox,
          LineEdit, CheckBox, ScrollView, ListView } from "std-widgets.slint";
 import { DashboardScreen, DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
+// ── Batch monitor per-file row ────────────────────────────────────────────────
+export struct BatchFileRow {
+    file:    string,
+    bank:    string,
+    account: string,
+    period:  string,
+    txns:    int,
+    status:  string,
+    is-ok:   bool,
+    err-msg: string,
+}
+
 // ── Transaction row data struct ────────────────────────────────────────────────
 export struct TxnRow {
     bank-name:    string,
@@ -737,7 +749,8 @@ export component MainScreen inherits Rectangle {
     // Current client ledger name shown in summary (used to pre-fill edit modal)
     in property <string>     dash-client-ledger: "";
     // Batch monitor status line set by Rust after processing
-    in property <string>     batch-log: "";
+    in property <string>          batch-log: "";
+    in property <[BatchFileRow]>  batch-file-rows: [];
     // Reconcile counters set by Rust after reconcile()
     in property <string>     recon-matched:    "0";
     in property <string>     recon-likely:     "0";
@@ -1735,29 +1748,73 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 700px) / 2; y: (parent.height - 340px) / 2;
-            width: 700px; height: 340px; background: white; border-radius: 8px;
+            x: (parent.width - 820px) / 2; y: (parent.height - 480px) / 2;
+            width: 820px; height: 480px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
             VerticalBox { padding: 0px; spacing: 0px;
                 Rectangle { height: 4px; background: #1565C0; }
                 MHdr { title: "Batch Processing Monitor"; close => { root.modal-state = ""; } }
-                VerticalBox { padding: 18px; spacing: 8px; vertical-stretch: 1;
+                VerticalBox { padding: 14px; spacing: 8px; vertical-stretch: 1;
                     HorizontalBox { padding: 0px; spacing: 8px;
                         MBtn { text: "Start Batch"; bg: #1565C0; clicked => { root.open-batch-monitor(); } }
                         MBtn { text: "Pause"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
                         MBtn { text: "Abort"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
                         MBtn { text: "Load All into Session"; bg: #2E7D32; fg: white; enabled: true; clicked => { root.load-all(); } }
                     }
-                    Rectangle {
+                    // Summary line / empty hint
+                    if root.batch-log != "" : Rectangle {
+                        height: 28px; background: #E3F2FD; border-radius: 4px;
+                        Text { text: root.batch-log; font-size: 12px; color: #1565C0;
+                               x: 10px; y: 6px; overflow: elide; width: parent.width - 20px; }
+                    }
+                    if root.batch-file-rows.length == 0 : Rectangle {
                         vertical-stretch: 1; background: #F5F5F5;
                         border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
                         Text {
-                            text: root.batch-log != "" ? root.batch-log : "Click \"Start Batch\" to view session statistics.";
-                            font-size: 12px;
-                            color: root.batch-log != "" ? #1565C0 : #90A4AE;
+                            text: "Use \"Batch Process Folder\" in the toolbar to select multiple files.";
+                            font-size: 12px; color: #90A4AE;
                             wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                    if root.batch-file-rows.length > 0 : VerticalBox { padding: 0px; spacing: 0px; vertical-stretch: 1;
+                        // Column headers
+                        Rectangle {
+                            height: 26px; background: #37474F; border-radius: 4px;
+                            HorizontalLayout { padding: 6px; spacing: 0px;
+                                Text { text: "File"; font-size: 11px; color: white; font-weight: 700; width: 180px; }
+                                Text { text: "Bank"; font-size: 11px; color: white; font-weight: 700; width: 140px; }
+                                Text { text: "Account"; font-size: 11px; color: white; font-weight: 700; width: 120px; }
+                                Text { text: "Period"; font-size: 11px; color: white; font-weight: 700; width: 140px; }
+                                Text { text: "Txns"; font-size: 11px; color: white; font-weight: 700; horizontal-alignment: right; width: 50px; }
+                                Text { text: "Status"; font-size: 11px; color: white; font-weight: 700; horizontal-alignment: center; horizontal-stretch: 1; }
+                            }
+                        }
+                        // Per-file rows
+                        ListView { vertical-stretch: 1;
+                            for row[i] in root.batch-file-rows : Rectangle {
+                                height: 24px;
+                                background: Math.mod(i, 2) == 0 ? white : #F8F9FA;
+                                Rectangle { y: 23px; height: 1px; background: #E0E0E0; width: parent.width; }
+                                HorizontalLayout { padding: 6px; spacing: 0px;
+                                    Text { text: row.file;    font-size: 11px; color: #37474F; overflow: elide; width: 180px; }
+                                    Text { text: row.bank;    font-size: 11px; color: #37474F; overflow: elide; width: 140px; }
+                                    Text { text: row.account; font-size: 11px; color: #607D8B; overflow: elide; width: 120px; }
+                                    Text { text: row.period;  font-size: 11px; color: #607D8B; overflow: elide; width: 140px; }
+                                    Text { text: row.txns > 0 ? row.txns : "—"; font-size: 11px; color: #37474F; horizontal-alignment: right; width: 50px; }
+                                    Rectangle { horizontal-stretch: 1;
+                                        Rectangle {
+                                            x: (parent.width - 52px) / 2; y: 2px;
+                                            width: 52px; height: 18px; border-radius: 3px;
+                                            background: row.is-ok ? #E8F5E9 : #FFEBEE;
+                                            Text { text: row.status; font-size: 10px; font-weight: 700;
+                                                   color: row.is-ok ? #2E7D32 : #C62828;
+                                                   horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

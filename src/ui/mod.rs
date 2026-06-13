@@ -2,6 +2,18 @@
 // AppState holds the runtime data that drives the Slint UI.
 // Phase 2: basic structure only.  Fields populated in Phase 3+.
 
+/// Per-file result for the batch monitor table.
+#[derive(Debug, Clone, Default)]
+pub struct BatchFileResult {
+    pub file:    String,
+    pub bank:    String,
+    pub account: String,
+    pub period:  String,
+    pub txns:    usize,
+    pub ok:      bool,
+    pub err_msg: String,
+}
+
 /// Runtime state shared between Rust logic and the Slint UI.
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
@@ -40,6 +52,8 @@ pub struct AppState {
 
     // Import history: parallel vec to the UI import-records list (DB import ids)
     pub import_ids: Vec<i64>,
+    // Batch monitor: per-file results from last batch folder processing
+    pub batch_file_results: Vec<BatchFileResult>,
     // Rules: parallel vec to the UI rule-records list (DB rule ids)
     pub rule_ids: Vec<i64>,
 

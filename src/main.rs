@@ -1132,6 +1132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut first_bank = String::new();
                 let mut first_ob: Option<f64> = None;
                 let mut new_import_ids: Vec<i64> = vec![];
+                let mut batch_results: Vec<ui::BatchFileResult> = vec![];
 
                 for path in &paths {
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
@@ -1171,6 +1172,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let r_ob      = r.opening_balance;
                             let r_txns    = r.transactions.clone();
                             let r_cnt     = r_txns.iter().filter(|t| !t.is_opening_balance).count();
+                            // Derive statement period from first/last transaction dates
+                            let non_ob: Vec<&parser::Transaction> = r_txns.iter().filter(|t| !t.is_opening_balance).collect();
+                            let first_d = non_ob.first().map(|t| t.date.as_str()).unwrap_or("").to_string();
+                            let last_d  = non_ob.last().map(|t| t.date.as_str()).unwrap_or("").to_string();
+                            let period  = if first_d.is_empty() { "—".to_string() }
+                                          else if first_d == last_d { first_d.clone() }
+                                          else { format!("{} - {}", first_d, last_d) };
+                            batch_results.push(ui::BatchFileResult {
+                                file:    file_name.chars().take(35).collect::<String>(),
+                                bank:    r_bank.clone(),
+                                account: r_account.clone(),
+                                period,
+                                txns:    r_cnt,
+                                ok:      true,
+                                err_msg: String::new(),
+                            });
                             let before = all_txns.len();
                             let existing_hashes: std::collections::HashSet<String> =
                                 all_txns.iter().map(|t| t.hash()).collect();
@@ -1193,7 +1210,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
-                        _ => { errors += 1; log::warn!("[Batch] failed to parse: {:?}", path); }
+                        _ => {
+                            errors += 1;
+                            log::warn!("[Batch] failed to parse: {:?}", path);
+                            batch_results.push(ui::BatchFileResult {
+                                file:    file_name.chars().take(35).collect::<String>(),
+                                bank:    String::new(),
+                                account: String::new(),
+                                period:  String::new(),
+                                txns:    0,
+                                ok:      false,
+                                err_msg: "Parse failed".to_string(),
+                            });
+                        }
                     }
                 }
 
@@ -1244,6 +1273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
                     st.import_ids.extend(new_import_ids.iter());
+                    st.batch_file_results = batch_results;
                 }
 
                 push_dashboard(&h, &all_txns, first_ob);
@@ -2076,14 +2106,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let unreviewed = st.transactions.iter()
                     .filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed)).count();
                 let log_msg = if txn_count == 0 {
-                    "No files loaded yet. Use \"Batch Process Folder\" in the toolbar to load files.".to_string()
+                    String::new()
                 } else {
                     format!(
-                        "Session summary:\n\u{2022} {} import(s) in this session\n\u{2022} {} transactions loaded\n\u{2022} {} classified  |  {} unreviewed",
+                        "Session: {} import(s)  |  {} transactions  |  {} classified  |  {} unreviewed",
                         import_count, txn_count, classified, unreviewed
                     )
                 };
                 h.set_batch_log(SharedString::from(log_msg.as_str()));
+
+                // Build per-file rows model
+                let file_rows: Vec<BatchFileRow> = st.batch_file_results.iter().map(|r| BatchFileRow {
+                    file:    SharedString::from(r.file.as_str()),
+                    bank:    SharedString::from(if r.bank.is_empty() { "Unknown" } else { r.bank.as_str() }),
+                    account: SharedString::from(r.account.as_str()),
+                    period:  SharedString::from(r.period.as_str()),
+                    txns:    r.txns as i32,
+                    status:  SharedString::from(if r.ok { "OK" } else { "FAIL" }),
+                    is_ok:   r.ok,
+                    err_msg: SharedString::from(r.err_msg.as_str()),
+                }).collect();
+                h.set_batch_file_rows(slint::ModelRc::new(slint::VecModel::from(file_rows)));
                 log::info!("[BatchMonitor] imports={} txns={} classified={}", import_count, txn_count, classified);
             });
         }

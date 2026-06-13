@@ -1,7 +1,7 @@
 // app.slint — Root window. Switches between LoginScreen and MainScreen.
 
 import { LoginScreen } from "login.slint";
-import { MainScreen, TxnRow } from "main_screen.slint";
+import { MainScreen, TxnRow, BatchFileRow } from "main_screen.slint";
 import { DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 export component AppWindow inherits Window {
@@ -124,8 +124,9 @@ export component AppWindow inherits Window {
     in-out property <string> edit-client-name:   "";
     in-out property <string> edit-client-ledger: "";
     in property <string>     dash-client-ledger: "";
-    // ── Batch monitor log ─────────────────────────────────────────────────────
-    in property <string>     batch-log: "";
+    // ── Batch monitor log + per-file rows ─────────────────────────────────────
+    in property <string>          batch-log: "";
+    in property <[BatchFileRow]>  batch-file-rows: [];
     // ── Reconcile counters ────────────────────────────────────────────────────
     in property <string>     recon-matched:    "0";
     in property <string>     recon-likely:     "0";
@@ -306,6 +307,7 @@ export component AppWindow inherits Window {
         edit-client-ledger <=> root.edit-client-ledger;
         dash-client-ledger:    root.dash-client-ledger;
         batch-log:             root.batch-log;
+        batch-file-rows:       root.batch-file-rows;
         recon-matched:         root.recon-matched;
         recon-likely:          root.recon-likely;
         recon-unmatched:       root.recon-unmatched;
