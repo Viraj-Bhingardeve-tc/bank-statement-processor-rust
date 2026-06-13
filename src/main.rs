@@ -15,7 +15,10 @@ mod classifier;
 mod db;
 mod export;
 mod parser;
+mod settings;
 mod ui;
+#[cfg(feature = "ai")]
+mod ai_classifier;
 
 use std::sync::{Arc, Mutex};
 
@@ -52,6 +55,180 @@ fn fmt_cell(v: Option<f64>) -> String {
 #[cfg(feature = "slint-ui")]
 fn stub_callback(name: &str) {
     log::info!("[Stub] {} — not yet implemented", name);
+}
+
+#[cfg(feature = "slint-ui")]
+fn audit_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let z = (secs / 86400) as i64 + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp  = (5 * doy + 2) / 153;
+    let d   = doy - (153 * mp + 2) / 5 + 1;
+    let m   = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y   = if m <= 2 { y + 1 } else { y };
+    let hh  = (secs % 86400) / 3600;
+    let mm2 = (secs % 3600) / 60;
+    let ss  = secs % 60;
+    format!("{:02}/{:02}/{} {:02}:{:02}:{:02}", d, m, y, hh, mm2, ss)
+}
+
+// ── Reconcile helpers ─────────────────────────────────────────────────────────
+
+/// Parse a Tally daybook Excel export into (date_str DD/MM/YYYY, amount) pairs.
+/// Looks for the first header row containing "Date" and any Debit/Credit column.
+#[cfg(feature = "slint-ui")]
+fn reconcile_parse_tally(mut wb: calamine::Sheets<std::io::BufReader<std::fs::File>>) -> Vec<(String, f64)> {
+    use calamine::Reader;
+    let sheet_name = match wb.sheet_names().first() {
+        Some(n) => n.to_string(),
+        None    => return vec![],
+    };
+    let range = match wb.worksheet_range(&sheet_name) {
+        Ok(r)  => r,
+        Err(_) => return vec![],
+    };
+    let rows: Vec<Vec<calamine::Data>> = range.rows()
+        .map(|r| r.to_vec())
+        .collect();
+
+    // Find header row: must contain "date" (case-insensitive)
+    let mut date_col:   Option<usize> = None;
+    let mut debit_col:  Option<usize> = None;
+    let mut credit_col: Option<usize> = None;
+    let mut header_row = 0usize;
+
+    'outer: for (ri, row) in rows.iter().enumerate() {
+        for (ci, cell) in row.iter().enumerate() {
+            let s = cell.to_string().to_lowercase();
+            if s.contains("date") { date_col = Some(ci); }
+            if s.contains("debit")  { debit_col  = Some(ci); }
+            if s.contains("credit") { credit_col = Some(ci); }
+        }
+        if date_col.is_some() && (debit_col.is_some() || credit_col.is_some()) {
+            header_row = ri;
+            break 'outer;
+        }
+        // reset if row didn't satisfy
+        date_col = None; debit_col = None; credit_col = None;
+    }
+
+    let dc = match date_col { Some(c) => c, None => return vec![] };
+
+    let mut entries: Vec<(String, f64)> = vec![];
+    for row in rows.iter().skip(header_row + 1) {
+        if row.len() <= dc { continue; }
+        let raw_date = row[dc].to_string();
+        if raw_date.trim().is_empty() { continue; }
+
+        // Normalise date: accept DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
+        let date_str = normalise_tally_date(&raw_date);
+        if date_str.is_empty() { continue; }
+
+        // Amount: prefer debit column, fall back to credit, then sum both
+        let amount = match (debit_col, credit_col) {
+            (Some(di), Some(ci)) => {
+                let empty = calamine::Data::Empty;
+                let d = parse_cell_amount(row.get(di).unwrap_or(&empty));
+                let c = parse_cell_amount(row.get(ci).unwrap_or(&empty));
+                if d > 0.0 { d } else { c }
+            }
+            (Some(di), None) => { let empty = calamine::Data::Empty; parse_cell_amount(row.get(di).unwrap_or(&empty)) }
+            (None, Some(ci)) => { let empty = calamine::Data::Empty; parse_cell_amount(row.get(ci).unwrap_or(&empty)) }
+            (None, None)     => 0.0,
+        };
+        if amount <= 0.0 { continue; }
+        entries.push((date_str, amount));
+    }
+    entries
+}
+
+fn normalise_tally_date(s: &str) -> String {
+    let s = s.trim();
+    // DD/MM/YYYY or DD-MM-YYYY
+    if s.len() == 10 {
+        let sep = if s.contains('/') { '/' } else { '-' };
+        let parts: Vec<&str> = s.splitn(3, sep).collect();
+        if parts.len() == 3 {
+            // Detect YYYY-MM-DD
+            if parts[0].len() == 4 {
+                return format!("{}/{}/{}", parts[2], parts[1], parts[0]);
+            }
+            return format!("{}/{}/{}", parts[0], parts[1], parts[2]);
+        }
+    }
+    String::new()
+}
+
+fn parse_cell_amount(cell: &calamine::Data) -> f64 {
+    match cell {
+        calamine::Data::Float(f) => f.abs(),
+        calamine::Data::Int(i)   => (*i as f64).abs(),
+        calamine::Data::String(s) => s.replace(',', "").trim().parse::<f64>().unwrap_or(0.0).abs(),
+        _                         => 0.0,
+    }
+}
+
+/// Match Tally entries against bank entries.
+/// Returns (exact_matched, likely_matched, _) counts.
+/// Exact = same date + same amount (±0.01).
+/// Likely = amount matches but date differs by ≤7 days.
+#[cfg(feature = "slint-ui")]
+fn reconcile_match(
+    tally: &[(String, f64)],
+    bank:  &[(String, f64)],
+) -> (usize, usize, usize) {
+    let mut bank_used = vec![false; bank.len()];
+    let mut tally_used = vec![false; tally.len()];
+    let mut exact = 0usize;
+    let mut likely = 0usize;
+
+    // Exact pass: same date + same amount
+    for (ti, (td, ta)) in tally.iter().enumerate() {
+        for (bi, (bd, ba)) in bank.iter().enumerate() {
+            if bank_used[bi] { continue; }
+            if (ta - ba).abs() <= 0.01 && td == bd {
+                bank_used[bi] = true;
+                tally_used[ti] = true;
+                exact += 1;
+                break;
+            }
+        }
+    }
+    // Likely pass: same amount, date within 7 days
+    for (ti, (td, ta)) in tally.iter().enumerate() {
+        if tally_used[ti] { continue; }
+        for (bi, (bd, ba)) in bank.iter().enumerate() {
+            if bank_used[bi] { continue; }
+            if (ta - ba).abs() <= 0.01 {
+                if let (Some(td_ymd), Some(bd_ymd)) = (parse_date_for_recon(td), parse_date_for_recon(bd)) {
+                    let diff = (td_ymd as i64 - bd_ymd as i64).abs();
+                    if diff <= 7 {
+                        bank_used[bi] = true;
+                        tally_used[ti] = true;
+                        likely += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    (exact, likely, tally.len().saturating_sub(exact + likely))
+}
+
+fn parse_date_for_recon(s: &str) -> Option<u32> {
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() != 3 { return None; }
+    let dd = parts[0].parse::<u32>().ok()?;
+    let mm = parts[1].parse::<u32>().ok()?;
+    let yy = parts[2].parse::<u32>().ok()?;
+    Some(yy * 10000 + mm * 100 + dd)
 }
 
 // ── Parse DD/MM/YYYY → (yyyy, mm, dd) for ordering comparisons ────────────────
@@ -399,6 +576,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .collect();
                     app.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
                 }
+                // Restore AI settings
+                let cfg = settings::Settings::load(conn);
+                app.set_ai_provider_idx(match cfg.ai_provider.as_str() {
+                    "claude" => 1, "gemini" => 2, _ => 0,
+                });
+                app.set_ai_api_key(SharedString::from(cfg.ai_api_key.as_str()));
+                {
+                    let mut st = app_state.lock().unwrap();
+                    st.ai_provider = cfg.ai_provider;
+                    st.ai_api_key  = cfg.ai_api_key;
+                    st.ai_enabled  = cfg.ai_enabled;
+                }
             }
         }
 
@@ -446,6 +635,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let handle     = app.as_weak();
             let state_ref  = app_state.clone();
+            let db_ref     = db_conn.clone();
 
             app.on_do_load_file(move || {
                 let path = match rfd::FileDialog::new()
@@ -506,12 +696,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             // Stage 2a: OCR text parsing
                             let full_text = parser::text_extractor::extract_full_text(&path);
-                            if full_text.trim().is_empty() {
-                                h.set_status_bank(SharedString::from(
-                                    "Scanned PDF — OCR not yet supported",
-                                ));
-                                return;
-                            }
+                            // When lopdf returns no text, try Tesseract CLI for scanned PDFs.
+                            let effective_text = if full_text.trim().is_empty() {
+                                h.set_status_bank(SharedString::from("Scanned PDF — trying OCR…"));
+                                match parser::ocr_extractor::extract_via_tesseract(&path) {
+                                    Some(t) if !t.trim().is_empty() => t,
+                                    _ => {
+                                        h.set_status_bank(SharedString::from(
+                                            "Scanned PDF — install Tesseract for OCR support",
+                                        ));
+                                        return;
+                                    }
+                                }
+                            } else {
+                                full_text.clone()
+                            };
+                            let full_text = effective_text;
 
                             let ocr = parser::ocr_parser::parse_ocr_text(&full_text, &file_name);
                             let real_count = ocr.transactions.iter()
@@ -705,6 +905,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 h.set_dash_has_mismatch(has_mismatch);
                 h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
 
+                // ── Persist transactions to DB ─────────────────────────────────────────
+                let import_id_persisted: Option<i64> = {
+                    let client_id = state_ref.lock().unwrap().client_id;
+                    if let Some(cid) = client_id {
+                        let db = db_ref.lock().unwrap();
+                        if let Some(conn) = db.as_ref() {
+                            let imp_id = db::save_import(
+                                conn, cid, &file_name, &result.bank_name,
+                                &result.account_no, real.len(),
+                            ).ok();
+                            if let Some(iid) = imp_id {
+                                let _ = db::upsert_transactions(conn, cid, Some(iid), &result.transactions);
+                                log::info!("[LoadFile] persisted {} txns import_id={}", real.len(), iid);
+                            }
+                            imp_id
+                        } else { None }
+                    } else { None }
+                };
+                let _ = import_id_persisted; // used above
+
                 // Update in-memory app state and reset filters on new file load
                 {
                     let mut st = state_ref.lock().unwrap();
@@ -792,10 +1012,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     match result {
                         Some(r) if !r.transactions.is_empty() => {
-                            let r_bank     = r.bank_name.clone();
-                            let r_account  = r.account_no.clone();
-                            let r_ob       = r.opening_balance;
-                            let r_txn_cnt  = r.transactions.len();
+                            let r_bank    = r.bank_name.clone();
+                            let r_account = r.account_no.clone();
+                            let r_ob      = r.opening_balance;
+                            let r_txns    = r.transactions.clone();
+                            let r_cnt     = r_txns.iter().filter(|t| !t.is_opening_balance).count();
                             let before = all_txns.len();
                             let existing_hashes: std::collections::HashSet<String> =
                                 all_txns.iter().map(|t| t.hash()).collect();
@@ -803,7 +1024,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .filter(|t| t.is_opening_balance || !existing_hashes.contains(&t.hash()))
                                 .collect();
                             skipped += before.saturating_sub(all_txns.len());
-                            all_txns.extend(new_txns);
+                            all_txns.extend(new_txns.clone());
                             loaded += 1;
                             if first_bank.is_empty() { first_bank = r_bank.clone(); }
                             if first_ob.is_none() { first_ob = r_ob; }
@@ -811,7 +1032,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(conn) = db.as_ref() {
                                 let client_id = { state_ref.lock().unwrap().client_id.unwrap_or(0) };
                                 if client_id > 0 {
-                                    let _ = db::save_import(conn, client_id, &file_name, &r_bank, &r_account, r_txn_cnt);
+                                    if let Ok(iid) = db::save_import(conn, client_id, &file_name, &r_bank, &r_account, r_cnt) {
+                                        let _ = db::upsert_transactions(conn, client_id, Some(iid), &new_txns);
+                                    }
                                 }
                             }
                         }
@@ -822,8 +1045,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if all_txns.is_empty() { return; }
 
                 // Classify and build model
-                let bank_ledger = { state_ref.lock().unwrap().tally_ledger.clone() };
-                classifier::classify_all(&mut all_txns, &bank_ledger);
+                let (bank_ledger, client_id2) = {
+                    let st = state_ref.lock().unwrap();
+                    (st.tally_ledger.clone(), st.client_id.unwrap_or(0))
+                };
+                let rules = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_rules(conn, client_id2).unwrap_or_default()
+                    } else { vec![] }
+                };
+                classifier::classify_all(&mut all_txns, &bank_ledger, &rules);
                 classifier::detect_duplicates(&mut all_txns);
 
                 let real: Vec<&parser::Transaction> = all_txns.iter().filter(|t| !t.is_opening_balance).collect();
@@ -859,6 +1091,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 push_dashboard(&h, &all_txns, first_ob);
+                let batch_event = format!("[{}] Import — {} file(s), {} transactions loaded", audit_now(), loaded, real.len());
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.audit_events.push(batch_event.clone());
+                }
+                if client_id2 > 0 {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::push_audit_event(conn, client_id2, &batch_event);
+                    }
+                }
                 log::info!("[Batch] loaded={} skipped={} errors={} total_txns={}", loaded, skipped, errors, real.len());
             });
         }
@@ -913,6 +1156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
             app.on_do_auto_classify(move || {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 let mut st = state_ref.lock().unwrap();
@@ -921,19 +1165,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 let bank_ledger = st.tally_ledger.clone();
-                let changed = classifier::classify_all(&mut st.transactions, &bank_ledger);
-                log::info!("[AutoClassify] classified {} transactions", changed);
+                let client_id   = st.client_id.unwrap_or(0);
+                // Load stored rules from DB
+                let rules = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_rules(conn, client_id).unwrap_or_default()
+                    } else { vec![] }
+                };
+                let changed = classifier::classify_all(&mut st.transactions, &bank_ledger, &rules);
+                log::info!("[AutoClassify] classified {} transactions (rules={})", changed, rules.len());
                 rebuild_rows(&h, &st);
                 push_dashboard(&h, &st.transactions, st.opening_balance);
-                // Update summary stats
                 let total_dr: f64 = st.transactions.iter().filter_map(|t| t.debit).sum();
                 let total_cr: f64 = st.transactions.iter().filter_map(|t| t.credit).sum();
                 h.set_dash_credits(SharedString::from(ui::AppState::fmt_amount(Some(total_cr)).as_str()));
                 h.set_dash_debits(SharedString::from(ui::AppState::fmt_amount(Some(total_dr)).as_str()));
             });
         }
+
+        // ── AI Classify ───────────────────────────────────────────────────────
         {
-            app.on_do_ai_classify(|| stub_callback("ai-classify"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_ai_classify(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                {
+                    let st = state_ref.lock().unwrap();
+                    if st.transactions.is_empty() {
+                        log::info!("[AIClassify] No transactions loaded");
+                        return;
+                    }
+                }
+                #[cfg(feature = "ai")]
+                {
+                    let provider_idx = h.get_ai_provider_idx();
+                    let api_key      = h.get_ai_api_key().to_string();
+                    let provider     = ai_classifier::AiProvider::from_idx(provider_idx);
+                    let handle2      = h.as_weak();
+                    let state_ref2   = state_ref.clone();
+                    h.set_ai_overlay_visible(true);
+                    h.set_ai_msg("Classifying with AI…".into());
+                    h.set_ai_pct(0);
+                    std::thread::spawn(move || {
+                        let mut txns = { state_ref2.lock().unwrap().transactions.clone() };
+                        let result = ai_classifier::classify_with_ai(
+                            &mut txns,
+                            provider,
+                            &api_key,
+                            |done, total| {
+                                let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
+                                let msg = format!("AI: {}/{}", done, total);
+                                let handle2_c = handle2.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(h2) = handle2_c.upgrade() {
+                                        h2.set_ai_pct(pct);
+                                        h2.set_ai_msg(SharedString::from(msg.as_str()));
+                                    }
+                                });
+                            },
+                        );
+                        match result {
+                            Ok(n) => log::info!("[AIClassify] classified {} transactions", n),
+                            Err(e) => log::error!("[AIClassify] error: {}", e),
+                        }
+                        let handle3 = handle2.clone();
+                        let state_ref3 = state_ref2.clone();
+                        let txns_done = txns;
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(h2) = handle3.upgrade() {
+                                let mut st = state_ref3.lock().unwrap();
+                                st.transactions = txns_done;
+                                h2.set_ai_overlay_visible(false);
+                                rebuild_rows(&h2, &st);
+                                push_dashboard(&h2, &st.transactions, st.opening_balance);
+                            }
+                        });
+                    });
+                }
+                #[cfg(not(feature = "ai"))]
+                {
+                    let _ = h;
+                    log::info!("[AIClassify] built without ai feature");
+                }
+            });
         }
         // ── View Rules ────────────────────────────────────────────────────────
         {
@@ -1176,23 +1491,548 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             app.on_do_reimport_excel(|| stub_callback("reimport-excel"));
         }
+
+        // ── Reset Dedupe ──────────────────────────────────────────────────────
         {
-            app.on_do_reset_dedupe(|| stub_callback("reset-dedupe"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_reset_dedupe(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                if st.transactions.is_empty() { return; }
+                for t in st.transactions.iter_mut() {
+                    t.dup_flag = false;
+                    t.tags.retain(|tag| tag != "DUP");
+                }
+                classifier::detect_duplicates(&mut st.transactions);
+                let dup_count  = st.transactions.iter().filter(|t| t.dup_flag).count();
+                let event_str  = format!("[{}] Reset Dedupe — {} duplicate(s) redetected", audit_now(), dup_count);
+                let client_id  = st.client_id;
+                st.audit_events.push(event_str.clone());
+                rebuild_rows(&h, &st);
+                h.set_status_bank(SharedString::from(
+                    format!("Dedupe reset — {} duplicate(s) detected", dup_count).as_str()
+                ));
+                log::info!("[ResetDedupe] {} duplicates after reset", dup_count);
+                drop(st);
+                if let Some(cid) = client_id {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::push_audit_event(conn, cid, &event_str);
+                    }
+                }
+            });
         }
+
+        // ── Reconcile ─────────────────────────────────────────────────────────
         {
-            app.on_do_reconcile(|| stub_callback("reconcile"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_reconcile(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                // Pick a Tally daybook export (Excel)
+                let path = match rfd::FileDialog::new()
+                    .set_title("Open Tally Daybook Export (Excel)")
+                    .add_filter("Excel", &["xlsx", "xls", "xlsm"])
+                    .pick_file()
+                { Some(p) => p, None => return };
+
+                let wb = match calamine::open_workbook_auto(&path) {
+                    Ok(w) => w, Err(e) => {
+                        log::error!("[Reconcile] cannot open file: {}", e);
+                        h.set_status_bank(SharedString::from("Reconcile: failed to open Excel file"));
+                        return;
+                    }
+                };
+
+                // Parse Tally rows: extract (date_str, amount) pairs
+                let tally_entries: Vec<(String, f64)> = reconcile_parse_tally(wb);
+                if tally_entries.is_empty() {
+                    h.set_recon_status(SharedString::from("No valid entries found in the Tally export. Ensure the file has Date and Debit/Credit columns."));
+                    return;
+                }
+
+                // Compare against bank transactions
+                let st = state_ref.lock().unwrap();
+                let bank: Vec<(String, f64)> = st.transactions.iter()
+                    .filter(|t| !t.is_opening_balance)
+                    .map(|t| (t.date.clone(), t.debit.or(t.credit).unwrap_or(0.0)))
+                    .collect();
+
+                let (matched, likely, unmatched_tally) = reconcile_match(&tally_entries, &bank);
+                let bank_only = bank.len().saturating_sub(matched + likely);
+                let tally_unmatched = tally_entries.len().saturating_sub(matched + likely);
+                let status = format!(
+                    "Tally: {} entries | Bank: {} transactions\n\u{2022} Exact matches: {}\n\u{2022} Likely matches (±7 days): {}\n\u{2022} Tally entries unmatched: {}\n\u{2022} Bank-only entries (no Tally): {}",
+                    tally_entries.len(), bank.len(), matched, likely, tally_unmatched, bank_only
+                );
+
+                drop(st);
+                h.set_recon_matched(SharedString::from(matched.to_string().as_str()));
+                h.set_recon_likely(SharedString::from(likely.to_string().as_str()));
+                h.set_recon_unmatched(SharedString::from(tally_unmatched.to_string().as_str()));
+                h.set_recon_bank_only(SharedString::from(bank_only.to_string().as_str()));
+                h.set_recon_status(SharedString::from(status.as_str()));
+
+                let event_str = format!("[{}] Reconcile — {} matched, {} likely, {} unmatched", audit_now(), matched, likely, tally_unmatched);
+                let client_id = {
+                    let mut st2 = state_ref.lock().unwrap();
+                    st2.audit_events.push(event_str.clone());
+                    st2.client_id
+                };
+                log::info!("[Reconcile] matched={} likely={} unmatched={} bank_only={}", matched, likely, tally_unmatched, bank_only);
+                if let Some(cid) = client_id {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::push_audit_event(conn, cid, &event_str);
+                    }
+                }
+            });
         }
+
+        // ── Batch Monitor ─────────────────────────────────────────────────────
         {
-            app.on_do_batch_monitor(|| stub_callback("batch-monitor"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_batch_monitor(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                let import_count = st.import_ids.len();
+                let txn_count = st.transactions.iter().filter(|t| !t.is_opening_balance).count();
+                let classified = st.transactions.iter()
+                    .filter(|t| matches!(t.status, parser::TransactionStatus::Classified)).count();
+                let unreviewed = st.transactions.iter()
+                    .filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed)).count();
+                let log_msg = if txn_count == 0 {
+                    "No files loaded yet. Use \"Batch Process Folder\" in the toolbar to load files.".to_string()
+                } else {
+                    format!(
+                        "Session summary:\n\u{2022} {} import(s) in this session\n\u{2022} {} transactions loaded\n\u{2022} {} classified  |  {} unreviewed",
+                        import_count, txn_count, classified, unreviewed
+                    )
+                };
+                h.set_batch_log(SharedString::from(log_msg.as_str()));
+                log::info!("[BatchMonitor] imports={} txns={} classified={}", import_count, txn_count, classified);
+            });
         }
+
+        // ── Load All from DB ──────────────────────────────────────────────────
         {
-            app.on_do_audit_trail(|| stub_callback("audit-trail"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_load_all(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let client_id = state_ref.lock().unwrap().client_id;
+                let Some(cid) = client_id else {
+                    h.set_batch_log(SharedString::from(
+                        "No client selected. Select a client first."
+                    ));
+                    return;
+                };
+                let txns = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_transactions(conn, cid).unwrap_or_default()
+                    } else { vec![] }
+                };
+                let opening_bal = txns.iter().find(|t| t.is_opening_balance).and_then(|t| t.balance);
+                let txn_count   = txns.iter().filter(|t| !t.is_opening_balance).count();
+                {
+                    let mut st     = state_ref.lock().unwrap();
+                    st.transactions    = txns.clone();
+                    st.opening_balance = opening_bal;
+                    st.active_filter   = "all".to_string();
+                    st.date_from       = String::new();
+                    st.date_to         = String::new();
+                    st.bank_filter     = String::new();
+                }
+                let st = state_ref.lock().unwrap();
+                rebuild_rows(&h, &st);
+                drop(st);
+                if !txns.is_empty() {
+                    push_dashboard(&h, &txns, opening_bal);
+                }
+                let msg = format!("Loaded {} transactions from database for current client.", txn_count);
+                h.set_batch_log(SharedString::from(msg.as_str()));
+                h.set_status_bank(SharedString::from(
+                    format!("All transactions loaded — {} total", txn_count).as_str()
+                ));
+                log::info!("[LoadAll] cid={} txns={}", cid, txn_count);
+            });
         }
+
+        // ── Audit Trail ───────────────────────────────────────────────────────
         {
-            app.on_do_settings(|| stub_callback("settings"));
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_audit_trail(move |action_idx: i32, type_idx: i32| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let client_id = state_ref.lock().unwrap().client_id;
+
+                // Load from DB when a client is active, else fall back to in-memory
+                let all_events: Vec<String> = if let Some(cid) = client_id {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_audit_events(conn, cid).unwrap_or_default()
+                    } else {
+                        state_ref.lock().unwrap().audit_events.iter().rev().cloned().collect()
+                    }
+                } else {
+                    state_ref.lock().unwrap().audit_events.iter().rev().cloned().collect()
+                };
+
+                let filtered: Vec<SharedString> = all_events.iter()
+                    .filter(|e| {
+                        let u = e.to_uppercase();
+                        let action_ok = match action_idx {
+                            1 => u.contains("ADD") || u.contains("CREATE") || u.contains("MANUAL"),
+                            2 => u.contains("EDIT") || u.contains("RESET") || u.contains("SAVE") || u.contains("CLASSIFY"),
+                            3 => u.contains("DELETE"),
+                            4 => u.contains("IMPORT") || u.contains("BATCH"),
+                            5 => u.contains("EXPORT"),
+                            6 => u.contains("CLASSIFY"),
+                            7 => u.contains("RULE"),
+                            _ => true,
+                        };
+                        let type_ok = match type_idx {
+                            1 => u.contains("ADD") || u.contains("DEDUPE") || u.contains("RECONCILE") || u.contains("MANUAL"),
+                            2 => u.contains("CLIENT"),
+                            3 => u.contains("RULE"),
+                            4 => u.contains("IMPORT") || u.contains("BATCH"),
+                            5 => u.contains("EXPORT"),
+                            _ => true,
+                        };
+                        action_ok && type_ok
+                    })
+                    .map(|e| SharedString::from(e.as_str()))
+                    .collect();
+
+                h.set_audit_records(slint::ModelRc::new(slint::VecModel::from(filtered)));
+                log::info!("[AuditTrail] action_idx={} type_idx={} total_events={}", action_idx, type_idx, all_events.len());
+            });
         }
+
+        // ── Settings ──────────────────────────────────────────────────────────
         {
-            app.on_do_add_row(|| stub_callback("add-row"));
+            let db_ref    = db_conn.clone();
+            let state_ref = app_state.clone();
+            app.on_do_settings(move || {
+                // Load settings from DB and sync AI credentials to UI properties
+                // (modal state is already set to "settings" by the Slint footer button)
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    let cfg = settings::Settings::load(conn);
+                    let mut st = state_ref.lock().unwrap();
+                    st.ai_provider = cfg.ai_provider.clone();
+                    st.ai_api_key  = cfg.ai_api_key.clone();
+                    st.ai_enabled  = cfg.ai_enabled;
+                    log::info!("[Settings] loaded: provider='{}' enabled={}", cfg.ai_provider, cfg.ai_enabled);
+                }
+            });
+        }
+
+        // ── Settings Save ─────────────────────────────────────────────────────
+        {
+            let db_ref    = db_conn.clone();
+            let state_ref = app_state.clone();
+            app.on_do_settings_save(move |provider: SharedString, key: SharedString, enabled: bool| {
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    let provider_str = match provider.as_str() {
+                        "1" => "claude",
+                        "2" => "gemini",
+                        _   => "openai",
+                    };
+                    let cfg = settings::Settings {
+                        ai_provider:    provider_str.to_string(),
+                        ai_api_key:     key.to_string(),
+                        ai_enabled:     enabled,
+                        last_client_id: None,
+                    };
+                    match cfg.save(conn) {
+                        Ok(_)  => log::info!("[SettingsSave] saved provider='{}' enabled={}", provider_str, enabled),
+                        Err(e) => log::error!("[SettingsSave] error: {}", e),
+                    }
+                    let mut st = state_ref.lock().unwrap();
+                    st.ai_provider = provider_str.to_string();
+                    st.ai_api_key  = key.to_string();
+                    st.ai_enabled  = enabled;
+                }
+            });
+        }
+
+        // ── Select Client ─────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_select_client(move |name: SharedString| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let name_str = name.to_string();
+                if name_str.is_empty() || name_str == "-- Select Client --" { return; }
+
+                let client = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_client_by_name(conn, &name_str).ok().flatten()
+                    } else { None }
+                };
+
+                let Some(client) = client else {
+                    log::warn!("[SelectClient] client '{}' not found in DB", name_str);
+                    return;
+                };
+
+                // Load transactions from DB for this client
+                let txns = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_transactions(conn, client.id).unwrap_or_default()
+                    } else { vec![] }
+                };
+
+                // Load AI settings
+                let cfg = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        settings::Settings::load(conn)
+                    } else { settings::Settings::default() }
+                };
+
+                let opening_bal = txns.iter()
+                    .find(|t| t.is_opening_balance)
+                    .and_then(|t| t.balance);
+
+                // Load persisted audit events for this client
+                let audit_events = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_audit_events(conn, client.id).unwrap_or_default()
+                    } else { vec![] }
+                };
+
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.client_id    = Some(client.id);
+                    st.client_name  = client.name.clone();
+                    st.tally_ledger = client.tally_ledger.clone();
+                    st.transactions  = txns.clone();
+                    st.opening_balance = opening_bal;
+                    st.active_filter = "all".to_string();
+                    st.date_from     = String::new();
+                    st.date_to       = String::new();
+                    st.bank_filter   = String::new();
+                    st.ai_provider   = cfg.ai_provider.clone();
+                    st.ai_api_key    = cfg.ai_api_key.clone();
+                    st.ai_enabled    = cfg.ai_enabled;
+                    // audit_events from DB are already newest-first; store them reversed so
+                    // in-memory order matches the push-then-rev pattern used elsewhere
+                    st.audit_events  = audit_events.into_iter().rev().collect();
+                }
+
+                // Sync AI settings to UI
+                h.set_ai_provider_idx(match cfg.ai_provider.as_str() {
+                    "claude" => 1, "gemini" => 2, _ => 0,
+                });
+                h.set_ai_api_key(SharedString::from(cfg.ai_api_key.as_str()));
+
+                // Load import history
+                let imports = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_imports(conn, client.id).unwrap_or_default()
+                    } else { vec![] }
+                };
+                let import_recs: Vec<SharedString> = imports.iter().map(|imp| {
+                    let date = &imp.imported_at[..imp.imported_at.len().min(16)];
+                    SharedString::from(format!("{}  |  {}  |  {} transactions",
+                        imp.file_name, date, imp.txn_count).as_str())
+                }).collect();
+                h.set_import_records(slint::ModelRc::new(slint::VecModel::from(import_recs)));
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.import_ids = imports.iter().map(|i| i.id).collect();
+                }
+
+                // Update UI summary
+                let st = state_ref.lock().unwrap();
+                h.set_dash_client_name(SharedString::from(client.name.as_str()));
+                h.set_dash_client_ledger(SharedString::from(client.tally_ledger.as_str()));
+                h.set_status_bank(SharedString::from(
+                    if txns.is_empty() { "No transactions — load a file to begin" }
+                    else { "Loaded from database" }
+                ));
+                rebuild_rows(&h, &st);
+                if !txns.is_empty() {
+                    push_dashboard(&h, &st.transactions, st.opening_balance);
+                }
+                drop(st);
+
+                // Persist last used client
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    let _ = db::set_setting(conn, settings::KEY_LAST_CLIENT, &client.id.to_string());
+                }
+
+                log::info!("[SelectClient] loaded client '{}' id={} txns={}", name_str, client.id, txns.len());
+            });
+        }
+
+        // ── Delete Client ─────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_delete_client(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let client_id = state_ref.lock().unwrap().client_id;
+                let Some(cid) = client_id else {
+                    log::warn!("[DeleteClient] no client selected");
+                    return;
+                };
+                let db = db_ref.lock().unwrap();
+                if let Some(conn) = db.as_ref() {
+                    let _ = db::delete_client(conn, cid);
+                    // Cascade deletes transactions/imports/rules via FK ON DELETE CASCADE
+                    log::info!("[DeleteClient] deleted client id={}", cid);
+                }
+                drop(db);
+                // Clear state
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.client_id    = None;
+                    st.client_name  = String::new();
+                    st.tally_ledger = String::new();
+                    st.transactions  = vec![];
+                    st.import_ids    = vec![];
+                }
+                // Refresh dropdown
+                {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        if let Ok(clients) = db::get_clients(conn) {
+                            let names: Vec<SharedString> =
+                                std::iter::once(SharedString::from("-- Select Client --"))
+                                .chain(clients.iter().map(|c| SharedString::from(c.name.as_str())))
+                                .collect();
+                            h.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                        }
+                    }
+                }
+                h.set_transaction_rows(slint::ModelRc::new(slint::VecModel::from(Vec::<TxnRow>::new())));
+                h.set_import_records(slint::ModelRc::new(slint::VecModel::from(Vec::<SharedString>::new())));
+                h.set_status_bank(SharedString::from("Client deleted"));
+            });
+        }
+
+        // ── Edit Client ───────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_edit_client(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let cid = state_ref.lock().unwrap().client_id;
+                let Some(cid) = cid else {
+                    log::warn!("[EditClient] no client selected");
+                    return;
+                };
+                let new_name   = h.get_edit_client_name().to_string();
+                let new_ledger = h.get_edit_client_ledger().to_string();
+                if new_name.trim().is_empty() {
+                    h.set_status_bank(SharedString::from("Client name cannot be empty"));
+                    return;
+                }
+                let updated = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::update_client(conn, cid, &new_name, &new_ledger).ok()
+                    } else { None }
+                };
+                if updated.is_some() {
+                    let event_str = format!("[{}] Edit Client — name='{}' ledger='{}'",
+                        audit_now(), new_name, new_ledger);
+                    {
+                        let mut st = state_ref.lock().unwrap();
+                        st.client_name  = new_name.clone();
+                        st.tally_ledger = new_ledger.clone();
+                        st.audit_events.push(event_str.clone());
+                    }
+                    h.set_dash_client_name(SharedString::from(new_name.as_str()));
+                    h.set_dash_client_ledger(SharedString::from(new_ledger.as_str()));
+                    // Refresh dropdown and persist audit event
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        if let Ok(clients) = db::get_clients(conn) {
+                            let names: Vec<SharedString> =
+                                std::iter::once(SharedString::from("-- Select Client --"))
+                                .chain(clients.iter().map(|c| SharedString::from(c.name.as_str())))
+                                .collect();
+                            h.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                        }
+                        let _ = db::push_audit_event(conn, cid, &event_str);
+                    }
+                    h.set_status_bank(SharedString::from("Client updated"));
+                    log::info!("[EditClient] updated cid={} name='{}' ledger='{}'", cid, new_name, new_ledger);
+                } else {
+                    h.set_status_bank(SharedString::from("Failed to update client"));
+                    log::error!("[EditClient] db::update_client failed for cid={}", cid);
+                }
+            });
+        }
+
+        // ── Reload Import ─────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_reload_import(move |idx: i32| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let import_ids = { state_ref.lock().unwrap().import_ids.clone() };
+                let Some(&import_id) = import_ids.get(idx as usize) else {
+                    log::warn!("[ReloadImport] idx {} out of range (import_ids len={})", idx, import_ids.len());
+                    return;
+                };
+                let txns = {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        db::get_transactions_for_import(conn, import_id).unwrap_or_default()
+                    } else { vec![] }
+                };
+                let opening_bal = txns.iter().find(|t| t.is_opening_balance).and_then(|t| t.balance);
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.transactions    = txns.clone();
+                    st.opening_balance = opening_bal;
+                    st.active_filter   = "all".to_string();
+                    st.date_from       = String::new();
+                    st.date_to         = String::new();
+                    st.bank_filter     = String::new();
+                }
+                let st = state_ref.lock().unwrap();
+                rebuild_rows(&h, &st);
+                if !txns.is_empty() {
+                    push_dashboard(&h, &txns, opening_bal);
+                }
+                h.set_status_bank(SharedString::from("Import reloaded from database"));
+                log::info!("[ReloadImport] import_id={} txns={}", import_id, txns.len());
+            });
+        }
+
+        // ── Add Row ────────────────────────────────────────────────────────────
+        {
+            let handle = app.as_weak();
+            app.on_do_add_row(move || {
+                // Fields are cleared in Slint before this callback fires.
+                // This hook exists for any future Rust-side pre-open preparation.
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                log::info!("[AddRow] modal opened — {} transactions in session",
+                    h.get_transaction_rows().row_count());
+            });
         }
 
         // ── Row editing callbacks ─────────────────────────────────────────────
@@ -1256,6 +2096,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut st = state_ref.lock().unwrap();
 
                 if let Some(abs) = visible_to_abs(&st, idx as usize) {
+                    let client_id = st.client_id.unwrap_or(0);
                     let t = &mut st.transactions[abs];
                     if !vendor.is_empty() { t.vendor = vendor.to_string(); }
                     if !head.is_empty()   { t.account_head = head.to_string(); }
@@ -1279,7 +2120,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             stripped.trim().to_uppercase().chars().take(30).collect::<String>()
                         };
                         if !pattern.is_empty() {
-                            let client_id = st.client_id.unwrap_or(0);
                             let db = db_ref.lock().unwrap();
                             if let Some(conn) = db.as_ref() {
                                 match db::add_rule(conn, client_id, &pattern, &vendor, &head, &typ) {
@@ -1288,6 +2128,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                    }
+                    // Persist classification change to DB
+                    let t_id       = t.id.clone();
+                    let t_vendor   = t.vendor.clone();
+                    let t_head     = t.account_head.clone();
+                    let t_type_str = t.txn_type.to_string();
+                    let t_status   = t.status.to_string();
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::upsert_transaction_classification(
+                            conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, 1.0,
+                        );
                     }
                     log::info!("[SaveTxn] abs={} vendor='{}' head='{}' type='{}' learn={}", abs, vendor, head, typ, learn);
                 }
@@ -1327,6 +2179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
 
             app.on_do_add_txn(move |date, refno, narr, dr, cr, vendor, head, typ| {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
@@ -1337,6 +2190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let new_txn = parser::Transaction {
                     id:          format!("manual-{}", st.transactions.len()),
+                    import_id:   None,
                     date:        date.to_string(),
                     date_ts:     0,
                     narration:   narr.to_string(),
@@ -1362,9 +2216,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     prev_balance: None,
                     balance_ok:  None,
                 };
+                let new_txn_for_db = new_txn.clone();
                 st.transactions.push(new_txn);
+                let client_id = st.client_id;
+                let event_str = format!("[{}] Manual Add — date='{}' narr='{}'", audit_now(), date, narr);
+                st.audit_events.push(event_str.clone());
                 log::info!("[AddTxn] date='{}' narr='{}' dr={:?} cr={:?}", date, narr, debit_val, credit_val);
                 rebuild_rows(&h, &st);
+                drop(st);
+                if let Some(cid) = client_id {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::upsert_transactions(conn, cid, None, &[new_txn_for_db]);
+                        let _ = db::push_audit_event(conn, cid, &event_str);
+                    }
+                }
             });
         }
 

@@ -65,6 +65,10 @@ export component AppWindow inherits Window {
     in-out property <string> new-client-name:   "";
     in-out property <string> new-client-ledger: "";
 
+    // ── AI settings (read by Rust in do-ai-classify) ─────────────────────────
+    in-out property <int>    ai-provider-idx: 0;
+    in-out property <string> ai-api-key:      "";
+
     // ── Export Wizard fields (synced from MainScreen so Rust can read them) ───
     in-out property <int>    wiz-sw-idx:    0;
     in-out property <string> wiz-company:   "";
@@ -110,6 +114,21 @@ export component AppWindow inherits Window {
     in property <string> dash-ins-cr-count:    "";
     in property <string> dash-ins-freq-vendor: "—";
 
+    // ── Edit client fields ────────────────────────────────────────────────────
+    in-out property <string> edit-client-name:   "";
+    in-out property <string> edit-client-ledger: "";
+    in property <string>     dash-client-ledger: "";
+    // ── Batch monitor log ─────────────────────────────────────────────────────
+    in property <string>     batch-log: "";
+    // ── Reconcile counters ────────────────────────────────────────────────────
+    in property <string>     recon-matched:    "0";
+    in property <string>     recon-likely:     "0";
+    in property <string>     recon-unmatched:  "0";
+    in property <string>     recon-bank-only:  "0";
+    in property <string>     recon-status:     "";
+    // ── Audit trail ───────────────────────────────────────────────────────────
+    in property <[string]>   audit-records: [];
+
     // ── Toast / overlays ─────────────────────────────────────────────────────
     in property <string> toast-msg:          "";
     in property <int>    toast-kind:         0;
@@ -143,9 +162,10 @@ export component AppWindow inherits Window {
     callback do-reset-dedupe();
     callback do-reconcile();
     callback do-batch-monitor();
-    callback do-audit-trail();
+    callback do-audit-trail(int, int);
     callback do-settings();
     callback do-add-row();
+    callback do-load-all();
     // Row editing callbacks
     callback do-row-click(int);
     callback do-save-txn(int, string, string, string, bool);   // idx, vendor, head, type, learn
@@ -156,6 +176,14 @@ export component AppWindow inherits Window {
     callback do-pdf-pwd-cancel();
     callback do-ai-cancel();
     callback do-dash-filter(string, string, string, string, string);
+    // Client management
+    callback do-select-client(string);
+    callback do-delete-client();
+    callback do-edit-client();
+    // Import history reload
+    callback do-reload-import(int);
+    // Settings save
+    callback do-settings-save(string, string, bool);
 
     // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
@@ -171,6 +199,8 @@ export component AppWindow inherits Window {
         client-names:      root.client-names;
         new-client-name   <=> root.new-client-name;
         new-client-ledger <=> root.new-client-ledger;
+        ai-provider-idx   <=> root.ai-provider-idx;
+        ai-api-key        <=> root.ai-api-key;
         wiz-sw-idx  <=> root.wiz-sw-idx;
         wiz-company <=> root.wiz-company;
         wiz-gstin   <=> root.wiz-gstin;
@@ -242,6 +272,17 @@ export component AppWindow inherits Window {
         dash-ins-freq-vendor: root.dash-ins-freq-vendor;
         dash-filter-changed(f, t, b, v, h) => { root.do-dash-filter(f, t, b, v, h); }
 
+        edit-client-name   <=> root.edit-client-name;
+        edit-client-ledger <=> root.edit-client-ledger;
+        dash-client-ledger:    root.dash-client-ledger;
+        batch-log:             root.batch-log;
+        recon-matched:         root.recon-matched;
+        recon-likely:          root.recon-likely;
+        recon-unmatched:       root.recon-unmatched;
+        recon-bank-only:       root.recon-bank-only;
+        recon-status:          root.recon-status;
+        audit-records:         root.audit-records;
+
         toast-msg:          root.toast-msg;
         toast-kind:         root.toast-kind;
         ocr-visible:        root.ocr-visible;
@@ -273,9 +314,10 @@ export component AppWindow inherits Window {
         reset-dedupe        => { root.do-reset-dedupe();        }
         reconcile           => { root.do-reconcile();           }
         open-batch-monitor  => { root.do-batch-monitor();       }
-        open-audit-trail    => { root.do-audit-trail();         }
+        open-audit-trail(a, t) => { root.do-audit-trail(a, t);  }
         open-settings       => { root.do-settings();            }
         add-row             => { root.do-add-row();             }
+        load-all            => { root.do-load-all();            }
         row-click(idx)      => { root.do-row-click(idx);        }
         save-txn(i,v,h,t,l) => { root.do-save-txn(i,v,h,t,l); }
         delete-txn(i)       => { root.do-delete-txn(i);        }
@@ -284,5 +326,10 @@ export component AppWindow inherits Window {
         pdf-pwd-confirm(p) => { root.do-pdf-pwd-confirm(p); }
         pdf-pwd-cancel     => { root.do-pdf-pwd-cancel();   }
         ai-cancel          => { root.do-ai-cancel();        }
+        select-client(v)   => { root.do-select-client(v);   }
+        delete-client      => { root.do-delete-client();    }
+        edit-client        => { root.do-edit-client();      }
+        reload-import(i)   => { root.do-reload-import(i);   }
+        settings-save(p,k,e) => { root.do-settings-save(p, k, e); }
     }
 }

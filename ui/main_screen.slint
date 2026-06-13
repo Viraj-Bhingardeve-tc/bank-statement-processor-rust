@@ -562,21 +562,33 @@ export component MainScreen inherits Rectangle {
     callback reset-dedupe();
     callback reconcile();
     callback open-batch-monitor();
-    callback open-audit-trail();
+    callback open-audit-trail(int, int);
     callback open-settings();
     callback add-row();
+    callback load-all();
     // Row editing
     callback row-click(int);
     callback save-txn(int, string, string, string, bool);
     callback delete-txn(int);
     callback mark-suspense(int);
     callback add-txn(string, string, string, string, string, string, string, string);
+    // Client management
+    callback select-client(string);
+    callback delete-client();
+    callback edit-client();
+    // Import history reload
+    callback reload-import(int);
+    // Settings save (provider, api-key, enabled)
+    callback settings-save(string, string, bool);
 
     // ── Data ──────────────────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
     // New client fields — in-out so Rust can read them back in do-new-client
     in-out property <string> new-client-name:   "";
     in-out property <string> new-client-ledger: "";
+    // AI settings fields — in-out so Rust can read provider + key after modal closes
+    in-out property <int>    ai-provider-idx: 0;
+    in-out property <string> ai-api-key:      "";
     // Import history + rules records set by Rust
     in property <[string]> import-records: [];
     in property <[string]> rule-records:   [];
@@ -694,6 +706,24 @@ export component MainScreen inherits Rectangle {
     in-out property <string> wiz-from:      "";
     in-out property <string> wiz-to:        "";
 
+    // Edit client fields — in-out so Rust can read them back
+    in-out property <string> edit-client-name:   "";
+    in-out property <string> edit-client-ledger: "";
+    // Current client ledger name shown in summary (used to pre-fill edit modal)
+    in property <string>     dash-client-ledger: "";
+    // Batch monitor status line set by Rust after processing
+    in property <string>     batch-log: "";
+    // Reconcile counters set by Rust after reconcile()
+    in property <string>     recon-matched:    "0";
+    in property <string>     recon-likely:     "0";
+    in property <string>     recon-unmatched:  "0";
+    in property <string>     recon-bank-only:  "0";
+    in property <string>     recon-status:     "";
+    // Audit trail records (set by Rust in do-audit-trail)
+    in property <[string]>   audit-records: [];
+    in-out property <int>    audit-action-idx: 0;
+    in-out property <int>    audit-type-idx:   0;
+
     // ── MAIN LAYOUT ───────────────────────────────────────────────────────────
     VerticalLayout {
         padding: 0px; spacing: 0px;
@@ -739,9 +769,15 @@ export component MainScreen inherits Rectangle {
                 ComboBox {
                     model: root.client-names; current-index: 0;
                     height: 28px; min-width: 160px;
+                    selected(v) => { root.select-client(v); }
                 }
                 // btn-primary: background #1565C0, color #fff (blue-on-blue in toolbar)
                 TBtn { text: "+ New Client"; bg: #1565C0; fg: #FFFFFF; clicked => { root.modal-state = "new-client"; } }
+                TBtn { text: "Edit Client"; bg: #0277BD; fg: #FFFFFF; clicked => {
+                    root.edit-client-name   = root.dash-client-name;
+                    root.edit-client-ledger = root.dash-client-ledger;
+                    root.modal-state = "edit-client";
+                } }
 
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
@@ -765,7 +801,7 @@ export component MainScreen inherits Rectangle {
 
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
-                TBtn { text: "View Rules"; enabled: false; clicked => { root.modal-state = "view-rules"; } }
+                TBtn { text: "View Rules"; enabled: true; clicked => { root.view-rules(); root.modal-state = "view-rules"; } }
                 TBtn {
                     text: "Import History";
                     enabled: root.transaction-rows.length > 0;
@@ -929,7 +965,14 @@ export component MainScreen inherits Rectangle {
                             border-width: 1px; border-color: #90CAF9;
                             TouchArea {
                                 enabled: root.transaction-rows.length > 0;
-                                clicked => { root.modal-state = "add-txn"; }
+                                clicked => {
+                                    root.add-date = ""; root.add-ref = ""; root.add-narr = "";
+                                    root.add-dr = ""; root.add-cr = "";
+                                    root.add-vendor = ""; root.add-head = "";
+                                    root.add-type-idx = 0;
+                                    root.add-row();
+                                    root.modal-state = "add-txn";
+                                }
                             }
                             Text {
                                 text: "+ Add Row"; font-size: 11px; color: #0A1929;
@@ -1357,9 +1400,18 @@ export component MainScreen inherits Rectangle {
                 MHdr { title: "\u{2605} AI Classifier \u{2014} Settings"; bg: #FFF8E1; close => { root.modal-state = ""; } }
                 VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
                     Text { text: "AI Provider"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    ComboBox { model: ["OpenAI (GPT-4o-mini)", "Anthropic Claude (Haiku)", "Google Gemini 1.5 Flash"]; height: 34px; }
+                    ComboBox {
+                        model: ["OpenAI (GPT-4o-mini)", "Anthropic Claude (Haiku)", "Google Gemini 1.5 Flash"];
+                        current-index: root.ai-provider-idx;
+                        height: 34px;
+                        selected(v) => { root.ai-provider-idx = self.current-index; }
+                    }
                     Text { text: "API Key"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    LineEdit { placeholder-text: "sk-..."; height: 34px; input-type: password; }
+                    LineEdit {
+                        placeholder-text: "sk-..."; height: 34px; input-type: password;
+                        text: root.ai-api-key;
+                        edited(v) => { root.ai-api-key = v; }
+                    }
                     Text { text: "Classify which transactions"; font-size: 12px; font-weight: 600; color: #0D47A1; }
                     ComboBox { model: ["Unclassified / low-confidence only (recommended)", "All transactions"]; height: 34px; }
                     Rectangle {
@@ -1567,9 +1619,13 @@ export component MainScreen inherits Rectangle {
                         }
                         ListView {
                             y: 28px; height: parent.height - 28px;
-                            for rec in root.import-records : Rectangle {
+                            for rec[i] in root.import-records : Rectangle {
                                 height: 26px; background: #FFFFFF;
                                 Rectangle { y: 25px; height: 1px; background: #E3F2FD; }
+                                TouchArea {
+                                    clicked => { root.modal-state = ""; root.reload-import(i); }
+                                    mouse-cursor: pointer;
+                                }
                                 HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px;
                                     // Format: "FILE\tDATE\tCOUNT" — split by tab
                                     Text {
@@ -1656,12 +1712,17 @@ export component MainScreen inherits Rectangle {
                         MBtn { text: "Start Batch"; bg: #1565C0; clicked => { root.open-batch-monitor(); } }
                         MBtn { text: "Pause"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
                         MBtn { text: "Abort"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
-                        MBtn { text: "Load All into Session"; bg: #2E7D32; fg: white; enabled: false; }
+                        MBtn { text: "Load All into Session"; bg: #2E7D32; fg: white; enabled: true; clicked => { root.load-all(); } }
                     }
                     Rectangle {
                         vertical-stretch: 1; background: #F5F5F5;
                         border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
-                        Text { text: "Use \"Batch Process Folder\" to select multiple files, then open this monitor to track progress."; font-size: 12px; color: #90A4AE; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                        Text {
+                            text: root.batch-log != "" ? root.batch-log : "Click \"Start Batch\" to view session statistics.";
+                            font-size: 12px;
+                            color: root.batch-log != "" ? #1565C0 : #90A4AE;
+                            wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center;
+                        }
                     }
                 }
                 MFtr {
@@ -1685,15 +1746,29 @@ export component MainScreen inherits Rectangle {
                 MHdr { title: "Audit Trail"; close => { root.modal-state = ""; } }
                 VerticalBox { padding: 14px; spacing: 8px; vertical-stretch: 1;
                     HorizontalBox { padding: 0px; spacing: 8px;
-                        ComboBox { model: ["All Actions", "Create", "Update", "Delete", "Import", "Export", "Classify", "Rule"]; min-width: 130px; }
-                        ComboBox { model: ["All Types", "Transaction", "Client", "Rule", "Import", "Export"]; min-width: 130px; }
-                        MBtn { text: "Refresh"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.open-audit-trail(); } }
+                        ComboBox { model: ["All Actions", "Create", "Update", "Delete", "Import", "Export", "Classify", "Rule"]; min-width: 130px; current-index <=> root.audit-action-idx; }
+                        ComboBox { model: ["All Types", "Transaction", "Client", "Rule", "Import", "Export"]; min-width: 130px; current-index <=> root.audit-type-idx; }
+                        MBtn { text: "Refresh"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.open-audit-trail(root.audit-action-idx, root.audit-type-idx); } }
                         MBtn { text: "Undo Last Edit"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
                     }
                     Rectangle {
                         vertical-stretch: 1; background: #F5F5F5;
                         border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
-                        Text { text: "No audit events recorded yet."; font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center; }
+                        if root.audit-records.length == 0 : Text {
+                            text: "No audit events recorded yet.";
+                            font-size: 13px; color: #BDBDBD; horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        if root.audit-records.length > 0 : ListView {
+                            for entry in root.audit-records : Rectangle {
+                                height: 22px;
+                                Rectangle { y: 21px; height: 1px; background: #E3F2FD; }
+                                Text {
+                                    text: entry; font-size: 11px; color: #37474F;
+                                    y: 4px; x: 8px; overflow: elide;
+                                    width: parent.width - 16px;
+                                }
+                            }
+                        }
                     }
                 }
                 MFtr {
@@ -1887,18 +1962,25 @@ export component MainScreen inherits Rectangle {
                         MBtn { text: "Run Reconciliation"; bg: #1565C0; enabled: false; }
                         MBtn { text: "Export CSV"; bg: #2E7D32; fg: white; enabled: false; }
                     }
-                    // Summary bar placeholder
+                    // Summary bar — bound to Rust recon properties
                     Rectangle {
                         height: 50px; background: #E3F2FD; border-radius: 6px;
                         HorizontalBox { padding: 10px; spacing: 16px;
-                            for stat in [
-                                {v: "0", lbl: "Matched"},
-                                {v: "0", lbl: "Likely"},
-                                {v: "0", lbl: "Unmatched"},
-                                {v: "0", lbl: "Bank Only"},
-                            ] : VerticalBox { padding: 0px; spacing: 2px; alignment: center;
-                                Text { text: stat.v; font-size: 20px; font-weight: 700; color: #1565C0; horizontal-alignment: center; }
-                                Text { text: stat.lbl; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
+                            VerticalBox { padding: 0px; spacing: 2px; alignment: center;
+                                Text { text: root.recon-matched; font-size: 20px; font-weight: 700; color: #2E7D32; horizontal-alignment: center; }
+                                Text { text: "Matched"; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
+                            }
+                            VerticalBox { padding: 0px; spacing: 2px; alignment: center;
+                                Text { text: root.recon-likely; font-size: 20px; font-weight: 700; color: #F57F17; horizontal-alignment: center; }
+                                Text { text: "Likely"; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
+                            }
+                            VerticalBox { padding: 0px; spacing: 2px; alignment: center;
+                                Text { text: root.recon-unmatched; font-size: 20px; font-weight: 700; color: #C62828; horizontal-alignment: center; }
+                                Text { text: "Unmatched"; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
+                            }
+                            VerticalBox { padding: 0px; spacing: 2px; alignment: center;
+                                Text { text: root.recon-bank-only; font-size: 20px; font-weight: 700; color: #6A1B9A; horizontal-alignment: center; }
+                                Text { text: "Bank Only"; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
                             }
                         }
                     }
@@ -1906,7 +1988,15 @@ export component MainScreen inherits Rectangle {
                     Rectangle {
                         vertical-stretch: 1; background: #F5F5F5;
                         border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
-                        Text { text: "Load a Tally daybook export to begin matching."; font-size: 13px; color: #888888; horizontal-alignment: center; vertical-alignment: center; }
+                        if root.recon-status == "" : Text {
+                            text: "Load a Tally daybook export to begin matching.";
+                            font-size: 13px; color: #888888; horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        if root.recon-status != "" : Text {
+                            text: root.recon-status;
+                            font-size: 12px; color: #37474F; wrap: word-wrap;
+                            x: 10px; y: 10px; width: parent.width - 20px;
+                        }
                     }
                 }
                 MFtr {
@@ -2254,6 +2344,45 @@ export component MainScreen inherits Rectangle {
                     background: #FFFFFF; border-radius: 4px; border-width: 1px; border-color: #90CAF9;
                     TouchArea { clicked => { root.ai-cancel(); } }
                     Text { text: "Cancel"; font-size: 12px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+
+    // ── Edit Client modal ──────────────────────────────────────────────────────
+    if root.modal-state == "edit-client" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 470px) / 2; y: (parent.height - 310px) / 2;
+            width: 470px; height: 310px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #0277BD; }
+                MHdr { title: "Edit Client"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    Text { text: "Client Name *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit {
+                        placeholder-text: "e.g. Acme Pvt Ltd"; height: 34px;
+                        text: root.edit-client-name;
+                        edited(v) => { root.edit-client-name = v; }
+                    }
+                    Text { text: "Bank Ledger Name in Tally *"; font-size: 12px; font-weight: 600; color: #0D47A1; }
+                    LineEdit {
+                        placeholder-text: "e.g. HDFC Bank A/c - 5021"; height: 34px;
+                        text: root.edit-client-ledger;
+                        edited(v) => { root.edit-client-ledger = v; }
+                    }
+                    Text { text: "Must exactly match the ledger name in your Tally company (case-sensitive)"; font-size: 11px; color: #999999; wrap: word-wrap; }
+                }
+                MFtr {
+                    MBtn { text: "Save Changes"; bg: #0277BD; clicked => {
+                        root.edit-client();
+                        root.modal-state = "";
+                    } }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
         }
