@@ -929,9 +929,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.on_do_load_file(move || {
                 let path = match rfd::FileDialog::new()
                     .set_title("Open Bank Statement")
-                    .add_filter("Bank Statements", &["pdf", "xlsx", "xls", "xlsm"])
+                    .add_filter("Bank Statements", &["pdf", "xlsx", "xls", "xlsm", "png", "jpg", "jpeg", "tiff", "tif", "bmp"])
                     .add_filter("PDF", &["pdf"])
                     .add_filter("Excel", &["xlsx", "xls", "xlsm"])
+                    .add_filter("Images (OCR)", &["png", "jpg", "jpeg", "tiff", "tif", "bmp"])
                     .pick_file()
                 {
                     Some(p) => p,
@@ -1048,6 +1049,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                    } else if parser::ocr_extractor::IMAGE_EXTS.contains(&ext.as_str()) {
+                        h.set_status_bank(SharedString::from("Image — running OCR…"));
+                        match parser::ocr_extractor::extract_image_via_tesseract(&path) {
+                            Some(text) if !text.trim().is_empty() => {
+                                let ocr = parser::ocr_parser::parse_ocr_text(&text, &file_name);
+                                let real_count = ocr.transactions.iter()
+                                    .filter(|t| !t.is_opening_balance)
+                                    .count();
+                                if real_count > 0 {
+                                    Some(ocr)
+                                } else {
+                                    h.set_status_bank(SharedString::from(
+                                        "No transactions found in image — check image quality",
+                                    ));
+                                    return;
+                                }
+                            }
+                            _ => {
+                                h.set_status_bank(SharedString::from(
+                                    "Image OCR failed — install Tesseract for image support",
+                                ));
+                                return;
+                            }
+                        }
                     } else {
                         log::warn!("Unsupported extension: {}", ext);
                         h.set_status_bank(SharedString::from("Unsupported file type"));
@@ -1076,7 +1101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let paths = match rfd::FileDialog::new()
                     .set_title("Select Bank Statement Files (multiple)")
-                    .add_filter("Bank Statements", &["pdf","xlsx","xls","xlsm"])
+                    .add_filter("Bank Statements", &["pdf","xlsx","xls","xlsm","png","jpg","jpeg","tiff","tif","bmp"])
+                    .add_filter("Images (OCR)", &["png","jpg","jpeg","tiff","tif","bmp"])
                     .pick_files()
                 {
                     Some(p) if !p.is_empty() => p,
@@ -1109,8 +1135,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if !text.trim().is_empty() {
                                 let r = parser::ocr_parser::parse_ocr_text(&text, &file_name);
                                 if r.transactions.iter().any(|t| !t.is_opening_balance) { Some(r) } else { None }
-                            } else { None }
+                            } else {
+                                parser::ocr_extractor::extract_via_tesseract(path)
+                                    .and_then(|t| {
+                                        let r = parser::ocr_parser::parse_ocr_text(&t, &file_name);
+                                        if r.transactions.iter().any(|t| !t.is_opening_balance) { Some(r) } else { None }
+                                    })
+                            }
                         }
+                    } else if parser::ocr_extractor::IMAGE_EXTS.contains(&ext.as_str()) {
+                        parser::ocr_extractor::extract_image_via_tesseract(path)
+                            .and_then(|t| {
+                                let r = parser::ocr_parser::parse_ocr_text(&t, &file_name);
+                                if r.transactions.iter().any(|t| !t.is_opening_balance) { Some(r) } else { None }
+                            })
                     } else { None };
 
                     match result {
