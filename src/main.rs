@@ -259,23 +259,32 @@ fn parse_date_ymd(s: &str) -> Option<(i32, u32, u32)> {
 
 // ── Apply status + date + bank filters to a transaction list ──────────────────
 #[cfg(feature = "slint-ui")]
+fn match_status(t: &parser::Transaction, s: &str) -> bool {
+    match s {
+        "unreviewed"   => matches!(t.status, parser::TransactionStatus::Unreviewed),
+        "suspense"     => matches!(t.status, parser::TransactionStatus::Suspense),
+        "high"         => matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7,
+        "duplicates"   => t.dup_flag,
+        "gst"          => t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }),
+        "needs_review" => matches!(t.status, parser::TransactionStatus::NeedsReview),
+        "credits"      => t.credit.is_some() && t.debit.is_none(),
+        "debits"       => t.debit.is_some() && t.credit.is_none(),
+        _              => true,
+    }
+}
+
 fn apply_txn_filters<'a>(
     txns: &'a [parser::Transaction],
-    status:  &str,
+    statuses: &[String],
     from:    &str,
     to:      &str,
     bank:    &str,
 ) -> Vec<&'a parser::Transaction> {
     txns.iter()
         .filter(|t| !t.is_opening_balance)
-        .filter(|t| match status {
-            "unreviewed"   => matches!(t.status, parser::TransactionStatus::Unreviewed),
-            "suspense"     => matches!(t.status, parser::TransactionStatus::Suspense),
-            "high"         => matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7,
-            "duplicates"   => t.dup_flag,
-            "gst"          => t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }),
-            "needs_review" => matches!(t.status, parser::TransactionStatus::NeedsReview),
-            _              => true,
+        .filter(|t| {
+            if statuses.is_empty() { return true; }
+            statuses.iter().any(|s| match_status(t, s.as_str()))
         })
         .filter(|t| {
             if from.is_empty() && to.is_empty() { return true; }
@@ -347,10 +356,22 @@ fn compute_filter_counts(txns: &[parser::Transaction]) -> [usize; 7] {
 
 // ── Rebuild visible TxnRow model + filter counts from current AppState filters ─
 #[cfg(feature = "slint-ui")]
+fn sync_fs_props(h: &AppWindow, st: &ui::AppState) {
+    let has = |s: &str| st.filter_statuses.iter().any(|x| x == s);
+    h.set_fs_unreviewed(has("unreviewed"));
+    h.set_fs_suspense(has("suspense"));
+    h.set_fs_high(has("high"));
+    h.set_fs_dups(has("duplicates"));
+    h.set_fs_gst(has("gst"));
+    h.set_fs_review(has("needs_review"));
+    h.set_fs_credits(has("credits"));
+    h.set_fs_debits(has("debits"));
+}
+
 fn rebuild_rows(h: &AppWindow, st: &ui::AppState) {
     let filtered = apply_txn_filters(
         &st.transactions,
-        &st.active_filter,
+        &st.filter_statuses,
         &st.date_from,
         &st.date_to,
         &st.bank_filter,
@@ -368,10 +389,11 @@ fn rebuild_rows(h: &AppWindow, st: &ui::AppState) {
     h.set_fc_duplicates(SharedString::from(dups.to_string().as_str()));
     h.set_fc_gst(SharedString::from(gst.to_string().as_str()));
     h.set_fc_review(SharedString::from(review.to_string().as_str()));
+    sync_fs_props(h, st);
 
-    log::info!("[Filter] showing {} / {} txns  (status='{}' from='{}' to='{}' bank='{}')",
+    log::info!("[Filter] showing {} / {} txns  (statuses={:?} from='{}' to='{}' bank='{}')",
         filtered.len(), st.transactions.iter().filter(|t| !t.is_opening_balance).count(),
-        st.active_filter, st.date_from, st.date_to, st.bank_filter);
+        st.filter_statuses, st.date_from, st.date_to, st.bank_filter);
 }
 
 // ── Compute FY date range (Indian FY: Apr 1 → Mar 31) ────────────────────────
@@ -800,6 +822,7 @@ fn apply_parse_result(
         st.unreviewed      = unreviewed_cnt;
         st.transactions    = result.transactions.clone();
         st.active_filter   = "all".to_string();
+        st.filter_statuses.clear();
         st.date_from       = String::new();
         st.date_to         = String::new();
         st.bank_filter     = String::new();
@@ -1269,6 +1292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.total_credits   = total_cr;
                     st.txn_count       = real.len();
                     st.active_filter   = "all".to_string();
+                    st.filter_statuses.clear();
                     st.date_from       = String::new();
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
@@ -1605,7 +1629,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.on_do_filter_changed(move |f| {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 let mut st = state_ref.lock().unwrap();
-                st.active_filter = f.to_string();
+                let fs = f.to_string();
+                if fs == "all" {
+                    st.active_filter = "all".to_string();
+                    st.filter_statuses.clear();
+                } else {
+                    // Single-select from drill-down or legacy callers
+                    st.active_filter = fs.clone();
+                    st.filter_statuses = vec![fs];
+                }
+                rebuild_rows(&h, &st);
+            });
+        }
+        // ── Toggle status filter (multi-select) ───────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_toggle_status(move |s| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                let s = s.to_string();
+                if let Some(pos) = st.filter_statuses.iter().position(|x| x == &s) {
+                    st.filter_statuses.remove(pos);
+                } else {
+                    st.filter_statuses.push(s);
+                }
+                st.active_filter = if st.filter_statuses.is_empty() {
+                    "all".to_string()
+                } else if st.filter_statuses.len() == 1 {
+                    st.filter_statuses[0].clone()
+                } else {
+                    "multi".to_string()
+                };
                 rebuild_rows(&h, &st);
             });
         }
@@ -1978,6 +2033,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut st = state_ref.lock().unwrap();
                     st.transactions  = txns.clone();
                     st.active_filter = "all".to_string();
+                    st.filter_statuses.clear();
                     st.date_from     = String::new();
                     st.date_to       = String::new();
                     st.bank_filter   = String::new();
@@ -2193,6 +2249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.transactions    = txns.clone();
                     st.opening_balance = opening_bal;
                     st.active_filter   = "all".to_string();
+                    st.filter_statuses.clear();
                     st.date_from       = String::new();
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
@@ -2592,6 +2649,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.transactions  = txns.clone();
                     st.opening_balance = opening_bal;
                     st.active_filter = "all".to_string();
+                    st.filter_statuses.clear();
                     st.date_from     = String::new();
                     st.date_to       = String::new();
                     st.bank_filter   = String::new();
@@ -2778,6 +2836,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.transactions    = txns.clone();
                     st.opening_balance = opening_bal;
                     st.active_filter   = "all".to_string();
+                    st.filter_statuses.clear();
                     st.date_from       = String::new();
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
@@ -2812,16 +2871,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vis = 0usize;
             for (abs, t) in st.transactions.iter().enumerate() {
                 if t.is_opening_balance { continue; }
-                let pass = match st.active_filter.as_str() {
-                    "unreviewed"   => matches!(t.status, parser::TransactionStatus::Unreviewed),
-                    "suspense"     => matches!(t.status, parser::TransactionStatus::Suspense),
-                    "high"         => matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7,
-                    "duplicates"   => t.dup_flag,
-                    "gst"          => t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }),
-                    "needs_review" => matches!(t.status, parser::TransactionStatus::NeedsReview),
-                    "credits"      => t.credit.is_some() && t.debit.is_none(),
-                    "debits"       => t.debit.is_some() && t.credit.is_none(),
-                    _              => true,
+                let pass = if st.filter_statuses.is_empty() {
+                    true
+                } else {
+                    st.filter_statuses.iter().any(|s| match_status(t, s.as_str()))
                 };
                 if !pass { continue; }
                 // date filter

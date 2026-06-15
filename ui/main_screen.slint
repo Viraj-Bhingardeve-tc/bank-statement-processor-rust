@@ -582,6 +582,7 @@ export component MainScreen inherits Rectangle {
     callback export-tally();
     callback export-accounting();
     callback export-preview();    // recomputes the export summary line for wizard step 4
+    callback toggle-status(string);  // multi-status filter toggle
     callback reimport-excel();
     callback reset-dedupe();
     callback reconcile();
@@ -707,6 +708,15 @@ export component MainScreen inherits Rectangle {
     // ── Internal state ─────────────────────────────────────────────────────────
     in-out property <bool>   show-dashboard:  true;
     in-out property <string> active-filter:   "all";
+    // Multi-status filter toggle state (set by Rust after toggle-status callback)
+    in property <bool> fs-unreviewed: false;
+    in property <bool> fs-suspense:   false;
+    in property <bool> fs-high:       false;
+    in property <bool> fs-dups:       false;
+    in property <bool> fs-gst:        false;
+    in property <bool> fs-review:     false;
+    in property <bool> fs-credits:    false;
+    in property <bool> fs-debits:     false;
     in-out property <bool>   dedup-enabled:       true;
     in-out property <bool>   ai-consent-checked:  false;
     in-out property <string> date-from:      "";
@@ -1037,13 +1047,13 @@ export component MainScreen inherits Rectangle {
 
                         // Inactive colors: border from .fbtn-* class; text from .fbtn { color:#555 } default
                         // Except Needs Review: inline style="border-color:#e67e22;color:#e67e22"
-                        FBtn { label: "All";         count: root.fc-all;        active: root.active-filter == "all";         a-bg: #1565C0; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "all";         root.filter-changed("all"); } }
-                        FBtn { label: "Unreviewed";  count: root.fc-unreviewed; active: root.active-filter == "unreviewed";  a-bg: #E65100; a-fg: white; i-border: #FFA726; i-fg: #555555; clicked => { root.active-filter = "unreviewed";  root.filter-changed("unreviewed"); } }
-                        FBtn { label: "Suspense";    count: root.fc-suspense;   active: root.active-filter == "suspense";    a-bg: #7B1FA2; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "suspense";    root.filter-changed("suspense"); } }
-                        FBtn { label: "High Conf.";  count: root.fc-high;       active: root.active-filter == "high";        a-bg: #1B5E20; a-fg: white; i-border: #43A047; i-fg: #555555; clicked => { root.active-filter = "high";        root.filter-changed("high"); } }
-                        FBtn { label: "Duplicates";  count: root.fc-duplicates; active: root.active-filter == "duplicates";  a-bg: #880E4F; a-fg: white; i-border: #E91E63; i-fg: #555555; clicked => { root.active-filter = "duplicates";  root.filter-changed("duplicates"); } }
-                        FBtn { label: "GST/Tax";     count: root.fc-gst;        active: root.active-filter == "gst";         a-bg: #2E7D32; a-fg: white; i-border: #66BB6A; i-fg: #555555; clicked => { root.active-filter = "gst";         root.filter-changed("gst"); } }
-                        FBtn { label: "Needs Review"; count: root.fc-review;    active: root.active-filter == "needs_review"; a-bg: #E65100; a-fg: white; i-border: #E67E22; i-fg: #E67E22; clicked => { root.active-filter = "needs_review"; root.filter-changed("needs_review"); } }
+                        FBtn { label: "All";         count: root.fc-all;        active: !root.fs-unreviewed && !root.fs-suspense && !root.fs-high && !root.fs-dups && !root.fs-gst && !root.fs-review && !root.fs-credits && !root.fs-debits; a-bg: #1565C0; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
+                        FBtn { label: "Unreviewed";  count: root.fc-unreviewed; active: root.fs-unreviewed; a-bg: #E65100; a-fg: white; i-border: #FFA726; i-fg: #555555; clicked => { root.toggle-status("unreviewed"); } }
+                        FBtn { label: "Suspense";    count: root.fc-suspense;   active: root.fs-suspense;   a-bg: #7B1FA2; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.toggle-status("suspense"); } }
+                        FBtn { label: "High Conf.";  count: root.fc-high;       active: root.fs-high;       a-bg: #1B5E20; a-fg: white; i-border: #43A047; i-fg: #555555; clicked => { root.toggle-status("high"); } }
+                        FBtn { label: "Duplicates";  count: root.fc-duplicates; active: root.fs-dups;       a-bg: #880E4F; a-fg: white; i-border: #E91E63; i-fg: #555555; clicked => { root.toggle-status("duplicates"); } }
+                        FBtn { label: "GST/Tax";     count: root.fc-gst;        active: root.fs-gst;        a-bg: #2E7D32; a-fg: white; i-border: #66BB6A; i-fg: #555555; clicked => { root.toggle-status("gst"); } }
+                        FBtn { label: "Needs Review"; count: root.fc-review;    active: root.fs-review;     a-bg: #E65100; a-fg: white; i-border: #E67E22; i-fg: #E67E22; clicked => { root.toggle-status("needs_review"); } }
 
                         Rectangle { width: 1px; height: 26px; background: #BBDEFB; }
                         Text { text: "Bank:"; font-size: 11px; color: #607D8B; vertical-alignment: center; }
@@ -1066,6 +1076,79 @@ export component MainScreen inherits Rectangle {
                             Text { text: "Compact"; font-size: 11px;
                                    color: root.compact-mode ? #1565C0 : #546E7A;
                                    horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                // ── Active filter chip bar (shown when any status filter is on) ──────
+                if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits : Rectangle {
+                    height: 32px; background: #F8F9FA; border-width: 0px;
+                    Rectangle { y: 0px; height: 1px; background: #E0E0E0; width: parent.width; }
+                    HorizontalLayout { padding-left: 12px; padding-right: 12px; padding-top: 0px; padding-bottom: 0px; spacing: 6px; alignment: start;
+                        Text { text: "Filters:"; font-size: 10px; font-weight: 700; color: #607D8B; vertical-alignment: center; }
+                        if root.fs-unreviewed : Rectangle {
+                            height: 20px; border-radius: 10px; background: #E65100;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Unreviewed"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("unreviewed"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-suspense : Rectangle {
+                            height: 20px; border-radius: 10px; background: #7B1FA2;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Suspense"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("suspense"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-high : Rectangle {
+                            height: 20px; border-radius: 10px; background: #1B5E20;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "High Conf."; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("high"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-dups : Rectangle {
+                            height: 20px; border-radius: 10px; background: #880E4F;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Duplicates"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("duplicates"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-gst : Rectangle {
+                            height: 20px; border-radius: 10px; background: #2E7D32;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "GST/Tax"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("gst"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-review : Rectangle {
+                            height: 20px; border-radius: 10px; background: #E65100;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Needs Review"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("needs_review"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-credits : Rectangle {
+                            height: 20px; border-radius: 10px; background: #2E7D32;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Credits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("credits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-debits : Rectangle {
+                            height: 20px; border-radius: 10px; background: #C62828;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Debits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("debits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Rectangle {
+                            height: 20px; border-radius: 10px; background: #ECEFF1; border-width: 1px; border-color: #B0BEC5;
+                            HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 0px;
+                                Text { text: "Clear All"; font-size: 10px; color: #546E7A; font-weight: 600; vertical-alignment: center; }
+                            }
+                            TouchArea { clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
                         }
                     }
                 }

@@ -124,6 +124,15 @@ export component AppWindow inherits Window {
     in-out property <string> edit-client-name:   "";
     in-out property <string> edit-client-ledger: "";
     in property <string>     dash-client-ledger: "";
+    // ── Multi-status filter toggle state (set by Rust) ───────────────────────
+    in property <bool> fs-unreviewed: false;
+    in property <bool> fs-suspense:   false;
+    in property <bool> fs-high:       false;
+    in property <bool> fs-dups:       false;
+    in property <bool> fs-gst:        false;
+    in property <bool> fs-review:     false;
+    in property <bool> fs-credits:    false;
+    in property <bool> fs-debits:     false;
     // ── Batch monitor log + per-file rows ─────────────────────────────────────
     in property <string>          batch-log: "";
     in property <[BatchFileRow]>  batch-file-rows: [];
@@ -168,6 +177,7 @@ export component AppWindow inherits Window {
     callback do-export-tally();
     callback do-export-accounting();
     callback do-export-preview();
+    callback do-toggle-status(string);
     callback do-reimport-excel();
     callback do-reset-dedupe();
     callback do-reconcile();
@@ -309,6 +319,14 @@ export component AppWindow inherits Window {
         edit-client-name   <=> root.edit-client-name;
         edit-client-ledger <=> root.edit-client-ledger;
         dash-client-ledger:    root.dash-client-ledger;
+        fs-unreviewed:         root.fs-unreviewed;
+        fs-suspense:           root.fs-suspense;
+        fs-high:               root.fs-high;
+        fs-dups:               root.fs-dups;
+        fs-gst:                root.fs-gst;
+        fs-review:             root.fs-review;
+        fs-credits:            root.fs-credits;
+        fs-debits:             root.fs-debits;
         batch-log:             root.batch-log;
         batch-file-rows:       root.batch-file-rows;
         export-preview-text:   root.export-preview-text;
@@ -348,6 +366,7 @@ export component AppWindow inherits Window {
         export-tally        => { root.do-export-tally();        }
         export-accounting   => { root.do-export-accounting();   }
         export-preview      => { root.do-export-preview();      }
+        toggle-status(s)    => { root.do-toggle-status(s);      }
         reimport-excel      => { root.do-reimport-excel();      }
         reset-dedupe        => { root.do-reset-dedupe();        }
         reconcile           => { root.do-reconcile();           }

@@ -37,7 +37,8 @@ pub struct AppState {
     pub transactions:    Vec<crate::parser::Transaction>,
 
     // Active filter state — kept in sync with Slint UI
-    pub active_filter:  String,   // "all" | "unreviewed" | "suspense" | "high" | "duplicates" | "gst" | "needs_review"
+    pub active_filter:  String,   // "all" | "unreviewed" | "suspense" | "high" | "duplicates" | "gst" | "needs_review" | "multi"
+    pub filter_statuses: Vec<String>, // OR-logic multi-status set; empty = "all"
     pub date_from:      String,   // DD/MM/YYYY
     pub date_to:        String,   // DD/MM/YYYY
     pub bank_filter:    String,   // "" means All Banks
