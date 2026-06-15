@@ -1462,7 +1462,7 @@ export component MainScreen inherits Rectangle {
                 // &#8659; = ⇓ (U+21D3 DOWNWARDS DOUBLE ARROW) from original HTML
                 FootBtn { text: "\u{21D3} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.modal-state = "export-wizard"; } }
                 FootBtn { text: "Quick Tally XML";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "tally-export"; } }
-                FootBtn { text: "Re-import Excel";        enabled: false; clicked => { root.reimport-excel(); } }
+                FootBtn { text: "Re-import Excel";        enabled: root.transaction-rows.length > 0; clicked => { root.reimport-excel(); } }
                 FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => { root.reset-dedupe(); } }
 
                 Rectangle { width: 1px; height: 28px; background: #90CAF9; }
