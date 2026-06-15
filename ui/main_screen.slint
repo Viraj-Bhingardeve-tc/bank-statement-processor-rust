@@ -17,6 +17,13 @@ export struct BatchFileRow {
     err-msg: string,
 }
 
+// ── Generic summary list row (label + value, optional color hint) ─────────────
+export struct SummaryListRow {
+    lbl:      string,
+    val:      string,
+    is-debit: bool,
+}
+
 // ── Transaction row data struct ────────────────────────────────────────────────
 export struct TxnRow {
     bank-name:    string,
@@ -672,6 +679,20 @@ export component MainScreen inherits Rectangle {
     in property <string> dash-ins-freq-vendor: "—";
     // Dashboard filter callbacks
     callback dash-filter-changed(string, string, string, string, string);
+    // ── Summary panel extra data ──────────────────────────────────────────────
+    // Classification quality (fractions 0.0–1.0 for bar widths; counts as strings)
+    in property <float>  dash-conf-hi-frac:   0.0;
+    in property <float>  dash-conf-med-frac:  0.0;
+    in property <string> dash-conf-hi-count:  "0";
+    in property <string> dash-conf-med-count: "0";
+    in property <string> dash-conf-lo-count:  "0";
+    // GST amounts
+    in property <string> dash-gst-paid: "₹ —";
+    in property <string> dash-gst-recv: "₹ —";
+    // Recurring parties (top 6) and ledger breakdowns (top 8)
+    in property <[SummaryListRow]> dash-parties:     [];
+    in property <[SummaryListRow]> dash-rec-ledgers: [];
+    in property <[SummaryListRow]> dash-pay-ledgers: [];
 
     in property <string> fc-all:        "0";
     in property <string> fc-unreviewed: "0";
@@ -1376,6 +1397,79 @@ export component MainScreen inherits Rectangle {
                                 SR { lbl: "GST / Tax";  val: root.dash-gst-count;  vcol: #6A1B9A; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "gst";        root.drill-filter("gst"); } }
                                 SR { lbl: "Vendors";    val: root.dash-vendors;    vcol: #546E7A; }
 
+                                // ── Classification Quality card ───────────────────────────────────────
+                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : SDivider { title: "CLASSIFICATION QUALITY"; }
+                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : Rectangle {
+                                    height: 10px; border-radius: 4px; clip: true; background: #FFCDD2;
+                                    // High conf segment (green, left)
+                                    Rectangle {
+                                        x: 0; y: 0; height: parent.height; background: #A5D6A7;
+                                        width: parent.width * root.dash-conf-hi-frac;
+                                    }
+                                    // Medium conf segment (yellow, after green)
+                                    Rectangle {
+                                        x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #FFF176;
+                                        width: parent.width * root.dash-conf-med-frac;
+                                    }
+                                }
+                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : HorizontalBox {
+                                    padding: 0px; spacing: 4px;
+                                    for chip in [
+                                        { lbl: "HIGH " + root.dash-conf-hi-count,  bg: #C8E6C9, fg: #1B5E20, bc: #81C784 },
+                                        { lbl: "MED "  + root.dash-conf-med-count, bg: #FFF9C4, fg: #F57F17, bc: #FFD54F },
+                                        { lbl: "LOW "  + root.dash-conf-lo-count,  bg: #FFCDD2, fg: #C62828, bc: #EF9A9A },
+                                    ] : Rectangle {
+                                        height: 18px; horizontal-stretch: 1;
+                                        background: chip.bg; border-radius: 4px;
+                                        border-width: 1px; border-color: chip.bc;
+                                        Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+
+                                // ── GST / Tax amounts ─────────────────────────────────────────────────
+                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SDivider { title: "GST / TAX"; }
+                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Paid";        val: root.dash-gst-paid; vcol: #C62828; }
+                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Recv./Refund"; val: root.dash-gst-recv; vcol: #2E7D32; }
+
+                                // ── Recurring parties ─────────────────────────────────────────────────
+                                if root.dash-parties.length > 0 : SDivider { title: "RECURRING PARTIES"; }
+                                for p in root.dash-parties : HorizontalBox {
+                                    padding: 0px; spacing: 4px;
+                                    Text {
+                                        text: p.lbl; font-size: 11px; color: #0D47A1; horizontal-stretch: 1;
+                                        overflow: elide; vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: p.val; font-size: 10px; color: #555555; vertical-alignment: center;
+                                    }
+                                }
+
+                                // ── Receipts by Ledger ────────────────────────────────────────────────
+                                if root.dash-rec-ledgers.length > 0 : SDivider { title: "RECEIPTS BY LEDGER"; }
+                                for r in root.dash-rec-ledgers : HorizontalBox {
+                                    padding: 0px; spacing: 4px;
+                                    Text {
+                                        text: r.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
+                                        overflow: elide; vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: r.val; font-size: 10px; color: #2E7D32; font-weight: 600; vertical-alignment: center;
+                                    }
+                                }
+
+                                // ── Payments by Ledger ────────────────────────────────────────────────
+                                if root.dash-pay-ledgers.length > 0 : SDivider { title: "PAYMENTS BY LEDGER"; }
+                                for p in root.dash-pay-ledgers : HorizontalBox {
+                                    padding: 0px; spacing: 4px;
+                                    Text {
+                                        text: p.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
+                                        overflow: elide; vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: p.val; font-size: 10px; color: #C62828; font-weight: 600; vertical-alignment: center;
+                                    }
+                                }
+
                                 Rectangle { height: 6px; }
                                 if root.status-bank != "" : Text {
                                     text: root.status-bank; font-size: 10px;
@@ -1685,7 +1779,7 @@ export component MainScreen inherits Rectangle {
                         CheckBox { text: "Auto-suggest GST ledgers"; checked <=> root.settings-gst-auto-ledgers; }
                         HorizontalBox { padding: 0px; spacing: 8px;
                             Text { text: "Default State"; font-size: 11px; color: #546E7A; vertical-alignment: center; }
-                            ComboBox { model: ["Maharashtra (MH)", "Gujarat (GJ)", "Delhi (DL)", "Karnataka (KA)"]; min-width: 160px; }
+                            ComboBox { model: ["Maharashtra (MH)", "Gujarat (GJ)", "Delhi (DL)", "Karnataka (KA)", "Tamil Nadu (TN)", "Telangana (TG)", "Rajasthan (RJ)", "UP (UP)", "West Bengal (WB)"]; min-width: 200px; }
                         }
                         Rectangle { height: 1px; background: #E3F2FD; }
                         Text { text: "RECONCILIATION"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }

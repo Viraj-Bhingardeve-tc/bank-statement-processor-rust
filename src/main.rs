@@ -570,6 +570,100 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
     h.set_dash_filter_heads(slint::ModelRc::new(slint::VecModel::from(head_opts)));
 }
 
+// ── Populate summary-panel extras: conf quality, GST amounts, parties, ledgers ─
+
+#[cfg(feature = "slint-ui")]
+fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
+    use std::collections::HashMap;
+
+    let real: Vec<&parser::Transaction> = txns.iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    if real.is_empty() {
+        h.set_dash_parties(slint::ModelRc::new(slint::VecModel::<SummaryListRow>::from(vec![])));
+        h.set_dash_rec_ledgers(slint::ModelRc::new(slint::VecModel::<SummaryListRow>::from(vec![])));
+        h.set_dash_pay_ledgers(slint::ModelRc::new(slint::VecModel::<SummaryListRow>::from(vec![])));
+        return;
+    }
+
+    // ── Classification quality ────────────────────────────────────────────────
+    let total = real.len() as f64;
+    let hi_cnt  = real.iter().filter(|t| t.confidence >= 0.8).count();
+    let med_cnt = real.iter().filter(|t| t.confidence >= 0.4 && t.confidence < 0.8).count();
+    let lo_cnt  = real.iter().filter(|t| t.confidence < 0.4).count();
+    h.set_dash_conf_hi_frac((hi_cnt as f32 / total as f32).min(1.0));
+    h.set_dash_conf_med_frac((med_cnt as f32 / total as f32).min(1.0));
+    h.set_dash_conf_hi_count(SharedString::from(hi_cnt.to_string().as_str()));
+    h.set_dash_conf_med_count(SharedString::from(med_cnt.to_string().as_str()));
+    h.set_dash_conf_lo_count(SharedString::from(lo_cnt.to_string().as_str()));
+
+    // ── GST paid / received ───────────────────────────────────────────────────
+    let gst_txns: Vec<&&parser::Transaction> = real.iter()
+        .filter(|t| t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }))
+        .collect();
+    let gst_paid: f64 = gst_txns.iter().filter_map(|t| t.debit).sum();
+    let gst_recv: f64 = gst_txns.iter().filter_map(|t| t.credit).sum();
+    h.set_dash_gst_paid(SharedString::from(
+        ui::AppState::fmt_amount(if gst_paid > 0.0 { Some(gst_paid) } else { None }).as_str()));
+    h.set_dash_gst_recv(SharedString::from(
+        ui::AppState::fmt_amount(if gst_recv > 0.0 { Some(gst_recv) } else { None }).as_str()));
+
+    // ── Recurring parties (top 6 by count) ───────────────────────────────────
+    let mut party_map: HashMap<String, (usize, f64)> = HashMap::new();
+    for t in &real {
+        if t.vendor.is_empty() { continue; }
+        let e = party_map.entry(t.vendor.clone()).or_insert((0, 0.0));
+        e.0 += 1;
+        e.1 += t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0);
+    }
+    let mut parties: Vec<(String, usize, f64)> = party_map.into_iter()
+        .map(|(k, (cnt, amt))| (k, cnt, amt))
+        .collect();
+    parties.sort_by(|a, b| b.1.cmp(&a.1));
+    parties.truncate(6);
+    let party_rows: Vec<SummaryListRow> = parties.iter().map(|(name, cnt, amt)| {
+        let nm = if name.chars().count() > 20 {
+            format!("{}…", name.chars().take(19).collect::<String>())
+        } else { name.clone() };
+        SummaryListRow {
+            lbl: SharedString::from(nm.as_str()),
+            val: SharedString::from(format!("{}×  ₹{}", cnt, ui::fmt_inr(*amt)).as_str()),
+            is_debit: false,
+        }
+    }).collect();
+    h.set_dash_parties(slint::ModelRc::new(slint::VecModel::from(party_rows)));
+
+    // ── Ledger breakdowns (top 8 by amount) ──────────────────────────────────
+    let mut rec_map: HashMap<String, f64> = HashMap::new();
+    let mut pay_map: HashMap<String, f64> = HashMap::new();
+    for t in &real {
+        if t.account_head.is_empty() { continue; }
+        if let Some(cr) = t.credit {
+            *rec_map.entry(t.account_head.clone()).or_insert(0.0) += cr;
+        }
+        if let Some(dr) = t.debit {
+            *pay_map.entry(t.account_head.clone()).or_insert(0.0) += dr;
+        }
+    }
+    let make_ledger_rows = |map: HashMap<String, f64>| -> Vec<SummaryListRow> {
+        let mut v: Vec<(String, f64)> = map.into_iter().collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v.truncate(8);
+        v.iter().map(|(k, amt)| {
+            let nm = if k.chars().count() > 22 {
+                format!("{}…", k.chars().take(21).collect::<String>())
+            } else { k.clone() };
+            SummaryListRow {
+                lbl: SharedString::from(nm.as_str()),
+                val: SharedString::from(format!("₹{}", ui::fmt_inr(*amt)).as_str()),
+                is_debit: false,
+            }
+        }).collect()
+    };
+    h.set_dash_rec_ledgers(slint::ModelRc::new(slint::VecModel::from(make_ledger_rows(rec_map))));
+    h.set_dash_pay_ledgers(slint::ModelRc::new(slint::VecModel::from(make_ledger_rows(pay_map))));
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "slint-ui")]
@@ -777,6 +871,7 @@ fn apply_parse_result(
     h.set_dash_calc_closing(SharedString::from(ui::AppState::fmt_amount(calc_closing).as_str()));
     h.set_dash_has_mismatch(has_mismatch);
     h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
+    push_summary_extras(h, &result.transactions);
 
     let import_id_persisted: Option<i64> = {
         let client_id = state_ref.lock().unwrap().client_id;
@@ -845,6 +940,7 @@ fn apply_parse_result(
 
     let txns_all: Vec<parser::Transaction> = result.transactions.clone();
     push_dashboard(h, &txns_all, result.opening_balance);
+    push_summary_extras(h, &txns_all);
 
     log::info!("UI updated with {} transactions", real.len());
 }
@@ -1301,6 +1397,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 push_dashboard(&h, &all_txns, first_ob);
+                push_summary_extras(&h, &all_txns);
                 let batch_event = format!("[{}] Import — {} file(s), {} transactions loaded", audit_now(), loaded, real.len());
                 {
                     let mut st = state_ref.lock().unwrap();
@@ -1391,6 +1488,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log::info!("[AutoClassify] classified {} transactions (rules={})", changed, rules.len());
                 rebuild_rows(&h, &st);
                 push_dashboard(&h, &st.transactions, st.opening_balance);
+                push_summary_extras(&h, &st.transactions);
                 let total_dr: f64 = st.transactions.iter().filter_map(|t| t.debit).sum();
                 let total_cr: f64 = st.transactions.iter().filter_map(|t| t.credit).sum();
                 h.set_dash_credits(SharedString::from(ui::AppState::fmt_amount(Some(total_cr)).as_str()));
@@ -1453,6 +1551,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 h2.set_ai_overlay_visible(false);
                                 rebuild_rows(&h2, &st);
                                 push_dashboard(&h2, &st.transactions, st.opening_balance);
+                                push_summary_extras(&h2, &st.transactions);
                             }
                         });
                     });
@@ -2259,6 +2358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 drop(st);
                 if !txns.is_empty() {
                     push_dashboard(&h, &txns, opening_bal);
+                    push_summary_extras(&h, &txns);
                 }
                 let msg = format!("Loaded {} transactions from database for current client.", txn_count);
                 h.set_batch_log(SharedString::from(msg.as_str()));
@@ -2696,6 +2796,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rebuild_rows(&h, &st);
                 if !txns.is_empty() {
                     push_dashboard(&h, &st.transactions, st.opening_balance);
+                    push_summary_extras(&h, &st.transactions);
                 }
                 drop(st);
 
@@ -2845,6 +2946,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rebuild_rows(&h, &st);
                 if !txns.is_empty() {
                     push_dashboard(&h, &txns, opening_bal);
+                    push_summary_extras(&h, &txns);
                 }
                 h.set_status_bank(SharedString::from("Import reloaded from database"));
                 log::info!("[ReloadImport] import_id={} txns={}", import_id, txns.len());

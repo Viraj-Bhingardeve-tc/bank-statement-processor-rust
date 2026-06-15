@@ -1,7 +1,7 @@
 // app.slint — Root window. Switches between LoginScreen and MainScreen.
 
 import { LoginScreen } from "login.slint";
-import { MainScreen, TxnRow, BatchFileRow } from "main_screen.slint";
+import { MainScreen, TxnRow, BatchFileRow, SummaryListRow } from "main_screen.slint";
 import { DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 export component AppWindow inherits Window {
@@ -119,6 +119,18 @@ export component AppWindow inherits Window {
     in property <string> dash-ins-dr-count:    "";
     in property <string> dash-ins-cr-count:    "";
     in property <string> dash-ins-freq-vendor: "—";
+
+    // ── Summary panel extras ──────────────────────────────────────────────────
+    in property <float>  dash-conf-hi-frac:   0.0;
+    in property <float>  dash-conf-med-frac:  0.0;
+    in property <string> dash-conf-hi-count:  "0";
+    in property <string> dash-conf-med-count: "0";
+    in property <string> dash-conf-lo-count:  "0";
+    in property <string> dash-gst-paid:       "₹ —";
+    in property <string> dash-gst-recv:       "₹ —";
+    in property <[SummaryListRow]> dash-parties:     [];
+    in property <[SummaryListRow]> dash-rec-ledgers: [];
+    in property <[SummaryListRow]> dash-pay-ledgers: [];
 
     // ── Edit client fields ────────────────────────────────────────────────────
     in-out property <string> edit-client-name:   "";
@@ -278,6 +290,17 @@ export component AppWindow inherits Window {
         dash-calc-closing: root.dash-calc-closing;
         dash-has-mismatch: root.dash-has-mismatch;
         dash-mismatch:     root.dash-mismatch;
+
+        dash-conf-hi-frac:   root.dash-conf-hi-frac;
+        dash-conf-med-frac:  root.dash-conf-med-frac;
+        dash-conf-hi-count:  root.dash-conf-hi-count;
+        dash-conf-med-count: root.dash-conf-med-count;
+        dash-conf-lo-count:  root.dash-conf-lo-count;
+        dash-gst-paid:       root.dash-gst-paid;
+        dash-gst-recv:       root.dash-gst-recv;
+        dash-parties:        root.dash-parties;
+        dash-rec-ledgers:    root.dash-rec-ledgers;
+        dash-pay-ledgers:    root.dash-pay-ledgers;
 
         fc-all:            root.fc-all;
         fc-unreviewed:     root.fc-unreviewed;
