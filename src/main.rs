@@ -517,12 +517,17 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
             let cr = data.monthly.credits.get(i).cloned().unwrap_or(0.0);
             let dr = data.monthly.debits.get(i).cloned().unwrap_or(0.0);
             let scale = if max_monthly > 0.0 { max_monthly } else { 1.0 };
+            let (range_from, range_to) = data.monthly.keys.get(i)
+                .and_then(|k| analytics::month_key_to_range(k))
+                .unwrap_or_default();
             DashMonthBar {
                 label:      SharedString::from(lbl.as_str()),
                 credit_h:   (cr / scale) as f32,
                 debit_h:    (dr / scale) as f32,
                 credit_str: SharedString::from(fmt_amt(Some(cr)).as_str()),
                 debit_str:  SharedString::from(fmt_amt(Some(dr)).as_str()),
+                range_from: SharedString::from(range_from.as_str()),
+                range_to:   SharedString::from(range_to.as_str()),
             }
         })
         .collect();

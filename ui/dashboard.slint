@@ -10,6 +10,8 @@ export struct DashMonthBar {
     debit-h:    float,
     credit-str: string,
     debit-str:  string,
+    range-from: string,   // "01/MM/YYYY" — first day of this month
+    range-to:   string,   // "DD/MM/YYYY" — last day of this month
 }
 
 export struct DashExpBar {
@@ -165,6 +167,7 @@ component InsCard inherits Rectangle {
 // ── Monthly bar chart ──────────────────────────────────────────────────────────
 component MonthlyChart inherits Rectangle {
     in property <[DashMonthBar]> data: [];
+    callback month-clicked(string, string);  // (range-from, range-to)
 
     VerticalBox {
         padding: 0px; spacing: 0px;
@@ -208,6 +211,11 @@ component MonthlyChart inherits Rectangle {
                         background: #C62828;
                         border-radius: 2px;
                         opacity: 0.75;
+                    }
+                    TouchArea {
+                        x: 0px; y: 0px; width: parent.width; height: parent.height;
+                        mouse-cursor: pointer;
+                        clicked => { root.month-clicked(bar.range-from, bar.range-to); }
                     }
                 }
             }
@@ -679,6 +687,14 @@ export component DashboardScreen inherits Rectangle {
                         MonthlyChart {
                             data: root.chart-monthly;
                             vertical-stretch: 1;
+                            month-clicked(f, t) => {
+                                root.dash-from = f;
+                                root.dash-to = t;
+                                root.dash-filter-changed(f, t,
+                                    root.filter-banks[root.dash-bank-idx],
+                                    root.filter-vendors[root.dash-vendor-idx],
+                                    root.filter-heads[root.dash-head-idx]);
+                            }
                         }
                     }
 

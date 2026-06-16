@@ -121,8 +121,32 @@ pub struct DashSummary {
 #[derive(Debug, Clone)]
 pub struct MonthlyAgg {
     pub labels:  Vec<String>,
+    pub keys:    Vec<String>,  // "YYYY-MM", same order as labels/credits/debits
     pub credits: Vec<f64>,
     pub debits:  Vec<f64>,
+}
+
+/// Days in a given (1-indexed) month/year, accounting for leap years.
+fn days_in_month(mm: u32, yyyy: i32) -> u32 {
+    match mm {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if (yyyy % 4 == 0 && yyyy % 100 != 0) || yyyy % 400 == 0 { 29 } else { 28 },
+        _ => 30,
+    }
+}
+
+/// "YYYY-MM" -> (first day, last day) as "DD/MM/YYYY" strings.
+pub fn month_key_to_range(key: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = key.split('-').collect();
+    if parts.len() != 2 { return None; }
+    let yyyy = parts[0].parse::<i32>().ok()?;
+    let mm   = parts[1].parse::<u32>().ok()?;
+    let last = days_in_month(mm, yyyy);
+    Some((
+        format!("01/{:02}/{:04}", mm, yyyy),
+        format!("{:02}/{:02}/{:04}", last, mm, yyyy),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +241,7 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
     let max_monthly = month_map.values().map(|(c, d)| c.max(*d)).fold(0.0f64, f64::max);
     let monthly = MonthlyAgg {
         labels:  month_map.keys().map(|k| month_label(k)).collect(),
+        keys:    month_map.keys().cloned().collect(),
         credits: month_map.values().map(|(c, _)| *c).collect(),
         debits:  month_map.values().map(|(_, d)| *d).collect(),
     };
