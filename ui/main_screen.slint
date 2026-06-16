@@ -22,6 +22,7 @@ export struct SummaryListRow {
     lbl:      string,
     val:      string,
     is-debit: bool,
+    key:      string,
 }
 
 // ── Transaction row data struct ────────────────────────────────────────────────
@@ -584,6 +585,8 @@ export component MainScreen inherits Rectangle {
     callback date-filter-apply(string, string);
     callback date-preset(string);
     callback bank-filter-changed(string);
+    callback vendor-filter-changed(string);
+    callback head-filter-changed(string);
     callback drill-filter(string);  // dashboard stat row drill-down: sets filter + switches to txns view
     callback export-excel();
     callback export-tally();
@@ -731,6 +734,9 @@ export component MainScreen inherits Rectangle {
     in-out property <string> active-filter:   "all";
     // Bank filter — tracks ComboBox selection for chip display
     private property <string> sel-bank: "All Banks";
+    // Vendor / ledger-head filter — set when a summary-panel row is clicked
+    private property <string> sel-vendor: "";
+    private property <string> sel-head:   "";
     // Multi-status filter toggle state (set by Rust after toggle-status callback)
     in property <bool> fs-unreviewed: false;
     in property <bool> fs-suspense:   false;
@@ -1106,7 +1112,7 @@ export component MainScreen inherits Rectangle {
                 }
 
                 // ── Active filter chip bar (shown when any status/bank filter is on) ──────
-                if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits || (root.sel-bank != "All Banks" && root.sel-bank != "") : Rectangle {
+                if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits || (root.sel-bank != "All Banks" && root.sel-bank != "") || root.sel-vendor != "" || root.sel-head != "" : Rectangle {
                     height: 32px; background: #F8F9FA; border-width: 0px;
                     Rectangle { y: 0px; height: 1px; background: #E0E0E0; width: parent.width; }
                     HorizontalLayout { padding-left: 12px; padding-right: 12px; padding-top: 0px; padding-bottom: 0px; spacing: 6px; alignment: start;
@@ -1177,13 +1183,37 @@ export component MainScreen inherits Rectangle {
                                 }
                             }
                         }
+                        if root.sel-vendor != "" : Rectangle {
+                            height: 20px; border-radius: 10px; background: #6A1B9A;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: root.sel-vendor; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    TouchArea { clicked => { root.sel-vendor = ""; root.vendor-filter-changed(""); } }
+                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                        if root.sel-head != "" : Rectangle {
+                            height: 20px; border-radius: 10px; background: #00695C;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: root.sel-head; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    TouchArea { clicked => { root.sel-head = ""; root.head-filter-changed(""); } }
+                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
                         Rectangle { horizontal-stretch: 1; }
                         Rectangle {
                             height: 20px; border-radius: 10px; background: #ECEFF1; border-width: 1px; border-color: #B0BEC5;
                             HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 0px;
                                 Text { text: "Clear All"; font-size: 10px; color: #546E7A; font-weight: 600; vertical-alignment: center; }
                             }
-                            TouchArea { clicked => { root.sel-bank = "All Banks"; root.active-filter = "all"; root.filter-changed("all"); root.bank-filter-changed("All Banks"); } }
+                            TouchArea { clicked => {
+                                root.sel-bank = "All Banks"; root.sel-vendor = ""; root.sel-head = "";
+                                root.active-filter = "all"; root.filter-changed("all");
+                                root.bank-filter-changed("All Banks"); root.vendor-filter-changed(""); root.head-filter-changed("");
+                            } }
                         }
                     }
                 }
@@ -1447,40 +1477,64 @@ export component MainScreen inherits Rectangle {
 
                                 // ── Recurring parties ─────────────────────────────────────────────────
                                 if root.dash-parties.length > 0 : SDivider { title: "RECURRING PARTIES"; }
-                                for p in root.dash-parties : HorizontalBox {
-                                    padding: 0px; spacing: 4px;
-                                    Text {
-                                        text: p.lbl; font-size: 11px; color: #0D47A1; horizontal-stretch: 1;
-                                        overflow: elide; vertical-alignment: center;
+                                for p in root.dash-parties : Rectangle {
+                                    height: 18px;
+                                    HorizontalLayout {
+                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: p.lbl; font-size: 11px; color: #0D47A1; horizontal-stretch: 1;
+                                            overflow: elide; vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: p.val; font-size: 10px; color: #555555; vertical-alignment: center;
+                                        }
                                     }
-                                    Text {
-                                        text: p.val; font-size: 10px; color: #555555; vertical-alignment: center;
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-vendor = p.key; root.vendor-filter-changed(p.key); }
                                     }
                                 }
 
                                 // ── Receipts by Ledger ────────────────────────────────────────────────
                                 if root.dash-rec-ledgers.length > 0 : SDivider { title: "RECEIPTS BY LEDGER"; }
-                                for r in root.dash-rec-ledgers : HorizontalBox {
-                                    padding: 0px; spacing: 4px;
-                                    Text {
-                                        text: r.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
-                                        overflow: elide; vertical-alignment: center;
+                                for r in root.dash-rec-ledgers : Rectangle {
+                                    height: 18px;
+                                    HorizontalLayout {
+                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: r.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
+                                            overflow: elide; vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: r.val; font-size: 10px; color: #2E7D32; font-weight: 600; vertical-alignment: center;
+                                        }
                                     }
-                                    Text {
-                                        text: r.val; font-size: 10px; color: #2E7D32; font-weight: 600; vertical-alignment: center;
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-head = r.key; root.head-filter-changed(r.key); }
                                     }
                                 }
 
                                 // ── Payments by Ledger ────────────────────────────────────────────────
                                 if root.dash-pay-ledgers.length > 0 : SDivider { title: "PAYMENTS BY LEDGER"; }
-                                for p in root.dash-pay-ledgers : HorizontalBox {
-                                    padding: 0px; spacing: 4px;
-                                    Text {
-                                        text: p.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
-                                        overflow: elide; vertical-alignment: center;
+                                for p in root.dash-pay-ledgers : Rectangle {
+                                    height: 18px;
+                                    HorizontalLayout {
+                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: p.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
+                                            overflow: elide; vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: p.val; font-size: 10px; color: #C62828; font-weight: 600; vertical-alignment: center;
+                                        }
                                     }
-                                    Text {
-                                        text: p.val; font-size: 10px; color: #C62828; font-weight: 600; vertical-alignment: center;
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-head = p.key; root.head-filter-changed(p.key); }
                                     }
                                 }
 

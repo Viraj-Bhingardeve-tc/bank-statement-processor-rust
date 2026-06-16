@@ -187,6 +187,8 @@ export component AppWindow inherits Window {
     callback do-date-filter-apply(string, string);
     callback do-date-preset(string);
     callback do-bank-filter(string);
+    callback do-vendor-filter(string);
+    callback do-head-filter(string);
     callback do-export-excel();
     callback do-export-tally();
     callback do-export-accounting();
@@ -389,6 +391,8 @@ export component AppWindow inherits Window {
         date-filter-apply(a,b) => { root.do-date-filter-apply(a, b); }
         date-preset(p)      => { root.do-date-preset(p);        }
         bank-filter-changed(b) => { root.do-bank-filter(b);     }
+        vendor-filter-changed(v) => { root.do-vendor-filter(v); }
+        head-filter-changed(hd) => { root.do-head-filter(hd);  }
         export-excel        => { root.do-export-excel();        }
         export-tally        => { root.do-export-tally();        }
         export-accounting   => { root.do-export-accounting();   }

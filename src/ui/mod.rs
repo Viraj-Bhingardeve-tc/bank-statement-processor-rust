@@ -53,6 +53,8 @@ pub struct AppState {
     pub date_from:      String,   // DD/MM/YYYY
     pub date_to:        String,   // DD/MM/YYYY
     pub bank_filter:    String,   // "" means All Banks
+    pub vendor_filter:  String,   // "" means no vendor filter
+    pub head_filter:    String,   // "" means no ledger/head filter
     pub dedup_enabled:  bool,     // mirrors the Dedupe checkbox in the toolbar
 
     // Export wizard state (synced from the UI before generating)

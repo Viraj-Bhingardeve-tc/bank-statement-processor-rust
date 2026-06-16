@@ -279,6 +279,8 @@ fn apply_txn_filters<'a>(
     from:    &str,
     to:      &str,
     bank:    &str,
+    vendor:  &str,
+    head:    &str,
 ) -> Vec<&'a parser::Transaction> {
     txns.iter()
         .filter(|t| !t.is_opening_balance)
@@ -298,6 +300,8 @@ fn apply_txn_filters<'a>(
             true
         })
         .filter(|t| bank.is_empty() || bank == "All Banks" || t.bank_name == bank)
+        .filter(|t| vendor.is_empty() || t.vendor == vendor)
+        .filter(|t| head.is_empty() || t.account_head == head)
         .collect()
 }
 
@@ -375,6 +379,8 @@ fn rebuild_rows(h: &AppWindow, st: &ui::AppState) {
         &st.date_from,
         &st.date_to,
         &st.bank_filter,
+        &st.vendor_filter,
+        &st.head_filter,
     );
     let rows = build_txn_rows(&filtered);
     h.set_transaction_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
@@ -629,6 +635,7 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
             lbl: SharedString::from(nm.as_str()),
             val: SharedString::from(format!("{}×  ₹{}", cnt, ui::fmt_inr(*amt)).as_str()),
             is_debit: false,
+            key: SharedString::from(name.as_str()),
         }
     }).collect();
     h.set_dash_parties(slint::ModelRc::new(slint::VecModel::from(party_rows)));
@@ -657,6 +664,7 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
                 lbl: SharedString::from(nm.as_str()),
                 val: SharedString::from(format!("₹{}", ui::fmt_inr(*amt)).as_str()),
                 is_debit: false,
+                key: SharedString::from(k.as_str()),
             }
         }).collect()
     };
@@ -923,6 +931,8 @@ fn apply_parse_result(
         st.date_from       = String::new();
         st.date_to         = String::new();
         st.bank_filter     = String::new();
+        st.vendor_filter   = String::new();
+        st.head_filter     = String::new();
         st.pending_pdf_path = None;
         st.pending_pdf_name = String::new();
         if let Some(iid) = import_id_persisted {
@@ -1394,6 +1404,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.date_from       = String::new();
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
+                    st.vendor_filter   = String::new();
+                    st.head_filter     = String::new();
                     st.import_ids.extend(new_import_ids.iter());
                     st.batch_file_results = batch_results;
                 }
@@ -1798,6 +1810,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rebuild_rows(&h, &st);
             });
         }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_vendor_filter(move |vendor| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                st.vendor_filter = vendor.to_string();
+                rebuild_rows(&h, &st);
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_head_filter(move |head| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+                st.head_filter = head.to_string();
+                rebuild_rows(&h, &st);
+            });
+        }
         // ── Export Excel (XLSX primary, CSV fallback) ─────────────────────────
         {
             let state_ref = app_state.clone();
@@ -2138,6 +2170,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.date_from     = String::new();
                     st.date_to       = String::new();
                     st.bank_filter   = String::new();
+                    st.vendor_filter = String::new();
+                    st.head_filter   = String::new();
                     st.file_name     = file_name.clone();
                 }
 
@@ -2354,6 +2388,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.date_from       = String::new();
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
+                    st.vendor_filter   = String::new();
+                    st.head_filter     = String::new();
                 }
                 let st = state_ref.lock().unwrap();
                 rebuild_rows(&h, &st);
@@ -2789,6 +2825,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.date_from     = String::new();
                     st.date_to       = String::new();
                     st.bank_filter   = String::new();
+                    st.vendor_filter = String::new();
+                    st.head_filter   = String::new();
                     st.ai_provider   = cfg.ai_provider.clone();
                     st.ai_api_key    = cfg.ai_api_key.clone();
                     st.ai_enabled    = cfg.ai_enabled;
@@ -2977,6 +3015,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.date_from       = String::new();
                     st.date_to         = String::new();
                     st.bank_filter     = String::new();
+                    st.vendor_filter   = String::new();
+                    st.head_filter     = String::new();
                 }
                 let st = state_ref.lock().unwrap();
                 rebuild_rows(&h, &st);
