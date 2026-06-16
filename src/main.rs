@@ -918,6 +918,8 @@ fn apply_parse_result(
         st.transactions    = result.transactions.clone();
         st.active_filter   = "all".to_string();
         st.filter_statuses.clear();
+        st.undo_stack.clear();
+        h.set_can_undo(false);
         st.date_from       = String::new();
         st.date_to         = String::new();
         st.bank_filter     = String::new();
@@ -2421,6 +2423,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        // ── Undo Last Edit ────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_undo_last_edit(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let mut st = state_ref.lock().unwrap();
+
+                let entry = match st.undo_stack.pop() {
+                    Some(e) => e,
+                    None => {
+                        log::info!("[Undo] nothing to undo");
+                        h.set_can_undo(false);
+                        return;
+                    }
+                };
+                h.set_can_undo(!st.undo_stack.is_empty());
+
+                if let Some(pos) = st.transactions.iter().position(|t| t.id == entry.txn_id) {
+                    let t = &mut st.transactions[pos];
+                    t.vendor       = entry.vendor;
+                    t.account_head = entry.head;
+                    t.txn_type     = entry.txn_type;
+                    t.status       = entry.status;
+                    t.confidence   = entry.confidence;
+                    log::info!("[Undo] restored txn id='{}'", entry.txn_id);
+                    rebuild_rows(&h, &st);
+                } else {
+                    log::warn!("[Undo] txn id='{}' not found", entry.txn_id);
+                }
+            });
+        }
+
         // ── Export Reconciliation CSV ─────────────────────────────────────────
         {
             let handle    = app.as_weak();
@@ -3023,6 +3059,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(abs) = visible_to_abs(&st, idx as usize) {
                     let client_id = st.client_id.unwrap_or(0);
+                    // Push undo snapshot before modifying
+                    let undo_entry = {
+                        let t = &st.transactions[abs];
+                        ui::UndoEntry {
+                            txn_id:     t.id.clone(),
+                            vendor:     t.vendor.clone(),
+                            head:       t.account_head.clone(),
+                            txn_type:   t.txn_type.clone(),
+                            status:     t.status.clone(),
+                            confidence: t.confidence,
+                        }
+                    };
+                    st.undo_stack.push(undo_entry);
+                    h.set_can_undo(true);
                     let t = &mut st.transactions[abs];
                     if !vendor.is_empty() { t.vendor = vendor.to_string(); }
                     if !head.is_empty()   { t.account_head = head.to_string(); }

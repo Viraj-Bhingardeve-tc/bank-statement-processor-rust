@@ -158,6 +158,8 @@ export component AppWindow inherits Window {
     in property <string>     recon-status:     "";
     // ── Audit trail ───────────────────────────────────────────────────────────
     in property <[string]>   audit-records: [];
+    in property <bool>       can-undo:      false;
+    callback do-undo-last-edit();
 
     // ── Toast / overlays ─────────────────────────────────────────────────────
     in property <string> toast-msg:          "";
@@ -359,6 +361,8 @@ export component AppWindow inherits Window {
         recon-bank-only:       root.recon-bank-only;
         recon-status:          root.recon-status;
         audit-records:         root.audit-records;
+        can-undo:              root.can-undo;
+        undo-last-edit         => { root.do-undo-last-edit(); }
 
         toast-msg:          root.toast-msg;
         toast-kind:         root.toast-kind;

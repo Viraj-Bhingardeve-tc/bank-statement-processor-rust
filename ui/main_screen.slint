@@ -795,6 +795,8 @@ export component MainScreen inherits Rectangle {
     in property <string>     recon-status:     "";
     // Audit trail records (set by Rust in do-audit-trail)
     in property <[string]>   audit-records: [];
+    in property <bool>       can-undo:      false;
+    callback undo-last-edit();
     in-out property <int>    audit-action-idx: 0;
     in-out property <int>    audit-type-idx:   0;
 
@@ -2034,7 +2036,7 @@ export component MainScreen inherits Rectangle {
                         ComboBox { model: ["All Actions", "Create", "Update", "Delete", "Import", "Export", "Classify", "Rule"]; min-width: 130px; current-index <=> root.audit-action-idx; }
                         ComboBox { model: ["All Types", "Transaction", "Client", "Rule", "Import", "Export"]; min-width: 130px; current-index <=> root.audit-type-idx; }
                         MBtn { text: "Refresh"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.open-audit-trail(root.audit-action-idx, root.audit-type-idx); } }
-                        MBtn { text: "Undo Last Edit"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
+                        MBtn { text: "Undo Last Edit"; bg: #F5F5F5; fg: root.can-undo ? #546E7A : #BDBDBD; enabled: root.can-undo; clicked => { root.undo-last-edit(); } }
                     }
                     Rectangle {
                         vertical-stretch: 1; background: #F5F5F5;

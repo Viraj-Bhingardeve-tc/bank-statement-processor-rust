@@ -14,6 +14,17 @@ pub struct BatchFileResult {
     pub err_msg: String,
 }
 
+/// Snapshot of editable transaction fields for the undo stack.
+#[derive(Debug, Clone)]
+pub struct UndoEntry {
+    pub txn_id:     String,
+    pub vendor:     String,
+    pub head:       String,
+    pub txn_type:   crate::parser::VoucherType,
+    pub status:     crate::parser::TransactionStatus,
+    pub confidence: f64,
+}
+
 /// Runtime state shared between Rust logic and the Slint UI.
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
@@ -65,6 +76,8 @@ pub struct AppState {
 
     // Audit trail — in-memory event log, newest appended last
     pub audit_events: Vec<String>,
+    // Undo stack — most recent edit at the end (pop from end = undo last)
+    pub undo_stack: Vec<UndoEntry>,
 
     // Reconcile — CSV text built after the last run; empty until first reconcile
     pub recon_csv: String,
