@@ -729,6 +729,8 @@ export component MainScreen inherits Rectangle {
     // ── Internal state ─────────────────────────────────────────────────────────
     in-out property <bool>   show-dashboard:  true;
     in-out property <string> active-filter:   "all";
+    // Bank filter — tracks ComboBox selection for chip display
+    private property <string> sel-bank: "All Banks";
     // Multi-status filter toggle state (set by Rust after toggle-status callback)
     in property <bool> fs-unreviewed: false;
     in property <bool> fs-suspense:   false;
@@ -1080,7 +1082,7 @@ export component MainScreen inherits Rectangle {
                         Text { text: "Bank:"; font-size: 11px; color: #607D8B; vertical-alignment: center; }
                         ComboBox {
                             model: root.bank-names; height: 26px; min-width: 100px;
-                            selected(v) => { root.bank-filter-changed(v); }
+                            selected(v) => { root.sel-bank = v; root.bank-filter-changed(v); }
                         }
 
                         Rectangle { horizontal-stretch: 1; }
@@ -1101,8 +1103,8 @@ export component MainScreen inherits Rectangle {
                     }
                 }
 
-                // ── Active filter chip bar (shown when any status filter is on) ──────
-                if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits : Rectangle {
+                // ── Active filter chip bar (shown when any status/bank filter is on) ──────
+                if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits || (root.sel-bank != "All Banks" && root.sel-bank != "") : Rectangle {
                     height: 32px; background: #F8F9FA; border-width: 0px;
                     Rectangle { y: 0px; height: 1px; background: #E0E0E0; width: parent.width; }
                     HorizontalLayout { padding-left: 12px; padding-right: 12px; padding-top: 0px; padding-bottom: 0px; spacing: 6px; alignment: start;
@@ -1163,13 +1165,23 @@ export component MainScreen inherits Rectangle {
                                 Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("debits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
+                        if root.sel-bank != "All Banks" && root.sel-bank != "" : Rectangle {
+                            height: 20px; border-radius: 10px; background: #0D47A1;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: root.sel-bank; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    TouchArea { clicked => { root.sel-bank = "All Banks"; root.bank-filter-changed("All Banks"); } }
+                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
                         Rectangle { horizontal-stretch: 1; }
                         Rectangle {
                             height: 20px; border-radius: 10px; background: #ECEFF1; border-width: 1px; border-color: #B0BEC5;
                             HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 0px;
                                 Text { text: "Clear All"; font-size: 10px; color: #546E7A; font-weight: 600; vertical-alignment: center; }
                             }
-                            TouchArea { clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
+                            TouchArea { clicked => { root.sel-bank = "All Banks"; root.active-filter = "all"; root.filter-changed("all"); root.bank-filter-changed("All Banks"); } }
                         }
                     }
                 }
