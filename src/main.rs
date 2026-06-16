@@ -55,11 +55,6 @@ fn fmt_cell(v: Option<f64>) -> String {
 }
 
 #[cfg(feature = "slint-ui")]
-fn stub_callback(name: &str) {
-    log::info!("[Stub] {} — not yet implemented", name);
-}
-
-#[cfg(feature = "slint-ui")]
 fn audit_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1614,6 +1609,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
+        // ── Delete Rule ───────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_delete_rule(move |idx| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                let client_id = st.client_id.unwrap_or(0);
+                drop(st);
+                let db = db_ref.lock().unwrap();
+                let Some(conn) = db.as_ref() else { return };
+                let rules = match db::get_rules(conn, client_id) {
+                    Ok(r) => r,
+                    Err(e) => { log::error!("[DeleteRule] DB error: {}", e); return; }
+                };
+                let Some(rule) = rules.get(idx as usize) else {
+                    log::warn!("[DeleteRule] idx {} out of range (len={})", idx, rules.len());
+                    return;
+                };
+                if let Err(e) = db::delete_rule(conn, rule.id) {
+                    log::error!("[DeleteRule] failed to delete rule {}: {}", rule.id, e);
+                    return;
+                }
+                log::info!("[DeleteRule] deleted rule id={}", rule.id);
+                match db::get_rules(conn, client_id) {
+                    Ok(remaining) => {
+                        let recs: Vec<SharedString> = remaining.iter().map(|r| {
+                            SharedString::from(format!(
+                                "{}  |  {}  |  {}  |  {}",
+                                r.pattern,
+                                if r.vendor.is_empty() { "—" } else { &r.vendor },
+                                if r.account_head.is_empty() { "—" } else { &r.account_head },
+                                if r.txn_type.is_empty() { "—" } else { &r.txn_type },
+                            ).as_str())
+                        }).collect();
+                        h.set_rule_records(slint::ModelRc::new(slint::VecModel::from(recs)));
+                    }
+                    Err(e) => log::error!("[DeleteRule] reload DB error: {}", e),
+                }
+            });
+        }
 
         // ── Import History ─────────────────────────────────────────────────────
         {
@@ -1643,6 +1680,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(e) => log::error!("[ImportHistory] DB error: {}", e),
                     }
+                }
+            });
+        }
+        // ── Delete Import ────────────────────────────────────────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_delete_import(move |idx| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                let client_id = st.client_id.unwrap_or(0);
+                drop(st);
+                let db = db_ref.lock().unwrap();
+                let Some(conn) = db.as_ref() else { return };
+                let imports = match db::get_imports(conn, client_id) {
+                    Ok(i) => i,
+                    Err(e) => { log::error!("[DeleteImport] DB error: {}", e); return; }
+                };
+                let Some(import) = imports.get(idx as usize) else {
+                    log::warn!("[DeleteImport] idx {} out of range (len={})", idx, imports.len());
+                    return;
+                };
+                if let Err(e) = db::delete_import(conn, import.id) {
+                    log::error!("[DeleteImport] failed to delete import {}: {}", import.id, e);
+                    return;
+                }
+                log::info!("[DeleteImport] deleted import id={}", import.id);
+                drop(db);
+                let mut st = state_ref.lock().unwrap();
+                st.import_ids.retain(|&id| id != import.id);
+                drop(st);
+                let db = db_ref.lock().unwrap();
+                let Some(conn) = db.as_ref() else { return };
+                match db::get_imports(conn, client_id) {
+                    Ok(remaining) => {
+                        let recs: Vec<SharedString> = remaining.iter().map(|imp| {
+                            let date = &imp.imported_at[..imp.imported_at.len().min(16)];
+                            SharedString::from(format!(
+                                "{}  |  {}  |  {} transactions",
+                                imp.file_name, date, imp.txn_count
+                            ).as_str())
+                        }).collect();
+                        h.set_import_records(slint::ModelRc::new(slint::VecModel::from(recs)));
+                    }
+                    Err(e) => log::error!("[DeleteImport] reload DB error: {}", e),
                 }
             });
         }

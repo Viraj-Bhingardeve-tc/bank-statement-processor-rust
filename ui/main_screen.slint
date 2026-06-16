@@ -615,11 +615,13 @@ export component MainScreen inherits Rectangle {
     callback edit-client();
     // Import history reload
     callback reload-import(int);
+    callback delete-import(int);
     // Settings save (provider, api-key, enabled)
     callback settings-save(string, string, bool);
     // Rules backup / restore
     callback backup-rules();
     callback restore-rules();
+    callback delete-rule(int);
 
     // ── Data ──────────────────────────────────────────────────────────────────
     in property <[string]> client-names: ["-- Select Client --"];
@@ -1923,12 +1925,22 @@ export component MainScreen inherits Rectangle {
                                     clicked => { root.modal-state = ""; root.reload-import(i); }
                                     mouse-cursor: pointer;
                                 }
-                                HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px;
+                                HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 8px;
                                     // Format: "FILE\tDATE\tCOUNT" — split by tab
                                     Text {
                                         text: rec;  // show full record; Rust formats nicely
                                         font-size: 12px; color: #0A1929;
+                                        horizontal-stretch: 1;
                                         vertical-alignment: center; overflow: elide;
+                                    }
+                                    Rectangle {
+                                        width: 56px; height: 18px; border-radius: 4px;
+                                        background: #FFEBEE; border-width: 1px; border-color: #EF9A9A;
+                                        Text { text: "Remove"; font-size: 9px; color: #C62828; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.delete-import(i); }
+                                        }
                                     }
                                 }
                             }
@@ -1971,14 +1983,24 @@ export component MainScreen inherits Rectangle {
                     }
                     ListView {
                         y: 28px; height: parent.height - 28px;
-                        for rec in root.rule-records : Rectangle {
+                        for rec[i] in root.rule-records : Rectangle {
                             height: 26px; background: #FFFFFF;
                             Rectangle { y: 25px; height: 1px; background: #E3F2FD; }
                             Text {
-                                x: 10px; width: parent.width - 20px; height: parent.height;
+                                x: 10px; width: parent.width - 86px; height: parent.height;
                                 text: rec;
                                 font-size: 11px; color: #0A1929;
                                 vertical-alignment: center; overflow: elide;
+                            }
+                            Rectangle {
+                                x: parent.width - 66px; y: 4px;
+                                width: 56px; height: 18px; border-radius: 4px;
+                                background: #FFEBEE; border-width: 1px; border-color: #EF9A9A;
+                                Text { text: "Delete"; font-size: 9px; color: #C62828; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.delete-rule(i); }
+                                }
                             }
                         }
                     }
