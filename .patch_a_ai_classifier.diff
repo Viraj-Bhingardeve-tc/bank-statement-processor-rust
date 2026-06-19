@@ -1,0 +1,7 @@
+diff --git a/src/ai_classifier.rs b/src/ai_classifier.rs
+index cbe660f..935f0b4 100644
+--- a/src/ai_classifier.rs
++++ b/src/ai_classifier.rs
+@@ -97 +97 @@ where
+-                        // classified_by field not on Transaction struct; use tag as marker
++                        t.classification_source = "ai".to_string();

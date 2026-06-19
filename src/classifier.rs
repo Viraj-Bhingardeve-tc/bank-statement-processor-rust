@@ -51,6 +51,7 @@ fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationR
         }
         t.confidence = 0.85;
         t.status     = TransactionStatus::Classified;
+        t.classification_source = "rule".to_string();
     // 2. Keyword heuristics
     } else if let Some(kw) = kw_match(&upper, t, bank_ledger) {
         t.vendor       = kw.vendor;
@@ -58,6 +59,7 @@ fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationR
         t.txn_type     = kw.txn_type;
         t.confidence   = 0.45;
         t.status       = TransactionStatus::Classified;
+        t.classification_source = "keyword".to_string();
     } else {
         // 3. Extract party name for unreviewed
         let party = extract_party_name(&t.narration);
@@ -66,6 +68,7 @@ fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationR
         }
         t.status     = TransactionStatus::Unreviewed;
         t.confidence = 0.0;
+        t.classification_source = String::new();
     }
 
     // 3. Infer voucher type if missing

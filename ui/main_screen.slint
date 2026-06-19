@@ -631,6 +631,7 @@ export component MainScreen inherits Rectangle {
     // AI settings fields — in-out so Rust can read provider + key after modal closes
     in-out property <int>    ai-provider-idx: 0;
     in-out property <string> ai-api-key:      "";
+    in-out property <int>    ai-scope-idx:    0;
     // Import history + rules records set by Rust
     in property <[string]> import-records: [];
     in property <[string]> rule-records:   [];
@@ -691,11 +692,15 @@ export component MainScreen inherits Rectangle {
     in property <string> dash-conf-hi-count:  "0";
     in property <string> dash-conf-med-count: "0";
     in property <string> dash-conf-lo-count:  "0";
+    in property <string> dash-cq-ai:   "0";
+    in property <string> dash-cq-rule: "0";
+    in property <string> dash-cq-kw:   "0";
     // GST amounts
     in property <string> dash-gst-paid: "₹ —";
     in property <string> dash-gst-recv: "₹ —";
     // Recurring parties (top 6) and ledger breakdowns (top 8)
     in property <[SummaryListRow]> dash-parties:     [];
+    in property <[SummaryListRow]> dash-per-account: [];
     in property <[SummaryListRow]> dash-rec-ledgers: [];
     in property <[SummaryListRow]> dash-pay-ledgers: [];
 
@@ -1471,6 +1476,30 @@ export component MainScreen inherits Rectangle {
                                         Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
                                     }
                                 }
+                                if root.dash-cq-ai != "0" : SR { lbl: "\u{2726} AI classified";   val: root.dash-cq-ai;   vcol: #7B1FA2; }
+                                if root.dash-cq-rule != "0" : SR { lbl: "Rule matched";       val: root.dash-cq-rule; vcol: #1565C0; }
+                                if root.dash-cq-kw != "0" : SR { lbl: "Keyword heuristic"; val: root.dash-cq-kw;   vcol: #555555; }
+
+                                // ── Per Account breakdown ─────────────────────────────────────────────
+                                if root.dash-per-account.length > 0 : SDivider { title: "PER ACCOUNT"; }
+                                for a in root.dash-per-account : Rectangle {
+                                    height: 34px;
+                                    VerticalLayout {
+                                        padding: 0px; spacing: 1px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: a.lbl; font-size: 11px; font-weight: 700; color: #0D47A1;
+                                            overflow: elide; vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: a.val; font-size: 9px; color: #555555; vertical-alignment: center;
+                                        }
+                                    }
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-bank = a.key; root.bank-filter-changed(a.key); }
+                                    }
+                                }
 
                                 // ── GST / Tax amounts ─────────────────────────────────────────────────
                                 if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SDivider { title: "GST / TAX"; }
@@ -1713,7 +1742,12 @@ export component MainScreen inherits Rectangle {
                         edited(v) => { root.ai-api-key = v; }
                     }
                     Text { text: "Classify which transactions"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    ComboBox { model: ["Unclassified / low-confidence only (recommended)", "All transactions"]; height: 34px; }
+                    ComboBox {
+                        model: ["Unclassified / low-confidence only (recommended)", "All transactions"];
+                        current-index: root.ai-scope-idx;
+                        height: 34px;
+                        selected(v) => { root.ai-scope-idx = self.current-index; }
+                    }
                     Rectangle {
                         height: 40px; background: #F3E5F5; border-radius: 4px;
                         border-width: 1px; border-color: #CE93D8;

@@ -512,6 +512,7 @@ pub fn prepend_opening_balance_row(
         txn_type:         super::VoucherType::Unknown,
         confidence:       0.0,
         status:           TransactionStatus::Unreviewed,
+        classification_source: String::new(),
         tags:             Vec::new(),
         bank_name:        bank_name.to_owned(),
         account_no:       account_no.to_owned(),

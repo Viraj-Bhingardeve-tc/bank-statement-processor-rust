@@ -34,12 +34,30 @@ pub struct AiClassifyResult {
     pub confidence:  f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AiScope {
+    /// Only unreviewed / low-confidence (<0.6) transactions.
+    Unclassified,
+    /// All transactions except opening-balance, suspense and manually-confirmed rows.
+    All,
+}
+
+impl AiScope {
+    pub fn from_idx(idx: i32) -> Self {
+        match idx {
+            1 => AiScope::All,
+            _ => AiScope::Unclassified,
+        }
+    }
+}
+
 /// Classify a batch of transactions using AI.
 /// `progress_cb` is called with (done, total) after each batch completes.
 pub fn classify_with_ai<F>(
     txns: &mut Vec<Transaction>,
     provider: AiProvider,
     api_key: &str,
+    scope: AiScope,
     mut progress_cb: F,
 ) -> Result<usize>
 where
@@ -50,9 +68,21 @@ where
     }
 
     let indices: Vec<usize> = txns.iter().enumerate()
-        .filter(|(_, t)| !t.is_opening_balance
-            && !(matches!(t.status, crate::parser::TransactionStatus::Classified) && t.confidence >= 1.0)
-            && !matches!(t.status, crate::parser::TransactionStatus::Suspense))
+        .filter(|(_, t)| {
+            if t.is_opening_balance { return false; }
+            if matches!(t.status, crate::parser::TransactionStatus::Manual)
+                || matches!(t.status, crate::parser::TransactionStatus::Suspense) {
+                return false;
+            }
+            match scope {
+                AiScope::Unclassified => {
+                    matches!(t.status, crate::parser::TransactionStatus::Unreviewed)
+                        || matches!(t.status, crate::parser::TransactionStatus::NeedsReview)
+                        || t.confidence < 0.6
+                }
+                AiScope::All => true,
+            }
+        })
         .map(|(i, _)| i)
         .collect();
 
@@ -94,7 +124,7 @@ where
                         }
                         t.confidence   = r.confidence.clamp(0.0, 1.0);
                         t.status       = crate::parser::TransactionStatus::Classified;
-                        // classified_by field not on Transaction struct; use tag as marker
+                        t.classification_source = "ai".to_string();
                         if !t.tags.iter().any(|g| g == "ai") { t.tags.push("ai".to_string()); }
                         classified += 1;
                     }

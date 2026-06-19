@@ -154,7 +154,7 @@ pub fn upsert_transactions(
                 t.date, t.date_ts, t.narration, t.reference,
                 t.debit, t.credit, t.balance, t.prev_balance,
                 t.vendor, t.account_head, t.txn_type.to_string(), t.status.to_string(), t.confidence,
-                Option::<String>::None,
+                if t.classification_source.is_empty() { None } else { Some(t.classification_source.clone()) },
                 tags_json,
                 t.balance_ok.map(|b| if b { 1i64 } else { 0i64 }),
                 if t.is_opening_balance { 1i64 } else { 0i64 },
@@ -171,7 +171,7 @@ pub fn get_transactions(conn: &Connection, client_id: i64) -> Result<Vec<Transac
         "SELECT id, import_id, bank_name, account_no, date, date_ts,
                 narration, reference, debit, credit, balance, prev_balance,
                 vendor, account_head, txn_type, status, confidence, tags,
-                balance_ok, is_opening_bal, dup_flag
+                balance_ok, is_opening_bal, dup_flag, classified_by
          FROM transactions WHERE client_id = ?1
          ORDER BY date_ts ASC, rowid ASC"
     ).context("get_transactions prepare")?;
@@ -186,6 +186,7 @@ pub fn get_transactions(conn: &Connection, client_id: i64) -> Result<Vec<Transac
         let txn_type_str: String = r.get::<_, Option<String>>(14)?.unwrap_or_default();
         let status_str:   String = r.get::<_, Option<String>>(15)?.unwrap_or_default();
         let import_id: Option<i64> = r.get(1)?;
+        let classification_source: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
         Ok(Transaction {
             id:               r.get(0)?,
             import_id,
@@ -204,6 +205,7 @@ pub fn get_transactions(conn: &Connection, client_id: i64) -> Result<Vec<Transac
             txn_type:         voucher_from_str(&txn_type_str),
             status:           status_from_str(&status_str),
             confidence:       r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+            classification_source,
             tags,
             balance_ok:       balance_ok_raw.map(|v| v != 0),
             is_opening_balance: is_ob != 0,
@@ -218,7 +220,7 @@ pub fn get_transactions_for_import(conn: &Connection, import_id: i64) -> Result<
         "SELECT id, import_id, bank_name, account_no, date, date_ts,
                 narration, reference, debit, credit, balance, prev_balance,
                 vendor, account_head, txn_type, status, confidence, tags,
-                balance_ok, is_opening_bal, dup_flag
+                balance_ok, is_opening_bal, dup_flag, classified_by
          FROM transactions WHERE import_id = ?1
          ORDER BY date_ts ASC, rowid ASC"
     ).context("get_transactions_for_import prepare")?;
@@ -233,6 +235,7 @@ pub fn get_transactions_for_import(conn: &Connection, import_id: i64) -> Result<
         let txn_type_str: String = r.get::<_, Option<String>>(14)?.unwrap_or_default();
         let status_str:   String = r.get::<_, Option<String>>(15)?.unwrap_or_default();
         let import_id_col: Option<i64> = r.get(1)?;
+        let classification_source: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
         Ok(Transaction {
             id:               r.get(0)?,
             import_id:        import_id_col,
@@ -251,6 +254,7 @@ pub fn get_transactions_for_import(conn: &Connection, import_id: i64) -> Result<
             txn_type:         voucher_from_str(&txn_type_str),
             status:           status_from_str(&status_str),
             confidence:       r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+            classification_source,
             tags,
             balance_ok:       balance_ok_raw.map(|v| v != 0),
             is_opening_balance: is_ob != 0,
@@ -274,11 +278,12 @@ pub fn upsert_transaction_classification(
     txn_type: &str,
     status: &str,
     confidence: f64,
+    classification_source: &str,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE transactions SET vendor=?1, account_head=?2, txn_type=?3, status=?4, confidence=?5
-         WHERE id=?6",
-        rusqlite::params![vendor, account_head, txn_type, status, confidence, txn_id],
+        "UPDATE transactions SET vendor=?1, account_head=?2, txn_type=?3, status=?4, confidence=?5, classified_by=?6
+         WHERE id=?7",
+        rusqlite::params![vendor, account_head, txn_type, status, confidence, classification_source, txn_id],
     ).context("upsert_transaction_classification")?;
     Ok(())
 }

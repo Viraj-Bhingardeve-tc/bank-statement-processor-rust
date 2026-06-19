@@ -587,6 +587,7 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
         .collect();
     if real.is_empty() {
         h.set_dash_parties(slint::ModelRc::new(slint::VecModel::<SummaryListRow>::from(vec![])));
+        h.set_dash_per_account(slint::ModelRc::new(slint::VecModel::<SummaryListRow>::from(vec![])));
         h.set_dash_rec_ledgers(slint::ModelRc::new(slint::VecModel::<SummaryListRow>::from(vec![])));
         h.set_dash_pay_ledgers(slint::ModelRc::new(slint::VecModel::<SummaryListRow>::from(vec![])));
         return;
@@ -602,6 +603,14 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
     h.set_dash_conf_hi_count(SharedString::from(hi_cnt.to_string().as_str()));
     h.set_dash_conf_med_count(SharedString::from(med_cnt.to_string().as_str()));
     h.set_dash_conf_lo_count(SharedString::from(lo_cnt.to_string().as_str()));
+
+    // ── Classification source breakdown ───────────────────────────────────────
+    let ai_cnt  = real.iter().filter(|t| t.classification_source == "ai").count();
+    let rule_cnt = real.iter().filter(|t| t.classification_source == "rule").count();
+    let kw_cnt  = real.iter().filter(|t| t.classification_source == "keyword").count();
+    h.set_dash_cq_ai(SharedString::from(ai_cnt.to_string().as_str()));
+    h.set_dash_cq_rule(SharedString::from(rule_cnt.to_string().as_str()));
+    h.set_dash_cq_kw(SharedString::from(kw_cnt.to_string().as_str()));
 
     // ── GST paid / received ───────────────────────────────────────────────────
     let gst_txns: Vec<&&parser::Transaction> = real.iter()
@@ -639,6 +648,40 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
         }
     }).collect();
     h.set_dash_parties(slint::ModelRc::new(slint::VecModel::from(party_rows)));
+
+    // ── Per-account breakdown (opening/closing balance, txn count) ───────────
+    let mut acc_order: Vec<(String, String)> = Vec::new();
+    for t in txns {
+        let key = (t.bank_name.clone(), t.account_no.clone());
+        if (!t.bank_name.is_empty() || !t.account_no.is_empty()) && !acc_order.contains(&key) {
+            acc_order.push(key);
+        }
+    }
+    let account_rows: Vec<SummaryListRow> = acc_order.iter().map(|(bank, acct)| {
+        let acc_txns: Vec<&parser::Transaction> = txns.iter()
+            .filter(|t| &t.bank_name == bank && &t.account_no == acct)
+            .collect();
+        let opening = acc_txns.iter().find(|t| t.is_opening_balance).and_then(|t| t.balance);
+        let mut non_ob: Vec<&&parser::Transaction> = acc_txns.iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        non_ob.sort_by_key(|t| t.date_ts);
+        let closing = non_ob.iter().rev().find_map(|t| t.balance);
+        let label = [bank.as_str(), acct.as_str()].iter()
+            .filter(|s| !s.is_empty())
+            .cloned().collect::<Vec<_>>().join(" · ");
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ob) = opening { parts.push(format!("Open ₹{}", ui::fmt_inr(ob))); }
+        if let Some(cb) = closing { parts.push(format!("Close ₹{}", ui::fmt_inr(cb))); }
+        parts.push(format!("{} txns", non_ob.len()));
+        SummaryListRow {
+            lbl: SharedString::from(label.as_str()),
+            val: SharedString::from(parts.join("  ·  ").as_str()),
+            is_debit: false,
+            key: SharedString::from(bank.as_str()),
+        }
+    }).collect();
+    h.set_dash_per_account(slint::ModelRc::new(slint::VecModel::from(account_rows)));
 
     // ── Ledger breakdowns (top 8 by amount) ──────────────────────────────────
     let mut rec_map: HashMap<String, f64> = HashMap::new();
@@ -1528,6 +1571,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let provider_idx = h.get_ai_provider_idx();
                     let api_key      = h.get_ai_api_key().to_string();
                     let provider     = ai_classifier::AiProvider::from_idx(provider_idx);
+                    let scope        = ai_classifier::AiScope::from_idx(h.get_ai_scope_idx());
                     let handle2      = h.as_weak();
                     let state_ref2   = state_ref.clone();
                     h.set_ai_overlay_visible(true);
@@ -1539,6 +1583,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &mut txns,
                             provider,
                             &api_key,
+                            scope,
                             |done, total| {
                                 let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
                                 let msg = format!("AI: {}/{}", done, total);
@@ -2206,6 +2251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                     };
                     let confidence: f64 = conf_s.parse().unwrap_or(if matches!(status, parser::TransactionStatus::Classified) { 1.0 } else { 0.0 });
+                    let classification_source = if matches!(status, parser::TransactionStatus::Classified) { "user".to_string() } else { String::new() };
                     let txn_type = match type_s.as_str() {
                         "Payment"  | "payment"  => parser::VoucherType::Payment,
                         "Receipt"  | "receipt"  => parser::VoucherType::Receipt,
@@ -2230,6 +2276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         txn_type,
                         status,
                         confidence,
+                        classification_source,
                         tags,
                         bank_name:    get(i_bank),
                         account_no:   get(i_acct),
@@ -3214,6 +3261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     t.status     = parser::TransactionStatus::Classified;
                     t.confidence = 1.0;
+                    t.classification_source = "user".to_string();
 
                     // Save & Learn: derive a narration pattern and persist as a rule
                     if learn {
@@ -3239,10 +3287,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let t_head     = t.account_head.clone();
                     let t_type_str = t.txn_type.to_string();
                     let t_status   = t.status.to_string();
+                    let t_source   = t.classification_source.clone();
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
                         let _ = db::upsert_transaction_classification(
-                            conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, 1.0,
+                            conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, 1.0, &t_source,
                         );
                     }
                     log::info!("[SaveTxn] abs={} vendor='{}' head='{}' type='{}' learn={}", abs, vendor, head, typ, learn);
@@ -3331,6 +3380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     confidence:  1.0,
                     status:      parser::TransactionStatus::Manual,
+                    classification_source: "user".to_string(),
                     tags:        vec![],
                     bank_name:   st.bank_name.clone(),
                     account_no:  st.account_no.clone(),

@@ -68,6 +68,7 @@ export component AppWindow inherits Window {
     // ── AI settings (read by Rust in do-ai-classify) ─────────────────────────
     in-out property <int>    ai-provider-idx: 0;
     in-out property <string> ai-api-key:      "";
+    in-out property <int>    ai-scope-idx:    0;
 
     // ── Export Wizard fields (synced from MainScreen so Rust can read them) ───
     in-out property <int>    wiz-sw-idx:    0;
@@ -126,9 +127,13 @@ export component AppWindow inherits Window {
     in property <string> dash-conf-hi-count:  "0";
     in property <string> dash-conf-med-count: "0";
     in property <string> dash-conf-lo-count:  "0";
+    in property <string> dash-cq-ai:   "0";
+    in property <string> dash-cq-rule: "0";
+    in property <string> dash-cq-kw:   "0";
     in property <string> dash-gst-paid:       "₹ —";
     in property <string> dash-gst-recv:       "₹ —";
     in property <[SummaryListRow]> dash-parties:     [];
+    in property <[SummaryListRow]> dash-per-account: [];
     in property <[SummaryListRow]> dash-rec-ledgers: [];
     in property <[SummaryListRow]> dash-pay-ledgers: [];
 
@@ -257,6 +262,7 @@ export component AppWindow inherits Window {
         new-client-ledger <=> root.new-client-ledger;
         ai-provider-idx   <=> root.ai-provider-idx;
         ai-api-key        <=> root.ai-api-key;
+        ai-scope-idx      <=> root.ai-scope-idx;
         wiz-sw-idx  <=> root.wiz-sw-idx;
         wiz-company <=> root.wiz-company;
         wiz-gstin   <=> root.wiz-gstin;
@@ -302,9 +308,13 @@ export component AppWindow inherits Window {
         dash-conf-hi-count:  root.dash-conf-hi-count;
         dash-conf-med-count: root.dash-conf-med-count;
         dash-conf-lo-count:  root.dash-conf-lo-count;
+        dash-cq-ai:   root.dash-cq-ai;
+        dash-cq-rule: root.dash-cq-rule;
+        dash-cq-kw:   root.dash-cq-kw;
         dash-gst-paid:       root.dash-gst-paid;
         dash-gst-recv:       root.dash-gst-recv;
         dash-parties:        root.dash-parties;
+        dash-per-account:    root.dash-per-account;
         dash-rec-ledgers:    root.dash-rec-ledgers;
         dash-pay-ledgers:    root.dash-pay-ledgers;
 

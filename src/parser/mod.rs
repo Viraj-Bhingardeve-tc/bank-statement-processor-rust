@@ -137,6 +137,9 @@ pub struct Transaction {
     pub txn_type:     VoucherType,
     pub confidence:   f64,
     pub status:       TransactionStatus,
+    /// How this transaction was classified: "rule" | "keyword" | "ai" | "user" | "" (unclassified).
+    #[serde(default)]
+    pub classification_source: String,
 
     pub tags: Vec<String>,
 
@@ -194,6 +197,7 @@ impl Transaction {
             txn_type: VoucherType::Unknown,
             confidence: 0.0,
             status: TransactionStatus::Unreviewed,
+            classification_source: String::new(),
             tags: Vec::new(),
             bank_name: String::new(),
             account_no: String::new(),
