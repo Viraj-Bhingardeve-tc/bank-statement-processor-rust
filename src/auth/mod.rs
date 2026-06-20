@@ -2,8 +2,8 @@
 
 mod monthly_password;
 
-// DEV_BYPASS: accept any non-empty credentials for UI testing
+/// Validates email/password against the HMAC-SHA512 monthly password,
+/// matching Electron main.js's `validate_credentials` exactly.
 pub fn validate_credentials(email: &str, password: &str) -> bool {
-    let _ = password;  // suppress unused warning
-    !email.trim().is_empty()  // any email accepts
+    monthly_password::validate_credentials(email, password)
 }

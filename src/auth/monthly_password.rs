@@ -30,9 +30,35 @@ fn secret_key() -> String {
     SK_FRAGMENTS.concat()
 }
 
-/// Returns the current month as "YYYY-MM".
-fn current_month() -> String {
-    Local::now().format("%Y-%m").to_string()
+/// Admin and client machines can disagree on "today" by a few hours (timezone
+/// offset, clock drift) right around a month boundary. Trying yesterday/today/
+/// tomorrow's month absorbs that skew — mirrors main.js's `candidate_month_strs()`.
+fn candidate_months() -> Vec<String> {
+    let now = Local::now();
+    let prev = now - chrono::Duration::days(1);
+    let next = now + chrono::Duration::days(1);
+    let mut months = vec![
+        prev.format("%Y-%m").to_string(),
+        now.format("%Y-%m").to_string(),
+        next.format("%Y-%m").to_string(),
+    ];
+    months.dedup();
+    months
+}
+
+/// Tolerates copy/paste damage common for this password format: smart-dash
+/// autocorrect (Outlook/Word/chat apps turning "-" into "–"/"—"), stray internal
+/// whitespace from a wrapped line, and case differences. Mirrors main.js's
+/// `normalize_entered_password()`.
+fn normalize_entered(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| match c {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+            other => other,
+        })
+        .collect::<String>()
+        .to_uppercase()
 }
 
 /// Generates the expected password for a given email and month string.
@@ -66,17 +92,18 @@ fn generate_password(email: &str, month: &str) -> Option<String> {
     Some(groups.join("-"))
 }
 
-/// Returns `true` if `password` matches the expected password for `email` this month.
+/// Returns `true` if `password` matches the expected password for `email` in
+/// the current month, or the adjacent months (clock-skew tolerance).
 pub fn validate_credentials(email: &str, password: &str) -> bool {
     let e = email.trim();
     let p = password.trim();
     if e.is_empty() || p.is_empty() {
         return false;
     }
-    match generate_password(e, &current_month()) {
-        Some(expected) => p.to_uppercase() == expected,
-        None           => false,
-    }
+    let normalized = normalize_entered(p);
+    candidate_months()
+        .iter()
+        .any(|month| generate_password(e, month).as_deref() == Some(normalized.as_str()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
