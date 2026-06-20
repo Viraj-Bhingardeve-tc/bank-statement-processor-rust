@@ -1,7 +1,46 @@
 // analytics.rs — Dashboard analytics: mirrors JS AnalyticsEngine.compute()
 // Pure data aggregation — no UI, no side-effects.
 
-use crate::parser::Transaction;
+use crate::parser::{Transaction, TransactionStatus};
+
+// ── Live validation (port of Electron's `_validateTransaction`) ──────────────
+// Computed fresh on every render rather than stored on the transaction, since
+// edits can resolve (or introduce) a validation failure at any time — mirrors
+// Electron re-deriving this in `_renderSummary()` after every save/undo/delete.
+
+/// Returns (is_valid, reasons joined by "; ").
+pub fn validate_transaction(t: &Transaction) -> (bool, String) {
+    let mut reasons: Vec<&str> = Vec::new();
+    if t.date.is_empty() || t.date.len() < 8 {
+        reasons.push("Missing or invalid date");
+    }
+    let amt = t.debit.or(t.credit);
+    match amt {
+        None => reasons.push("No amount (debit or credit)"),
+        Some(a) => {
+            if !a.is_finite() || a.abs() > 2e9 { reasons.push("Amount exceeds \u{20B9}200 crore"); }
+            if a < 0.0 { reasons.push("Negative amount — check column detection"); }
+        }
+    }
+    if t.narration.trim().len() < 2 { reasons.push("Empty or very short narration"); }
+    if let Some(bal) = t.balance {
+        if bal < -1_000_000.0 { reasons.push("Suspiciously negative balance"); }
+    }
+    if t.dup_flag { reasons.push("Possible duplicate transaction"); }
+    let valid = reasons.is_empty();
+    (valid, reasons.join("; "))
+}
+
+/// True if a transaction should visually surface as "Needs Review" — either
+/// already tagged so, or currently failing live validation (and not already
+/// parked in a more specific bucket like Suspense/Manual).
+pub fn effective_needs_review(t: &Transaction) -> bool {
+    match t.status {
+        TransactionStatus::NeedsReview => true,
+        TransactionStatus::Suspense | TransactionStatus::Manual => false,
+        _ => !validate_transaction(t).0,
+    }
+}
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -116,6 +155,10 @@ pub struct DashSummary {
     pub vendor_count:    usize,
     pub top_expense_head: String,
     pub top_expense_amt: f64,
+    pub suspense_count:     usize,
+    pub needs_review_count: usize,
+    pub duplicate_count:    usize,
+    pub gst_count:          usize,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +259,11 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
     exp_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let top_exp = exp_vec.first().cloned().unwrap_or(("—", 0.0));
 
+    let suspense_count     = real.iter().filter(|t| matches!(t.status, TransactionStatus::Suspense)).count();
+    let needs_review_count = real.iter().filter(|t| effective_needs_review(t)).count();
+    let duplicate_count    = real.iter().filter(|t| t.dup_flag).count();
+    let gst_count          = real.iter().filter(|t| t.tags.iter().any(|g| g == "GST" || g == "TAX")).count();
+
     let summary = DashSummary {
         total_credit,
         total_debit,
@@ -226,6 +274,10 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
         vendor_count: vendor_set.len(),
         top_expense_head: top_exp.0.to_string(),
         top_expense_amt:  top_exp.1,
+        suspense_count,
+        needs_review_count,
+        duplicate_count,
+        gst_count,
     };
 
     // ── Monthly aggregation ───────────────────────────────────────────────────

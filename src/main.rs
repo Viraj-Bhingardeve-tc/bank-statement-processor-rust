@@ -261,7 +261,7 @@ fn match_status(t: &parser::Transaction, s: &str) -> bool {
         "high"         => matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7,
         "duplicates"   => t.dup_flag,
         "gst"          => t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") }),
-        "needs_review" => matches!(t.status, parser::TransactionStatus::NeedsReview),
+        "needs_review" => analytics::effective_needs_review(t),
         "credits"      => t.credit.is_some() && t.debit.is_none(),
         "debits"       => t.debit.is_some() && t.credit.is_none(),
         _              => true,
@@ -308,13 +308,25 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
         let has_gst = t.tags.iter().any(|g| g.to_uppercase().contains("GST"));
         let has_tax = t.tags.iter().any(|g| g.to_uppercase().contains("TAX"));
         let has_dup = t.dup_flag || t.tags.iter().any(|g| g.to_uppercase().contains("DUP"));
-        let row_color: i32 = match t.status {
-            parser::TransactionStatus::NeedsReview => 3,
-            parser::TransactionStatus::Suspense    => 4,
-            parser::TransactionStatus::Manual      => 6,
-            _ if t.dup_flag                        => 5,
-            parser::TransactionStatus::Classified  => if t.confidence >= 0.7 { 1 } else { 2 },
-            _                                      => 0,
+        let (val_ok, val_reasons) = analytics::validate_transaction(t);
+        let effective_needs_review = analytics::effective_needs_review(t);
+        let row_color: i32 = if effective_needs_review && !matches!(t.status, parser::TransactionStatus::NeedsReview) {
+            3  // yellow — validation failure
+        } else {
+            match t.status {
+                parser::TransactionStatus::NeedsReview => 3,
+                parser::TransactionStatus::Suspense    => 4,
+                parser::TransactionStatus::Manual      => 6,
+                _ if t.dup_flag                        => 5,
+                parser::TransactionStatus::Classified  => if t.confidence >= 0.7 { 1 } else { 2 },
+                _                                      => 0,
+            }
+        };
+        let review_text = if !val_ok { val_reasons.as_str() } else { "" };
+        let status_display = if effective_needs_review && matches!(t.status, parser::TransactionStatus::Unreviewed) {
+            "needs_review"
+        } else {
+            &t.status.to_string()
         };
         TxnRow {
             bank_name:    SharedString::from(t.bank_name.as_str()),
@@ -328,9 +340,9 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
             vendor:       SharedString::from(t.vendor.as_str()),
             ledger:       SharedString::from(t.account_head.as_str()),
             expense_head: SharedString::from(""),
-            status_text:  SharedString::from(t.status.to_string().as_str()),
+            status_text:  SharedString::from(status_display),
             tags:         SharedString::from(t.tags.join(" ").as_str()),
-            review:       SharedString::from(""),
+            review:       SharedString::from(review_text),
             row_color,
             has_gst,
             has_tax,
@@ -349,7 +361,7 @@ fn compute_filter_counts(txns: &[parser::Transaction]) -> [usize; 7] {
     let high       = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7).count();
     let duplicates = real.iter().filter(|t| t.dup_flag).count();
     let gst        = real.iter().filter(|t| t.tags.iter().any(|g| { let u = g.to_uppercase(); u.contains("GST") || u.contains("TAX") })).count();
-    let review     = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::NeedsReview)).count();
+    let review     = real.iter().filter(|t| analytics::effective_needs_review(t)).count();
     [all, unreviewed, suspense, high, duplicates, gst, review]
 }
 
@@ -490,6 +502,12 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         if s.top_expense_amt > 0.0 { fmt_amt(Some(s.top_expense_amt)) } else { String::new() }
     .as_str()));
     h.set_dash_has_data(s.txn_count > 0);
+    h.set_dash_opening(SharedString::from(fmt_amt(s.opening_bal).as_str()));
+    h.set_dash_closing(SharedString::from(fmt_amt(s.closing_bal).as_str()));
+    h.set_dash_suspense(SharedString::from(s.suspense_count.to_string().as_str()));
+    h.set_dash_needs_review(SharedString::from(s.needs_review_count.to_string().as_str()));
+    h.set_dash_duplicates(SharedString::from(s.duplicate_count.to_string().as_str()));
+    h.set_dash_gst_count(SharedString::from(s.gst_count.to_string().as_str()));
 
     // Insights
     let ins = &data.insights;
@@ -789,33 +807,7 @@ fn apply_parse_result(
     let tally_groups = tally_group_engine::classify_batch(&tally_inputs, None);
 
     // Validate each transaction (port of Electron _validateTransaction).
-    // Returns: (is_valid, reasons_string)
-    let validation: Vec<(bool, String)> = real.iter().map(|t| {
-        let mut reasons: Vec<&str> = Vec::new();
-        // 1. Date must be present
-        if t.date.is_empty() || t.date.len() < 8 {
-            reasons.push("Missing or invalid date");
-        }
-        // 2. Amount must exist and be sane
-        let amt = t.debit.or(t.credit);
-        match amt {
-            None => reasons.push("No amount (debit or credit)"),
-            Some(a) => {
-                if !a.is_finite() || a.abs() > 2e9 { reasons.push("Amount exceeds \u{20B9}200 crore"); }
-                if a < 0.0 { reasons.push("Negative amount — check column detection"); }
-            }
-        }
-        // 3. Narration must not be empty
-        if t.narration.trim().len() < 2 { reasons.push("Empty or very short narration"); }
-        // 4. Balance sanity
-        if let Some(bal) = t.balance {
-            if bal < -1_000_000.0 { reasons.push("Suspiciously negative balance"); }
-        }
-        // 5. Duplicate risk
-        if t.dup_flag { reasons.push("Possible duplicate transaction"); }
-        let valid = reasons.is_empty();
-        (valid, reasons.join("; "))
-    }).collect();
+    let validation: Vec<(bool, String)> = real.iter().map(|t| analytics::validate_transaction(t)).collect();
 
     let mut bank_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let row_models: Vec<TxnRow> = real
@@ -838,9 +830,7 @@ fn apply_parse_result(
             let has_tax = t.tags.iter().any(|tag| tag.to_uppercase().contains("TAX"));
             let has_dup = t.tags.iter().any(|tag| tag.to_uppercase().contains("DUP")) || t.dup_flag;
             let (val_ok, ref val_reasons) = validation[idx];
-            // Treat as NeedsReview if validation fails and not already suspense/manual
-            let effective_needs_review = !val_ok
-                && !matches!(t.status, parser::TransactionStatus::Suspense | parser::TransactionStatus::Manual);
+            let effective_needs_review = analytics::effective_needs_review(t);
             let row_color: i32 = if effective_needs_review && !matches!(t.status, parser::TransactionStatus::NeedsReview) {
                 3  // yellow — validation failure
             } else {
@@ -909,16 +899,8 @@ fn apply_parse_result(
     h.set_dash_credit_count(SharedString::from(credit_cnt.to_string().as_str()));
     h.set_dash_debit_count(SharedString::from(debit_cnt.to_string().as_str()));
     h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
-    let suspense_cnt = real.iter().filter(|t| matches!(t.status, parser::TransactionStatus::Suspense)).count();
-    let needs_review_cnt = real.iter().zip(validation.iter())
-        .filter(|(t, (ok, _))| matches!(t.status, parser::TransactionStatus::NeedsReview) || !ok)
-        .count();
-    let dup_cnt = real.iter().filter(|t| t.dup_flag).count();
-    let gst_cnt = real.iter().filter(|t| t.tags.iter().any(|g| g == "GST" || g == "TAX")).count();
-    h.set_dash_suspense(SharedString::from(suspense_cnt.to_string().as_str()));
-    h.set_dash_needs_review(SharedString::from(needs_review_cnt.to_string().as_str()));
-    h.set_dash_duplicates(SharedString::from(dup_cnt.to_string().as_str()));
-    h.set_dash_gst_count(SharedString::from(gst_cnt.to_string().as_str()));
+    // suspense/needs_review/duplicates/gst counts are set by push_dashboard() below,
+    // which recomputes them live from analytics::compute() on every dashboard refresh.
     h.set_dash_calc_closing(SharedString::from(ui::AppState::fmt_amount(calc_closing).as_str()));
     h.set_dash_has_mismatch(has_mismatch);
     h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
@@ -2351,6 +2333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let txns_snap  = st.transactions.clone();
                 st.audit_events.push(event_str.clone());
                 rebuild_rows(&h, &st);
+                push_dashboard(&h, &st.transactions, st.opening_balance);
                 h.set_status_bank(SharedString::from(
                     format!("Dedupe reset — {} duplicate(s) detected", dup_count).as_str()
                 ));
@@ -2598,6 +2581,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
 
             app.on_do_undo_last_edit(move || {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
@@ -2620,8 +2604,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     t.txn_type     = entry.txn_type;
                     t.status       = entry.status;
                     t.confidence   = entry.confidence;
-                    log::info!("[Undo] restored txn id='{}'", entry.txn_id);
+
+                    let t_id       = t.id.clone();
+                    let t_vendor   = t.vendor.clone();
+                    let t_head     = t.account_head.clone();
+                    let t_type_str = t.txn_type.to_string();
+                    let t_status   = t.status.to_string();
+                    let t_source   = t.classification_source.clone();
+                    let t_conf     = t.confidence;
+                    let client_id  = st.client_id;
+                    log::info!("[Undo] restored txn id='{}'", t_id);
+
+                    let event_str = format!("[{}] Undo Last Edit — id='{}' vendor='{}' head='{}'",
+                        audit_now(), t_id, t_vendor, t_head);
+                    st.audit_events.push(event_str.clone());
+
                     rebuild_rows(&h, &st);
+                    push_dashboard(&h, &st.transactions, st.opening_balance);
+                    drop(st);
+
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::upsert_transaction_classification(
+                            conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, t_conf, &t_source,
+                        );
+                        if let Some(cid) = client_id {
+                            let _ = db::push_audit_event(conn, cid, &event_str);
+                        }
+                    }
                 } else {
                     log::warn!("[Undo] txn id='{}' not found", entry.txn_id);
                 }
@@ -3288,15 +3298,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let t_type_str = t.txn_type.to_string();
                     let t_status   = t.status.to_string();
                     let t_source   = t.classification_source.clone();
+                    let event_str = format!("[{}] Edit Transaction — id='{}' vendor='{}' head='{}' type='{}'",
+                        audit_now(), t_id, t_vendor, t_head, t_type_str);
+                    st.audit_events.push(event_str.clone());
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
                         let _ = db::upsert_transaction_classification(
                             conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, 1.0, &t_source,
                         );
+                        let _ = db::push_audit_event(conn, client_id, &event_str);
                     }
                     log::info!("[SaveTxn] abs={} vendor='{}' head='{}' type='{}' learn={}", abs, vendor, head, typ, learn);
                 }
                 rebuild_rows(&h, &st);
+                push_dashboard(&h, &st.transactions, st.opening_balance);
             });
         }
         {
@@ -3323,6 +3338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log::info!("[DeleteTxn] abs={} removed", abs);
                 }
                 rebuild_rows(&h, &st);
+                push_dashboard(&h, &st.transactions, st.opening_balance);
                 drop(st);
                 if let Some((cid, event_str, txn_id)) = audit {
                     let db = db_ref.lock().unwrap();
@@ -3346,6 +3362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     log::info!("[MarkSuspense] abs={}", abs);
                 }
                 rebuild_rows(&h, &st);
+                push_dashboard(&h, &st.transactions, st.opening_balance);
             });
         }
         {
@@ -3396,6 +3413,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 st.audit_events.push(event_str.clone());
                 log::info!("[AddTxn] date='{}' narr='{}' dr={:?} cr={:?}", date, narr, debit_val, credit_val);
                 rebuild_rows(&h, &st);
+                push_dashboard(&h, &st.transactions, st.opening_balance);
                 drop(st);
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
