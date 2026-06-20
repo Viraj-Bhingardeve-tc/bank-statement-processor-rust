@@ -2,7 +2,7 @@
 // Ports AccountingExportEngine.generate('tally', ...) from the original app.
 
 use crate::parser::{Transaction, VoucherType};
-use crate::classifier::ledger_group;
+use crate::tally_group_engine;
 use std::collections::{BTreeMap, BTreeSet};
 
 // ── Options mirroring the Tally Export modal UI ───────────────────────────────
@@ -138,15 +138,29 @@ pub fn generate(txns: &[Transaction], opts: &TallyOpts, opening_bal: Option<f64>
 
         // Bank ledger itself
         if !opts.bank_ledger.is_empty() && seen.insert(opts.bank_ledger.clone()) {
-            out.push_str(&ledger_master(&opts.bank_ledger, "Bank Accounts"));
+            out.push_str(&ledger_master(&opts.bank_ledger, tally_group_engine::GROUP_BANK_ACCOUNTS));
         }
 
-        // All posting/party ledgers
+        // All posting/party ledgers — mirrors Electron's _tallyParent(): a party
+        // ledger (posting ledger fell back to the vendor name, no real account
+        // head) resolves by voucher direction; an expense/income ledger goes
+        // through the real TallyGroupEngine keyword classifier.
         for t in &real {
             let pl = posting_ledger(t);
             if seen.insert(pl.clone()) {
-                let grp = ledger_group(&pl);
-                out.push_str(&ledger_master(&pl, grp));
+                let is_party = t.account_head.is_empty() && !t.vendor.is_empty();
+                let grp = if is_party {
+                    if voucher_type(t) == "Receipt" {
+                        tally_group_engine::GROUP_SUNDRY_DEBTORS.to_string()
+                    } else {
+                        tally_group_engine::GROUP_SUNDRY_CREDITORS.to_string()
+                    }
+                } else {
+                    let is_credit = t.credit.is_some();
+                    let amount = t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0);
+                    tally_group_engine::classify(&pl, &t.narration, is_credit, amount, None)
+                };
+                out.push_str(&ledger_master(&pl, &grp));
             }
         }
     }
@@ -177,10 +191,11 @@ pub fn generate(txns: &[Transaction], opts: &TallyOpts, opening_bal: Option<f64>
 fn ledger_master(name: &str, group: &str) -> String {
     format!(
         "        <TALLYMESSAGE xmlns:UDF=\"TallyUDF\">\
-         <LEDGER NAME=\"{}\" RESERVEDNAME=\"\">\
+         <LEDGER NAME=\"{}\" ACTION=\"Create\">\
+         <NAME>{}</NAME>\
          <PARENT>{}</PARENT>\
          </LEDGER></TALLYMESSAGE>\n",
-        x(name), x(group)
+        x(name), x(name), x(group)
     )
 }
 

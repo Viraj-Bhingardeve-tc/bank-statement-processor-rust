@@ -1,54 +1,16 @@
-//! party_master.rs — Port of `app.js._detectPartyMaster()` and `app.js._normalizeVendors()`
+//! party_master.rs — Port of `app.js._normalizeVendors()`: two-pass
+//! signature-based vendor canonicalization, so that raw narration variants of
+//! the same real-world party (different word order, suffixes, etc.) collapse
+//! into one canonical ledger name before vendor counts / breakdowns are computed.
 //!
-//! Two public functions:
-//!   `detect_party_master(txns)` — returns top-10 recurring parties (≥2 occurrences).
-//!   `normalize_vendors(txns)`   — two-pass signature-based vendor canonicalization.
+//! (`app.js._detectPartyMaster()` — the recurring-parties list — is not ported
+//! here since `push_summary_extras()` in main.rs already computes the
+//! equivalent "Recurring Parties" breakdown directly from `Transaction::vendor`.)
 
 use std::collections::{HashMap, HashSet};
 
 use super::Transaction;
-use crate::parser::narration_cleaner::normalize_ledger_name;
-
-// ── PartyMasterEntry ──────────────────────────────────────────────────────────
-
-/// One entry in the party master list.
-#[derive(Debug, Clone)]
-pub struct PartyMasterEntry {
-    pub name:         String,
-    pub count:        usize,
-    pub total_amount: f64,
-}
-
-/// Port of `app.js._detectPartyMaster(txns)`.
-///
-/// Aggregates `t.vendor` across all non-synthetic transactions,
-/// keeps parties that appear ≥ 2 times, sorts by frequency descending,
-/// returns up to 10 entries.
-pub fn detect_party_master(txns: &[Transaction]) -> Vec<PartyMasterEntry> {
-    let mut count:  HashMap<String, usize> = HashMap::new();
-    let mut amount: HashMap<String, f64>   = HashMap::new();
-
-    for t in txns {
-        if t.is_opening_balance { continue; }
-        let p = t.vendor.trim().to_string();
-        if p.is_empty() || p.len() < 3 { continue; }
-        *count.entry(p.clone()).or_insert(0) += 1;
-        *amount.entry(p.clone()).or_insert(0.0) +=
-            t.debit.unwrap_or(0.0) + t.credit.unwrap_or(0.0);
-    }
-
-    let mut entries: Vec<PartyMasterEntry> = count.into_iter()
-        .filter(|(_, c)| *c >= 2)
-        .map(|(name, c)| {
-            let total = (amount.get(&name).copied().unwrap_or(0.0) * 100.0).round() / 100.0;
-            PartyMasterEntry { name, count: c, total_amount: total }
-        })
-        .collect();
-
-    entries.sort_by(|a, b| b.count.cmp(&a.count).then(b.name.cmp(&a.name)));
-    entries.truncate(10);
-    entries
-}
+use crate::narration_cleaner::normalize_ledger_name;
 
 // ── normalize_vendors ─────────────────────────────────────────────────────────
 
@@ -144,98 +106,6 @@ pub fn normalize_vendors(txns: &mut Vec<Transaction>) -> usize {
 mod tests {
     use super::*;
     use crate::parser::Transaction;
-
-    fn make_txn(vendor: &str, debit: Option<f64>, credit: Option<f64>) -> Transaction {
-        Transaction {
-            vendor: vendor.to_string(),
-            debit,
-            credit,
-            ..Transaction::new("t")
-        }
-    }
-
-    fn make_ob() -> Transaction {
-        Transaction { is_opening_balance: true, ..Transaction::new("ob") }
-    }
-
-    // ── detect_party_master ───────────────────────────────────────────────────
-
-    #[test]
-    fn single_occurrence_excluded() {
-        let txns = vec![make_txn("Swiggy", Some(800.0), None)];
-        let pm = detect_party_master(&txns);
-        assert!(pm.is_empty(), "needs ≥2 occurrences");
-    }
-
-    #[test]
-    fn two_occurrences_included() {
-        let txns = vec![
-            make_txn("Swiggy", Some(800.0), None),
-            make_txn("Swiggy", Some(650.0), None),
-        ];
-        let pm = detect_party_master(&txns);
-        assert_eq!(pm.len(), 1);
-        assert_eq!(pm[0].name, "Swiggy");
-        assert_eq!(pm[0].count, 2);
-        assert!((pm[0].total_amount - 1450.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn sorted_by_frequency_descending() {
-        let txns = vec![
-            make_txn("Amazon",  Some(500.0), None),
-            make_txn("Swiggy",  Some(800.0), None),
-            make_txn("Swiggy",  Some(650.0), None),
-            make_txn("Amazon",  Some(300.0), None),
-            make_txn("Amazon",  Some(200.0), None),
-        ];
-        let pm = detect_party_master(&txns);
-        assert_eq!(pm[0].name, "Amazon",  "Amazon (3×) should be first");
-        assert_eq!(pm[1].name, "Swiggy",  "Swiggy (2×) should be second");
-    }
-
-    #[test]
-    fn capped_at_ten() {
-        let txns: Vec<Transaction> = (0..12).flat_map(|i| {
-            let name = format!("Party{:02}", i);
-            vec![make_txn(&name, Some(100.0), None), make_txn(&name, Some(100.0), None)]
-        }).collect();
-        let pm = detect_party_master(&txns);
-        assert!(pm.len() <= 10);
-    }
-
-    #[test]
-    fn opening_balance_excluded() {
-        let txns = vec![
-            make_ob(),
-            make_txn("Swiggy", Some(800.0), None),
-            make_txn("Swiggy", Some(650.0), None),
-        ];
-        let pm = detect_party_master(&txns);
-        assert!(!pm.iter().any(|e| e.name.is_empty()));
-    }
-
-    #[test]
-    fn short_names_excluded() {
-        // name < 3 chars excluded
-        let txns = vec![
-            make_txn("AB", Some(100.0), None),
-            make_txn("AB", Some(100.0), None),
-        ];
-        let pm = detect_party_master(&txns);
-        assert!(pm.is_empty());
-    }
-
-    #[test]
-    fn total_amount_uses_debit_and_credit() {
-        let txns = vec![
-            make_txn("IRCTC", Some(1200.0), None),
-            make_txn("IRCTC", None, Some(400.0)),  // refund
-        ];
-        let pm = detect_party_master(&txns);
-        assert_eq!(pm.len(), 1);
-        assert!((pm[0].total_amount - 1600.0).abs() < 0.01);
-    }
 
     // ── normalize_vendors ─────────────────────────────────────────────────────
 

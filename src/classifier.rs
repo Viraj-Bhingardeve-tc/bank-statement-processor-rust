@@ -17,6 +17,10 @@ pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str, rules: &[Cla
         if t.is_opening_balance { continue; }
         // Don't overwrite user-confirmed rows
         if matches!(t.status, TransactionStatus::Classified) && t.confidence >= 1.0 { continue; }
+        // Don't overwrite AI classifications, even below confidence 1.0 — mirrors
+        // Electron's explicit `classifiedBy === 'ai'` guard (app.js:554), since AI
+        // confidence comes from the model and isn't guaranteed to be 1.0.
+        if matches!(t.status, TransactionStatus::Classified) && t.classification_source == "ai" { continue; }
         // Don't overwrite suspense
         if matches!(t.status, TransactionStatus::Suspense) { continue; }
 
@@ -49,7 +53,9 @@ fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationR
                 _          => t.txn_type.clone(),
             };
         }
-        t.confidence = 0.85;
+        // Client-scoped rules are more trustworthy than global ones — mirrors
+        // Electron's app.js:569-578 (client rule 0.9 vs global rule 0.6).
+        t.confidence = if rule.client_id == 0 { 0.6 } else { 0.9 };
         t.status     = TransactionStatus::Classified;
         t.classification_source = "rule".to_string();
     // 2. Keyword heuristics
@@ -487,43 +493,6 @@ fn _narr_similarity(a: &str, b: &str) -> f64 {
     if ta.is_empty() || tb.is_empty() { return 0.0; }
     let common = ta.iter().filter(|t| tb.contains(*t)).count();
     common as f64 / ta.len().max(tb.len()) as f64
-}
-
-// ── Tally group heuristic (maps account head names to Tally groups) ───────────
-
-pub fn ledger_group(name: &str) -> &'static str {
-    let n = name.to_lowercase();
-    if n.contains("salary") || n.contains("wages") || n.contains("payroll") { return "Indirect Expenses"; }
-    if n.contains("rent") || n.contains("lease") { return "Indirect Expenses"; }
-    if n.contains("telephone") || n.contains("internet") || n.contains("broadband") || n.contains("mobile") { return "Indirect Expenses"; }
-    if n.contains("electricity") || n.contains("power") || n.contains("energy") { return "Indirect Expenses"; }
-    if n.contains("fuel") || n.contains("petrol") || n.contains("diesel") { return "Indirect Expenses"; }
-    if n.contains("food") || n.contains("canteen") || n.contains("meal") || n.contains("restaurant") { return "Indirect Expenses"; }
-    if n.contains("medical") || n.contains("medicine") || n.contains("hospital") { return "Indirect Expenses"; }
-    if n.contains("grocery") { return "Indirect Expenses"; }
-    if n.contains("software") || n.contains("saas") || n.contains("subscription") { return "Indirect Expenses"; }
-    if n.contains("insurance") { return "Indirect Expenses"; }
-    if n.contains("professional") || n.contains("consulting") || n.contains("audit") { return "Indirect Expenses"; }
-    if n.contains("bank charge") || n.contains("service charge") { return "Indirect Expenses"; }
-    if n.contains("travel") || n.contains("transport") || n.contains("travelling") { return "Indirect Expenses"; }
-    if n.contains("advertisement") || n.contains("marketing") { return "Indirect Expenses"; }
-    if n.contains("repair") || n.contains("maintenance") { return "Indirect Expenses"; }
-    if n.contains("printing") || n.contains("stationery") { return "Indirect Expenses"; }
-    if n.contains("interest income") { return "Indirect Income"; }
-    if n.contains("dividend") { return "Indirect Income"; }
-    if n.contains("commission") { return "Indirect Income"; }
-    if n.contains("rental income") { return "Indirect Income"; }
-    if n.contains("sales") || n.contains("revenue") { return "Sales Accounts"; }
-    if n.contains("purchase") { return "Purchase Accounts"; }
-    if n.contains("gst") || n.contains("igst") || n.contains("cgst") || n.contains("sgst") { return "Duties & Taxes"; }
-    if n.contains("tds") || n.contains("income tax") || n.contains("advance tax") { return "Duties & Taxes"; }
-    if n.contains("creditor") { return "Sundry Creditors"; }
-    if n.contains("debtor") { return "Sundry Debtors"; }
-    if n.contains("cash") { return "Cash-in-Hand"; }
-    if n.contains("loan") || n.contains("borrowing") { return "Loans (Liability)"; }
-    if n.contains("capital") { return "Capital Account"; }
-    if n.contains("investment") || n.contains("mutual fund") { return "Investments"; }
-    "Indirect Expenses"
 }
 
 #[cfg(test)]

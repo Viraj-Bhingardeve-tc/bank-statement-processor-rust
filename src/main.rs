@@ -740,9 +740,14 @@ fn apply_parse_result(
     h: &AppWindow,
     state_ref: &Arc<Mutex<ui::AppState>>,
     db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
-    result: parser::ParseResult,
+    mut result: parser::ParseResult,
     file_name: &str,
 ) {
+    // Canonicalize vendor/account-head names (port of Electron's _normalizeVendors,
+    // run as step 0 of _postProcess) so narration variants of the same real-world
+    // party collapse into one ledger name before any counts/breakdowns are built.
+    parser::party_master::normalize_vendors(&mut result.transactions);
+
     let real: Vec<&parser::Transaction> = result
         .transactions
         .iter()
@@ -1344,13 +1349,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ok:      true,
                                 err_msg: String::new(),
                             });
-                            let before = all_txns.len();
                             let existing_hashes: std::collections::HashSet<String> =
                                 all_txns.iter().map(|t| t.hash()).collect();
                             let new_txns: Vec<parser::Transaction> = r.transactions.into_iter()
                                 .filter(|t| t.is_opening_balance || !existing_hashes.contains(&t.hash()))
                                 .collect();
-                            skipped += before.saturating_sub(all_txns.len());
+                            let kept_cnt = new_txns.iter().filter(|t| !t.is_opening_balance).count();
+                            skipped += r_cnt.saturating_sub(kept_cnt);
                             all_txns.extend(new_txns.clone());
                             loaded += 1;
                             if first_bank.is_empty() { first_bank = r_bank.clone(); }
@@ -1397,6 +1402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let dedup_on = h.get_dedup_enabled();
                 classifier::classify_all(&mut all_txns, &bank_ledger, &rules, dedup_on);
+                parser::party_master::normalize_vendors(&mut all_txns);
 
                 let real: Vec<&parser::Transaction> = all_txns.iter().filter(|t| !t.is_opening_balance).collect();
                 let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
@@ -1524,6 +1530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let dedup_on2 = h.get_dedup_enabled();
                 let changed = classifier::classify_all(&mut st.transactions, &bank_ledger, &rules, dedup_on2);
+                parser::party_master::normalize_vendors(&mut st.transactions);
                 log::info!("[AutoClassify] classified {} transactions (rules={})", changed, rules.len());
                 rebuild_rows(&h, &st);
                 push_dashboard(&h, &st.transactions, st.opening_balance);
@@ -1589,6 +1596,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(h2) = handle3.upgrade() {
                                 let mut st = state_ref3.lock().unwrap();
                                 st.transactions = txns_done;
+                                parser::party_master::normalize_vendors(&mut st.transactions);
                                 h2.set_ai_overlay_visible(false);
                                 rebuild_rows(&h2, &st);
                                 push_dashboard(&h2, &st.transactions, st.opening_balance);

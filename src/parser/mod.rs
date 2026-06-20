@@ -14,7 +14,6 @@ pub mod bank_detection;
 pub mod column_detector;
 pub mod date_parser;
 pub mod excel_parser;
-pub mod narration_cleaner;
 pub mod noise_filter;
 pub mod ocr_extractor;
 pub mod ocr_parser;
