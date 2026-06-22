@@ -405,6 +405,17 @@ fn gen_generic_xml(txns: &[Transaction], opts: &AccountingOpts) -> String {
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str("<BankStatementExport>\n");
     out.push_str(&format!("  <Company>{}</Company>\n", x(&opts.company)));
+    // GSTIN/FinancialYear/StateCode are collected by the export wizard UI
+    // (main.rs's wiz_gstin/wiz_fy_idx/wiz_state_idx) and were previously
+    // dropped on the floor in this format — the original Electron
+    // AccountingExportEngine's generic-XML exporter emits GSTIN and
+    // FinancialYear in the equivalent spot (StateCode has no upstream
+    // precedent anywhere in the original export engine; added here since
+    // this is this app's own custom format, not an external system's fixed
+    // import schema like Zoho/QuickBooks/Odoo).
+    out.push_str(&format!("  <GSTIN>{}</GSTIN>\n", x(&opts.gstin)));
+    out.push_str(&format!("  <FinancialYear>{}</FinancialYear>\n", x(&opts.fy)));
+    out.push_str(&format!("  <StateCode>{}</StateCode>\n", x(&opts.state_code)));
     out.push_str(&format!("  <BankLedger>{}</BankLedger>\n", x(&opts.bank_ledger)));
     out.push_str("  <Transactions>\n");
 
@@ -429,4 +440,71 @@ fn gen_generic_xml(txns: &[Transaction], opts: &AccountingOpts) -> String {
     out.push_str("  </Transactions>\n");
     out.push_str("</BankStatementExport>\n");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{Transaction, VoucherType, TransactionStatus};
+
+    fn opts(software: Software) -> AccountingOpts {
+        AccountingOpts {
+            software,
+            company: "Acme Co".to_string(),
+            gstin: "27AAAPL1234C1ZV".to_string(),
+            fy: "2024-25".to_string(),
+            state_code: "MH".to_string(),
+            currency: "INR".to_string(),
+            bank_ledger: "HDFC Bank".to_string(),
+            include_gst: true,
+            ..Default::default()
+        }
+    }
+
+    fn gst_txn() -> Transaction {
+        let mut t = Transaction::new("t1");
+        t.date = "01/04/2026".to_string();
+        t.narration = "AIRTEL POSTPAID BILL".to_string();
+        t.debit = Some(999.0);
+        t.account_head = "Telephone Expense".to_string();
+        t.txn_type = VoucherType::Payment;
+        t.status = TransactionStatus::Classified;
+        t.tags = vec!["GST".to_string()];
+        t.gst_type = Some("CGST+SGST".to_string());
+        t.gst_rate = Some(18.0);
+        t.gst_amount = Some(152.37);
+        t
+    }
+
+    #[test]
+    fn generic_xml_includes_gstin_fy_and_state_code() {
+        let xml = generate(&[gst_txn()], &opts(Software::Xml), None);
+        assert!(xml.contains("<GSTIN>27AAAPL1234C1ZV</GSTIN>"), "{}", xml);
+        assert!(xml.contains("<FinancialYear>2024-25</FinancialYear>"), "{}", xml);
+        assert!(xml.contains("<StateCode>MH</StateCode>"), "{}", xml);
+    }
+
+    #[test]
+    fn zoho_csv_populates_tax_columns_when_include_gst_is_set() {
+        let csv = generate(&[gst_txn()], &opts(Software::Zoho), None);
+        assert!(csv.contains("CGST+SGST"), "tax name missing from Zoho export:\n{}", csv);
+        assert!(csv.contains("18.00"), "tax percentage missing from Zoho export:\n{}", csv);
+    }
+
+    #[test]
+    fn zoho_csv_leaves_tax_columns_blank_when_include_gst_is_unset() {
+        let mut o = opts(Software::Zoho);
+        o.include_gst = false;
+        let csv = generate(&[gst_txn()], &o, None);
+        assert!(!csv.contains("CGST+SGST"), "tax name must not appear when include_gst is false:\n{}", csv);
+    }
+
+    #[test]
+    fn tally_xml_does_not_reference_gstin_or_fy() {
+        // Verified against the original Electron tallyExportEngine: the
+        // TDML voucher format has no GSTIN/financial-year field at all.
+        let xml = generate(&[gst_txn()], &opts(Software::Tally), None);
+        assert!(!xml.contains("27AAAPL1234C1ZV"));
+        assert!(!xml.contains("2024-25"));
+    }
 }

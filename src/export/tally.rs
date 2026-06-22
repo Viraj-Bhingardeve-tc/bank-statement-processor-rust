@@ -10,7 +10,16 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Default)]
 pub struct TallyOpts {
     pub company:            String,
+    // Verified against the original Electron app's tallyExportEngine
+    // (accounting-export-engine.js's Tally exporter): the TDML voucher
+    // import format it produces has no GSTIN/financial-year field at all —
+    // only SVCURRENTCOMPANY. These two are collected by the shared export
+    // wizard UI but genuinely don't apply to this specific output format,
+    // in the original app as well as this port. Intentionally unread here;
+    // see gen_generic_xml in accounting.rs for the format that does use them.
+    #[allow(dead_code)]
     pub gstin:              String,
+    #[allow(dead_code)]
     pub fy:                 String,         // e.g. "2024-25"
     pub bank_ledger:        String,         // Tally ledger for the bank account
     pub date_from:          Option<String>, // ISO YYYY-MM-DD
