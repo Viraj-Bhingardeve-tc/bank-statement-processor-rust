@@ -922,8 +922,16 @@ fn apply_parse_result(
                     &result.account_no, real.len(),
                 ).ok();
                 if let Some(iid) = imp_id {
-                    let _ = db::upsert_transactions(conn, cid, Some(iid), &result.transactions);
-                    log::info!("[LoadFile] persisted {} txns import_id={}", real.len(), iid);
+                    match db::upsert_transactions(conn, cid, Some(iid), &result.transactions) {
+                        Ok(n) => log::info!("[LoadFile] persisted {} txns import_id={}", n, iid),
+                        Err(e) => {
+                            log::error!("[LoadFile] failed to persist transactions: {}", e);
+                            h.set_toast_msg(SharedString::from(
+                                format!("Save failed — transactions were NOT saved: {}", e).as_str(),
+                            ));
+                            h.set_toast_kind(2);
+                        }
+                    }
                 }
                 // Auto-seed unique account heads into the ledgers table
                 let mut heads_seen = std::collections::HashSet::new();
@@ -936,7 +944,9 @@ fn apply_parse_result(
                     )))
                     .collect();
                 if !heads_with_groups.is_empty() {
-                    let _ = db::auto_seed_ledgers(conn, cid, &heads_with_groups);
+                    if let Err(e) = db::auto_seed_ledgers(conn, cid, &heads_with_groups) {
+                        log::error!("[LoadFile] failed to auto-seed ledgers: {}", e);
+                    }
                 }
                 imp_id
             } else { None }
@@ -1295,7 +1305,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .collect();
                         let db = db_ref.lock().unwrap();
                         if let Some(conn) = db.as_ref() {
-                            let _ = db::add_dedupe_hashes(conn, cid, &new_hashes);
+                            // Not user-facing-critical (the transactions themselves are
+                            // about to be persisted by apply_parse_result below) — but a
+                            // failure here means future imports won't recognize these rows
+                            // as already-seen, so it's worth a clear log even without a toast.
+                            if let Err(e) = db::add_dedupe_hashes(conn, cid, &new_hashes) {
+                                log::error!("[LoadFile] failed to persist dedupe hashes: {}", e);
+                            }
                         }
                     }
                 }
@@ -1411,9 +1427,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(conn) = db.as_ref() {
                                 let client_id = { state_ref.lock().unwrap().client_id.unwrap_or(0) };
                                 if client_id > 0 {
-                                    if let Ok(iid) = db::save_import(conn, client_id, &file_name, &r_bank, &r_account, r_cnt) {
-                                        let _ = db::upsert_transactions(conn, client_id, Some(iid), &new_txns);
-                                        new_import_ids.push(iid);
+                                    match db::save_import(conn, client_id, &file_name, &r_bank, &r_account, r_cnt) {
+                                        Ok(iid) => {
+                                            if let Err(e) = db::upsert_transactions(conn, client_id, Some(iid), &new_txns) {
+                                                log::error!("[Batch] failed to persist transactions for {:?}: {}", path, e);
+                                                // This file's batch_results entry was just pushed as ok:true
+                                                // (parsing succeeded) — correct it now that we know the save
+                                                // didn't, so the batch monitor table doesn't claim success.
+                                                if let Some(last) = batch_results.last_mut() {
+                                                    last.ok = false;
+                                                    last.err_msg = format!("Parsed but save failed: {}", e);
+                                                }
+                                            } else {
+                                                new_import_ids.push(iid);
+                                            }
+                                        }
+                                        Err(e) => log::error!("[Batch] failed to record import history for {:?}: {}", path, e),
                                     }
                                 }
                             }
@@ -1443,7 +1472,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .collect();
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::add_dedupe_hashes(conn, cid, &new_hashes);
+                        if let Err(e) = db::add_dedupe_hashes(conn, cid, &new_hashes) {
+                            log::error!("[Batch] failed to persist dedupe hashes: {}", e);
+                        }
                     }
                 }
 
@@ -1509,7 +1540,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if client_id2 > 0 {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::push_audit_event(conn, client_id2, &batch_event);
+                        if let Err(e) = db::push_audit_event(conn, client_id2, &batch_event) {
+                            log::error!("[Batch] failed to persist audit event: {}", e);
+                        }
                     }
                 }
                 log::info!("[Batch] loaded={} skipped={} errors={} total_txns={}", loaded, skipped, errors, real.len());
@@ -2486,12 +2519,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::update_dup_flags(conn, &txns_snap);
-                        let _ = db::push_audit_event(conn, cid, &event_str);
+                        if let Err(e) = db::update_dup_flags(conn, &txns_snap) {
+                            log::error!("[Dedup] failed to persist dup flags: {}", e);
+                        }
+                        if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
+                            log::error!("[Dedup] failed to persist audit event: {}", e);
+                        }
                         // Also clears the persisted cross-import dedup history (port of
                         // Electron's btnResetDedupe -> DB.resetDedupeHashes), so previously
                         // loaded statements are no longer treated as duplicates on re-import.
-                        let _ = db::reset_dedupe_hashes(conn, cid);
+                        if let Err(e) = db::reset_dedupe_hashes(conn, cid) {
+                            log::error!("[Dedup] failed to reset dedupe hashes: {}", e);
+                        }
                     }
                 }
             });
@@ -2578,7 +2617,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::push_audit_event(conn, cid, &event_str);
+                        if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
+                            log::error!("[Audit] failed to persist audit event: {}", e);
+                        }
                     }
                 }
             });
@@ -2773,11 +2814,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::upsert_transaction_classification(
+                        if let Err(e) = db::upsert_transaction_classification(
                             conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, t_conf, &t_source,
-                        );
+                        ) {
+                            log::error!("[Undo] failed to persist restored classification: {}", e);
+                            h.set_toast_msg(SharedString::from(
+                                format!("Undo shown but not saved: {}", e).as_str()));
+                            h.set_toast_kind(2);
+                        }
                         if let Some(cid) = client_id {
-                            let _ = db::push_audit_event(conn, cid, &event_str);
+                            if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
+                                log::error!("[Undo] failed to persist audit event: {}", e);
+                            }
                         }
                     }
                 } else {
@@ -3170,7 +3218,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Persist last used client
                 let db = db_ref.lock().unwrap();
                 if let Some(conn) = db.as_ref() {
-                    let _ = db::set_setting(conn, settings::KEY_LAST_CLIENT, &client.id.to_string());
+                    if let Err(e) = db::set_setting(conn, settings::KEY_LAST_CLIENT, &client.id.to_string()) {
+                        log::error!("[SelectClient] failed to remember last-used client: {}", e);
+                    }
                 }
 
                 log::info!("[SelectClient] loaded client '{}' id={} txns={}", name_str, client.id, txns.len());
@@ -3191,8 +3241,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let db = db_ref.lock().unwrap();
                 if let Some(conn) = db.as_ref() {
-                    let _ = db::delete_client(conn, cid);
                     // Cascade deletes transactions/imports/rules via FK ON DELETE CASCADE
+                    if let Err(e) = db::delete_client(conn, cid) {
+                        log::error!("[DeleteClient] failed to delete client id={}: {}", cid, e);
+                        h.set_toast_msg(SharedString::from(
+                            format!("Delete failed — client was NOT deleted: {}", e).as_str()));
+                        h.set_toast_kind(2);
+                        return;
+                    }
                     log::info!("[DeleteClient] deleted client id={}", cid);
                 }
                 drop(db);
@@ -3269,7 +3325,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .collect();
                             h.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
                         }
-                        let _ = db::push_audit_event(conn, cid, &event_str);
+                        if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
+                            log::error!("[EditClient] failed to persist audit event: {}", e);
+                        }
                     }
                     h.set_status_bank(SharedString::from("Client updated"));
                     log::info!("[EditClient] updated cid={} name='{}' ledger='{}'", cid, new_name, new_ledger);
@@ -3451,10 +3509,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.audit_events.push(event_str.clone());
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::upsert_transaction_classification(
+                        if let Err(e) = db::upsert_transaction_classification(
                             conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, 1.0, &t_source,
-                        );
-                        let _ = db::push_audit_event(conn, client_id, &event_str);
+                        ) {
+                            log::error!("[SaveTxn] failed to persist classification: {}", e);
+                            h.set_toast_msg(SharedString::from(
+                                format!("Shown but not saved: {}", e).as_str()));
+                            h.set_toast_kind(2);
+                        }
+                        if let Err(e) = db::push_audit_event(conn, client_id, &event_str) {
+                            log::error!("[SaveTxn] failed to persist audit event: {}", e);
+                        }
                     }
                     log::info!("[SaveTxn] abs={} vendor='{}' head='{}' type='{}' learn={}", abs, vendor, head, typ, learn);
                 }
@@ -3491,8 +3556,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some((cid, event_str, txn_id)) = audit {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::push_audit_event(conn, cid, &event_str);
-                        let _ = db::delete_transaction(conn, &txn_id);
+                        if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
+                            log::error!("[DeleteTxn] failed to persist audit event: {}", e);
+                        }
+                        // The row was already removed from in-memory state and the
+                        // UI rebuilt above (optimistic update) — if the DB delete
+                        // fails, the row will reappear on next reload from the DB,
+                        // so the user needs to know now rather than be silently misled.
+                        if let Err(e) = db::delete_transaction(conn, &txn_id) {
+                            log::error!("[DeleteTxn] failed to delete txn id={}: {}", txn_id, e);
+                            h.set_toast_msg(SharedString::from(
+                                format!("Delete failed — row will reappear on reload: {}", e).as_str()));
+                            h.set_toast_kind(2);
+                        }
                     }
                 }
             });
@@ -3566,8 +3642,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        let _ = db::upsert_transactions(conn, cid, None, &[new_txn_for_db]);
-                        let _ = db::push_audit_event(conn, cid, &event_str);
+                        if let Err(e) = db::upsert_transactions(conn, cid, None, &[new_txn_for_db]) {
+                            log::error!("[AddTxn] failed to persist new row: {}", e);
+                            h.set_toast_msg(SharedString::from(
+                                format!("Row shown but not saved: {}", e).as_str()));
+                            h.set_toast_kind(2);
+                        }
+                        if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
+                            log::error!("[AddTxn] failed to persist audit event: {}", e);
+                        }
                     }
                 }
             });

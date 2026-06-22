@@ -125,17 +125,23 @@ fn status_from_str(s: &str) -> TransactionStatus {
     }
 }
 
+/// Upserts all of `txns` atomically: either every row is written, or (on
+/// any failure) none are — wrapped in one transaction instead of one
+/// implicit autocommit per row, which both avoids leaving a partially
+/// applied import on a mid-batch failure and is dramatically faster for
+/// multi-thousand-row statements.
 pub fn upsert_transactions(
     conn: &Connection,
     client_id: i64,
     import_id: Option<i64>,
     txns: &[Transaction],
 ) -> Result<usize> {
+    let txn = conn.unchecked_transaction().context("upsert_transactions: begin")?;
     let mut count = 0usize;
     for t in txns {
         let tags_json = serde_json::to_string(&t.tags).unwrap_or_else(|_| "[]".to_string());
         let eff_import_id = import_id.or(t.import_id);
-        conn.execute(
+        txn.execute(
             "INSERT OR REPLACE INTO transactions (
                 id, client_id, import_id, bank_name, account_no,
                 date, date_ts, narration, reference,
@@ -163,6 +169,7 @@ pub fn upsert_transactions(
         ).context("upsert_transaction row")?;
         count += 1;
     }
+    txn.commit().context("upsert_transactions: commit")?;
     Ok(count)
 }
 
@@ -479,12 +486,14 @@ pub fn get_dedupe_hashes(conn: &Connection, client_id: i64) -> Result<std::colle
 }
 
 pub fn add_dedupe_hashes(conn: &Connection, client_id: i64, hashes: &[String]) -> Result<()> {
+    let txn = conn.unchecked_transaction().context("add_dedupe_hashes: begin")?;
     for h in hashes {
-        conn.execute(
+        txn.execute(
             "INSERT OR IGNORE INTO dedupe_hashes (client_id, hash) VALUES (?1, ?2)",
             rusqlite::params![client_id, h],
         ).context("add_dedupe_hashes")?;
     }
+    txn.commit().context("add_dedupe_hashes: commit")?;
     Ok(())
 }
 
@@ -570,19 +579,20 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
 // must never be edited — only ever append new entries with the next version
 // number.
 //
-// IMPORTANT — historical transition: every database this app has ever
-// created already received migrations 1 and 2 unconditionally, because the
-// previous `init_schema` ran them via `IF NOT EXISTS` / a best-effort,
-// error-swallowed `ALTER TABLE` on *every* open, regardless of version
-// (there was no version tracking at all — `user_version` is therefore 0 on
-// every pre-existing database, the same as a brand-new one). If migration 1
-// were replayed against such a database, `ALTER TABLE ... ADD COLUMN
-// dup_flag` would fail with "duplicate column", breaking every existing
-// install on upgrade. `init_schema` below accounts for this by treating an
-// unversioned database (`user_version == 0`) as already being at version 2
-// — never re-running 1 or 2 — and only replaying genuinely new migrations
-// (3+) going forward. Do not change that bootstrap logic when adding new
-// migrations.
+// IMPORTANT — historical transition: `user_version` is 0 both on a database
+// that has NEVER existed before (just created by `CREATE TABLE` from
+// `SCHEMA_SQL` — does not yet have `dup_flag`/`audit_log`) and on a
+// pre-existing database created by an older build of this app, which
+// already has `dup_flag`/`audit_log` from the old best-effort, error-
+// swallowed `ALTER TABLE`/`CREATE IF NOT EXISTS` calls that used to run
+// unconditionally on every open (there was no version tracking at all
+// before this). Those two `user_version == 0` cases need opposite handling
+// — replaying migration 1's `ALTER TABLE ... ADD COLUMN dup_flag` against
+// the second case fails with "duplicate column", while skipping it for the
+// first case leaves a brand-new database missing the column entirely.
+// `user_version` alone cannot tell them apart, so `apply_migrations` below
+// checks for the actual presence of `dup_flag` to disambiguate. Do not
+// remove that check when adding new migrations.
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0"),
     (2, "CREATE TABLE IF NOT EXISTS audit_log (
@@ -595,8 +605,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
 ];
 
 /// The highest migration version every database created by a pre-migration-
-/// framework build of this app already has, unconditionally. See the long
-/// comment on `MIGRATIONS` above.
+/// framework build of this app already has, unconditionally, IF it already
+/// existed before this framework shipped. See the long comment on
+/// `MIGRATIONS` above.
 const LEGACY_BASELINE_VERSION: i64 = 2;
 
 fn init_schema(conn: &Connection) -> Result<()> {
@@ -605,35 +616,57 @@ fn init_schema(conn: &Connection) -> Result<()> {
     apply_migrations(conn, MIGRATIONS, LEGACY_BASELINE_VERSION)
 }
 
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+        rusqlite::params![column],
+        |r| r.get(0),
+    ).context("column_exists")?;
+    Ok(count > 0)
+}
+
 /// Applies every `(version, sql)` pair in `migrations` whose version is
 /// greater than the connection's effective baseline, in ascending order,
-/// advancing `PRAGMA user_version` after each. An unversioned database
-/// (`user_version == 0`) is treated as already being at `legacy_baseline`
-/// rather than 0 — see the comment on `MIGRATIONS` for why. Extracted from
-/// `init_schema` so the version-arithmetic can be unit-tested directly
-/// against a synthetic migration list, without needing a real future
-/// migration to exist in `MIGRATIONS` yet.
+/// advancing `PRAGMA user_version` after each. Extracted from `init_schema`
+/// so the version-arithmetic can be unit-tested directly against a
+/// synthetic migration list, without needing a real future migration to
+/// exist in `MIGRATIONS` yet.
 fn apply_migrations(conn: &Connection, migrations: &[(i64, &str)], legacy_baseline: i64) -> Result<()> {
     let current: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .context("read PRAGMA user_version")?;
-    let baseline = if current == 0 { legacy_baseline } else { current };
 
+    let baseline = if current != 0 {
+        current
+    } else if column_exists(conn, "transactions", "dup_flag")? {
+        // user_version == 0 but the legacy migrations' effects are already
+        // present -> this is a pre-existing database from before this
+        // framework existed, not a brand-new one. Don't replay them.
+        legacy_baseline
+    } else {
+        0
+    };
+
+    // user_version is recorded after EACH migration (not just once at the
+    // end) so that if a later migration in this same call fails, an
+    // earlier one that already succeeded is never replayed on retry.
+    let mut last_recorded = current;
     for (version, sql) in migrations.iter().filter(|(v, _)| *v > baseline) {
         conn.execute_batch(sql)
             .with_context(|| format!("migration {version} failed"))?;
         conn.pragma_update(None, "user_version", *version)
             .with_context(|| format!("failed to record user_version {version}"))?;
+        last_recorded = *version;
         log::info!("[db] applied migration {version}");
     }
 
-    // A fresh/unversioned database jumps straight to the legacy baseline
-    // even if no migrations > baseline exist yet to advance user_version
-    // via the loop above (e.g. right after this change ships, before any
-    // migration past the baseline exists).
-    if current == 0 {
-        conn.pragma_update(None, "user_version", legacy_baseline)
-            .context("failed to set initial user_version")?;
+    // Legacy pre-existing DB: `baseline` jumped straight to `legacy_baseline`
+    // but nothing in the loop above ran to record that version (no pending
+    // migration exceeded it). Record it explicitly so user_version settles
+    // instead of re-deriving the baseline via column_exists on every open.
+    if last_recorded < baseline {
+        conn.pragma_update(None, "user_version", baseline)
+            .context("failed to record legacy baseline version")?;
     }
 
     Ok(())
@@ -767,10 +800,19 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_lands_on_legacy_baseline() {
+    fn fresh_database_actually_runs_migrations_and_lands_on_baseline() {
+        // A genuinely new database does NOT have dup_flag/audit_log from
+        // SCHEMA_SQL alone — they must come from real migrations running,
+        // not from being skipped as "already legacy-applied".
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).expect("schema init failed on fresh in-memory DB");
         assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+        assert!(column_exists(&conn, "transactions", "dup_flag").unwrap());
+        let audit_log_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_log'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(audit_log_exists, 1, "audit_log must have been created by migration 2");
     }
 
     #[test]
@@ -821,14 +863,75 @@ mod tests {
     }
 
     #[test]
-    fn unversioned_db_with_no_migrations_past_baseline_still_gets_versioned() {
-        // Reproduces "right after this change ships, before any migration
-        // past LEGACY_BASELINE_VERSION exists" — the loop body never runs,
-        // but user_version must still move off 0.
+    fn legacy_db_with_nothing_beyond_baseline_still_settles_to_a_recorded_version() {
+        // Reproduces "this app shipped only migrations 1 and 2, and a real
+        // pre-existing (legacy, dup_flag already present) database is
+        // opened" — the loop body has nothing to run (nothing exceeds
+        // legacy_baseline), but user_version must still move off 0 so this
+        // doesn't re-derive the baseline via column_exists on every future
+        // open.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
-        apply_migrations(&conn, MIGRATIONS, LEGACY_BASELINE_VERSION).unwrap();
-        assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+        conn.execute("ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0", []).unwrap();
+
+        let synthetic: &[(i64, &str)] = &[
+            (1, "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0"),
+            (2, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY);"),
+        ];
+        apply_migrations(&conn, synthetic, 2).expect("must not replay 1/2 against a legacy DB");
+        assert_eq!(user_version(&conn), 2, "user_version must settle, not stay 0 forever");
+    }
+
+    #[test]
+    fn upsert_transactions_is_atomic_on_mid_batch_failure() {
+        // FOREIGN KEY enforcement requires the real open() path (PRAGMA
+        // foreign_keys = ON is set per-connection, not via raw schema SQL).
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+
+        let mut good = Transaction::new("t_good");
+        good.date = "01/04/2026".to_string();
+        good.narration = "Opening".to_string();
+
+        let mut bad = Transaction::new("t_bad");
+        bad.date = "02/04/2026".to_string();
+        bad.narration = "References a client that does not exist".to_string();
+        bad.import_id = Some(999_999); // no such import_history row -> FK violation
+
+        let txns = vec![good, bad];
+        let result = upsert_transactions(&conn, client_id, None, &txns);
+
+        assert!(result.is_err(), "batch with an FK-violating row must fail");
+        let persisted = get_transactions(&conn, client_id).expect("get_transactions");
+        assert!(
+            persisted.is_empty(),
+            "the earlier valid row in the same batch must have been rolled back too, found {} row(s)",
+            persisted.len(),
+        );
+    }
+
+    #[test]
+    fn add_dedupe_hashes_rejects_unknown_client_without_partial_writes() {
+        let conn = open(":memory:").expect("open");
+        // client_id 999_999 doesn't exist -> every row in the batch hits the
+        // same FK violation (dedupe_hashes has no other per-row constraint
+        // to vary), so this confirms the transaction wrapping doesn't break
+        // normal error propagation, while upsert_transactions' test above
+        // covers the harder "some rows valid, some not" atomicity case.
+        let hashes = vec!["abc12345".to_string(), "deadbeef".to_string()];
+        let result = add_dedupe_hashes(&conn, 999_999, &hashes);
+        assert!(result.is_err(), "hashes for a non-existent client must fail");
+        assert!(get_dedupe_hashes(&conn, 999_999).unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_dedupe_hashes_happy_path_still_works_under_transaction_wrapping() {
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+        let hashes = vec!["abc12345".to_string(), "deadbeef".to_string()];
+        add_dedupe_hashes(&conn, client_id, &hashes).expect("valid batch must succeed");
+        let stored = get_dedupe_hashes(&conn, client_id).unwrap();
+        assert_eq!(stored.len(), 2);
     }
 
     #[test]
