@@ -542,6 +542,10 @@ pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
 }
 
 /// Open (or create) the SQLite database at `path` and run the schema migration.
+///
+/// A migration failure is fatal and propagates as `Err` rather than being
+/// silently swallowed — callers must treat this as a startup-blocking error,
+/// not continue with a database that may be missing schema it now expects.
 pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(&path)
         .with_context(|| format!("Cannot open database at {:?}", path.as_ref()))?;
@@ -559,23 +563,79 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
 }
 
 // ── Schema ────────────────────────────────────────────────────────────────────
-
-fn init_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA_SQL)
-        .context("execute_batch failed on schema SQL")?;
-    // Additive migrations: ignore errors (column/table already exists)
-    let _ = conn.execute(
-        "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0", [],
-    );
-    let _ = conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS audit_log (
+//
+// Versioned migrations, gated by SQLite's built-in `PRAGMA user_version`.
+// Each entry is (version, sql) and is applied at most once, in order, then
+// `user_version` is advanced to that version. Once released, an entry's SQL
+// must never be edited — only ever append new entries with the next version
+// number.
+//
+// IMPORTANT — historical transition: every database this app has ever
+// created already received migrations 1 and 2 unconditionally, because the
+// previous `init_schema` ran them via `IF NOT EXISTS` / a best-effort,
+// error-swallowed `ALTER TABLE` on *every* open, regardless of version
+// (there was no version tracking at all — `user_version` is therefore 0 on
+// every pre-existing database, the same as a brand-new one). If migration 1
+// were replayed against such a database, `ALTER TABLE ... ADD COLUMN
+// dup_flag` would fail with "duplicate column", breaking every existing
+// install on upgrade. `init_schema` below accounts for this by treating an
+// unversioned database (`user_version == 0`) as already being at version 2
+// — never re-running 1 or 2 — and only replaying genuinely new migrations
+// (3+) going forward. Do not change that bootstrap logic when adding new
+// migrations.
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0"),
+    (2, "CREATE TABLE IF NOT EXISTS audit_log (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id  INTEGER NOT NULL DEFAULT 0,
             event      TEXT    NOT NULL,
             created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_audit_client ON audit_log(client_id, id DESC);"
-    );
+         );
+         CREATE INDEX IF NOT EXISTS idx_audit_client ON audit_log(client_id, id DESC);"),
+];
+
+/// The highest migration version every database created by a pre-migration-
+/// framework build of this app already has, unconditionally. See the long
+/// comment on `MIGRATIONS` above.
+const LEGACY_BASELINE_VERSION: i64 = 2;
+
+fn init_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA_SQL)
+        .context("execute_batch failed on base schema SQL")?;
+    apply_migrations(conn, MIGRATIONS, LEGACY_BASELINE_VERSION)
+}
+
+/// Applies every `(version, sql)` pair in `migrations` whose version is
+/// greater than the connection's effective baseline, in ascending order,
+/// advancing `PRAGMA user_version` after each. An unversioned database
+/// (`user_version == 0`) is treated as already being at `legacy_baseline`
+/// rather than 0 — see the comment on `MIGRATIONS` for why. Extracted from
+/// `init_schema` so the version-arithmetic can be unit-tested directly
+/// against a synthetic migration list, without needing a real future
+/// migration to exist in `MIGRATIONS` yet.
+fn apply_migrations(conn: &Connection, migrations: &[(i64, &str)], legacy_baseline: i64) -> Result<()> {
+    let current: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .context("read PRAGMA user_version")?;
+    let baseline = if current == 0 { legacy_baseline } else { current };
+
+    for (version, sql) in migrations.iter().filter(|(v, _)| *v > baseline) {
+        conn.execute_batch(sql)
+            .with_context(|| format!("migration {version} failed"))?;
+        conn.pragma_update(None, "user_version", *version)
+            .with_context(|| format!("failed to record user_version {version}"))?;
+        log::info!("[db] applied migration {version}");
+    }
+
+    // A fresh/unversioned database jumps straight to the legacy baseline
+    // even if no migrations > baseline exist yet to advance user_version
+    // via the loop above (e.g. right after this change ships, before any
+    // migration past the baseline exists).
+    if current == 0 {
+        conn.pragma_update(None, "user_version", legacy_baseline)
+            .context("failed to set initial user_version")?;
+    }
+
     Ok(())
 }
 
@@ -700,5 +760,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "transactions table must exist");
+    }
+
+    fn user_version(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn fresh_database_lands_on_legacy_baseline() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).expect("schema init failed on fresh in-memory DB");
+        assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+    }
+
+    #[test]
+    fn pre_existing_unversioned_db_does_not_replay_legacy_migrations() {
+        // Simulate a real pre-migration-framework database: base schema
+        // already applied, dup_flag/audit_log already present from the old
+        // best-effort ALTER/CREATE-IF-NOT-EXISTS calls, but user_version
+        // still 0 because nothing ever set it.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        conn.execute("ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0", []).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL DEFAULT 0,
+                event TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        ).unwrap();
+        assert_eq!(user_version(&conn), 0, "precondition: never versioned");
+
+        // Must NOT error with "duplicate column dup_flag".
+        init_schema(&conn).expect("init_schema must not replay already-applied legacy migrations");
+        assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+    }
+
+    #[test]
+    fn forward_migration_applies_once_from_a_versioned_baseline() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        conn.pragma_update(None, "user_version", 2i64).unwrap();
+
+        let synthetic: &[(i64, &str)] = &[
+            (1, "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0"),
+            (2, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY);"),
+            (3, "ALTER TABLE transactions ADD COLUMN test_marker TEXT"),
+        ];
+        apply_migrations(&conn, synthetic, 2).expect("migration 3 should apply cleanly");
+        assert_eq!(user_version(&conn), 3);
+
+        let has_column: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name='test_marker'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(has_column, 1, "migration 3's column must have been added");
+
+        // Re-applying from the now-current version must be a no-op, not an error.
+        apply_migrations(&conn, synthetic, 2).expect("re-running init must not replay migration 3");
+        assert_eq!(user_version(&conn), 3);
+    }
+
+    #[test]
+    fn unversioned_db_with_no_migrations_past_baseline_still_gets_versioned() {
+        // Reproduces "right after this change ships, before any migration
+        // past LEGACY_BASELINE_VERSION exists" — the loop body never runs,
+        // but user_version must still move off 0.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_migrations(&conn, MIGRATIONS, LEGACY_BASELINE_VERSION).unwrap();
+        assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+    }
+
+    #[test]
+    fn real_file_database_opens_idempotently_across_repeated_opens() {
+        // Exercises the actual `open()`/`Connection::open` file path (not
+        // just open_in_memory), since that's what the running app uses.
+        let path = std::env::temp_dir().join(format!(
+            "bsp_migration_smoke_{}.db",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let conn = open(&path).expect("first open of fresh file DB");
+            assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+        }
+        // Reopen twice more — must stay idempotent, no "duplicate column" etc.
+        for _ in 0..2 {
+            let conn = open(&path).expect("re-open of existing file DB");
+            assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 }
