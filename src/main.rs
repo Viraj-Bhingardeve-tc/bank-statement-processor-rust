@@ -2291,7 +2291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     format!("{} Receipts", p.receipt),
                 ];
                 if p.contra > 0 { parts.push(format!("{} Contra", p.contra)); }
-                if p.gst    > 0 { parts.push(format!("{} GST", p.gst)); }
+                if p.gst    > 0 { parts.push(format!("{} GST (\u{20b9}{:.2})", p.gst, p.gst_amount)); }
                 if p.skipped > 0 { parts.push(format!("{} skipped", p.skipped)); }
                 let mut text = parts.join("  •  ");
                 if !validation.errors.is_empty() {
@@ -2443,6 +2443,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         dup_flag:     false,
                         prev_balance: None,
                         balance_ok:   None,
+                        gst_rate:     None,
+                        gst_amount:   None,
+                        gst_type:     None,
                     });
                 }
 
@@ -3629,6 +3632,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     dup_flag:    false,
                     prev_balance: None,
                     balance_ok:  None,
+                    gst_rate:    None,
+                    gst_amount:  None,
+                    gst_type:    None,
                 };
                 let new_txn_for_db = new_txn.clone();
                 st.transactions.push(new_txn);

@@ -269,6 +269,10 @@ pub struct TallyPreview {
     pub receipt: usize,
     pub contra:  usize,
     pub gst:     usize,
+    /// Sum of gst_amount across GST-tagged transactions in this preview —
+    /// backs the "verify CGST/SGST/IGST split" warning with a real figure
+    /// instead of just a voucher count.
+    pub gst_amount: f64,
     pub skipped: usize,
 }
 
@@ -289,11 +293,13 @@ pub fn count_preview(txns: &[Transaction], opts: &TallyOpts) -> TallyPreview {
     let payment = filtered.iter().filter(|t| voucher_type(t) == "Payment").count();
     let receipt = filtered.iter().filter(|t| voucher_type(t) == "Receipt").count();
     let contra  = filtered.iter().filter(|t| voucher_type(t) == "Contra").count();
-    let gst     = filtered.iter().filter(|t| t.tags.iter().any(|g| g == "GST")).count();
+    let gst_txns: Vec<&&Transaction> = filtered.iter().filter(|t| t.tags.iter().any(|g| g == "GST")).collect();
+    let gst        = gst_txns.len();
+    let gst_amount = gst_txns.iter().filter_map(|t| t.gst_amount).sum();
 
     TallyPreview {
         total:   filtered.len(),
-        payment, receipt, contra, gst,
+        payment, receipt, contra, gst, gst_amount,
         skipped: total_real - filtered.len(),
     }
 }

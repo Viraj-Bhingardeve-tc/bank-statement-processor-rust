@@ -124,9 +124,11 @@ pub fn validate(txns: &[Transaction], opts: &AccountingOpts) -> ExportValidation
     let zero_amt = filtered.iter().filter(|t| amt(t) <= 0.0).count();
     let unclassified = filtered.iter().filter(|t| posting_ledger(t) == "Unclassified").count();
     let low_conf = filtered.iter().filter(|t| t.confidence > 0.0 && t.confidence < 0.4).count();
-    let gst_tagged = filtered.iter()
+    let gst_txns: Vec<&&Transaction> = filtered.iter()
         .filter(|t| t.tags.iter().any(|g| g == "GST" || g == "TAX"))
-        .count();
+        .collect();
+    let gst_tagged = gst_txns.len();
+    let gst_amount_total: f64 = gst_txns.iter().filter_map(|t| t.gst_amount).sum();
 
     if self_posted > 0 {
         errors.push(format!("{} voucher(s) have identical Dr/Cr ledger — Tally will reject", self_posted));
@@ -144,7 +146,14 @@ pub fn validate(txns: &[Transaction], opts: &AccountingOpts) -> ExportValidation
         warnings.push(format!("{} voucher(s) have low confidence (<40%) — ledger may be incorrect", low_conf));
     }
     if gst_tagged > 0 {
-        warnings.push(format!("{} GST-tagged voucher(s) — manually verify CGST/SGST/IGST split", gst_tagged));
+        if gst_amount_total > 0.0 {
+            warnings.push(format!(
+                "{} GST-tagged voucher(s), estimated tax \u{20b9}{:.2} — verify CGST/SGST/IGST split",
+                gst_tagged, gst_amount_total,
+            ));
+        } else {
+            warnings.push(format!("{} GST-tagged voucher(s) — manually verify CGST/SGST/IGST split", gst_tagged));
+        }
     }
 
     ExportValidation { errors, warnings }
@@ -244,6 +253,26 @@ fn gen_zoho(txns: &[Transaction], opts: &AccountingOpts) -> String {
             (0.0, amt_val, amt_val, 0.0)
         };
 
+        // GST figures belong on the posting/expense-income leg, not the
+        // bank leg — the cash movement itself isn't taxed. Previously these
+        // three columns were always blank even though gst_engine computed
+        // real values for every GST-tagged transaction (see
+        // PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 3); only
+        // populate them when the user has actually asked for GST data via
+        // the export wizard's "include GST" option.
+        let (tax_name, tax_type, tax_pct) = if opts.include_gst {
+            match (&t.gst_type, t.gst_rate) {
+                (Some(gt), Some(rate)) => (
+                    gt.clone(),
+                    if t.debit.is_some() { "Purchase Tax" } else { "Sales Tax" }.to_string(),
+                    format!("{:.2}", rate),
+                ),
+                _ => (String::new(), String::new(), String::new()),
+            }
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+
         rows.push(csv_row(&[
             date.clone(), jnum.clone(), notes.to_string(), t.reference.clone(), cur.to_string(),
             opts.bank_ledger.clone(), "Bank".to_string(), t.vendor.clone(), notes.to_string(),
@@ -254,7 +283,7 @@ fn gen_zoho(txns: &[Transaction], opts: &AccountingOpts) -> String {
             date, jnum, notes.to_string(), t.reference.clone(), cur.to_string(),
             ledger.to_string(), "Expense".to_string(), t.vendor.clone(), notes.to_string(),
             format!("{:.2}", posting_dr), format!("{:.2}", posting_cr),
-            "".to_string(), "".to_string(), "".to_string(), "".to_string(),
+            "".to_string(), tax_name, tax_type, tax_pct,
         ]));
     }
 

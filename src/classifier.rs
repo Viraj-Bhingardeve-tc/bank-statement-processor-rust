@@ -101,6 +101,13 @@ fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationR
                 t.account_head = ledger;
             }
         }
+        // Surface the rest of the analysis instead of discarding it — these
+        // used to be computed and immediately dropped (see
+        // PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 3). Now
+        // persisted on the transaction and consumed by export/accounting.rs.
+        t.gst_rate   = gst.gst_rate;
+        t.gst_amount = gst.gst_amount;
+        t.gst_type   = gst.gst_type;
     }
 }
 
@@ -535,5 +542,32 @@ mod tests {
         t.narration = "ATM CASH WITHDRAWAL".to_string();
         let vt = infer_voucher_type(&t, "ATM CASH WITHDRAWAL");
         assert!(matches!(vt, VoucherType::Contra));
+    }
+
+    #[test]
+    fn classify_one_surfaces_gst_analysis_onto_the_transaction() {
+        // Previously gst_engine::analyse()'s result was used for one ledger
+        // fallback and then dropped — rate/amount/type never reached the
+        // transaction at all. See PRODUCTION_READINESS_AUDIT_2026-06-22.md
+        // Phase 2 item 3.
+        let mut t = crate::parser::Transaction::new("test");
+        t.narration = "AIRTEL POSTPAID BILL".to_string();
+        t.debit = Some(999.0);
+        classify_one(&mut t, "Bank Ledger", &[]);
+        assert_eq!(t.gst_rate, Some(18.0));
+        assert!(t.gst_amount.is_some());
+        assert!(t.gst_type.is_some());
+        assert!(t.tags.contains(&"GST".to_string()));
+    }
+
+    #[test]
+    fn classify_one_leaves_gst_fields_none_when_no_gst_signal() {
+        let mut t = crate::parser::Transaction::new("test");
+        t.narration = "SALARY CREDIT".to_string();
+        t.credit = Some(50000.0);
+        classify_one(&mut t, "Bank Ledger", &[]);
+        assert_eq!(t.gst_rate, None);
+        assert_eq!(t.gst_amount, None);
+        assert_eq!(t.gst_type, None);
     }
 }

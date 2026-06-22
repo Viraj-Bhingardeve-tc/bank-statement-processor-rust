@@ -153,6 +153,16 @@ pub struct Transaction {
     pub prev_balance: Option<f64>,
     /// true = balance reconciles; false = mismatch (stamped by validate_balances).
     pub balance_ok: Option<bool>,
+
+    /// GST rate detected by gst_engine::analyse (e.g. 18.0 for 18%), if any.
+    #[serde(default)]
+    pub gst_rate: Option<f64>,
+    /// Estimated GST tax amount, if any.
+    #[serde(default)]
+    pub gst_amount: Option<f64>,
+    /// "IGST" | "CGST+SGST" | "EXEMPT", if any.
+    #[serde(default)]
+    pub gst_type: Option<String>,
 }
 
 impl Transaction {
@@ -204,6 +214,9 @@ impl Transaction {
             dup_flag: false,
             prev_balance: None,
             balance_ok: None,
+            gst_rate: None,
+            gst_amount: None,
+            gst_type: None,
         }
     }
 }

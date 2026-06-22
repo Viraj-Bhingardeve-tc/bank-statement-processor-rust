@@ -520,6 +520,9 @@ pub fn prepend_opening_balance_row(
         dup_flag:         false,
         prev_balance:     None,
         balance_ok:       None,
+        gst_rate:         None,
+        gst_amount:       None,
+        gst_type:         None,
     };
 
     txns.insert(0, ob_row);

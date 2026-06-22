@@ -147,13 +147,15 @@ pub fn upsert_transactions(
                 date, date_ts, narration, reference,
                 debit, credit, balance, prev_balance,
                 vendor, account_head, txn_type, status, confidence,
-                classified_by, tags, balance_ok, is_opening_bal, dup_flag
+                classified_by, tags, balance_ok, is_opening_bal, dup_flag,
+                gst_rate, gst_amount, gst_type
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12, ?13,
                 ?14, ?15, ?16, ?17, ?18,
-                ?19, ?20, ?21, ?22, ?23
+                ?19, ?20, ?21, ?22, ?23,
+                ?24, ?25, ?26
             )",
             rusqlite::params![
                 t.id, client_id, eff_import_id, t.bank_name, t.account_no,
@@ -165,6 +167,7 @@ pub fn upsert_transactions(
                 t.balance_ok.map(|b| if b { 1i64 } else { 0i64 }),
                 if t.is_opening_balance { 1i64 } else { 0i64 },
                 if t.dup_flag { 1i64 } else { 0i64 },
+                t.gst_rate, t.gst_amount, t.gst_type,
             ],
         ).context("upsert_transaction row")?;
         count += 1;
@@ -178,7 +181,8 @@ pub fn get_transactions(conn: &Connection, client_id: i64) -> Result<Vec<Transac
         "SELECT id, import_id, bank_name, account_no, date, date_ts,
                 narration, reference, debit, credit, balance, prev_balance,
                 vendor, account_head, txn_type, status, confidence, tags,
-                balance_ok, is_opening_bal, dup_flag, classified_by
+                balance_ok, is_opening_bal, dup_flag, classified_by,
+                gst_rate, gst_amount, gst_type
          FROM transactions WHERE client_id = ?1
          ORDER BY date_ts ASC, rowid ASC"
     ).context("get_transactions prepare")?;
@@ -217,6 +221,9 @@ pub fn get_transactions(conn: &Connection, client_id: i64) -> Result<Vec<Transac
             balance_ok:       balance_ok_raw.map(|v| v != 0),
             is_opening_balance: is_ob != 0,
             dup_flag:         dup != 0,
+            gst_rate:         r.get(22)?,
+            gst_amount:       r.get(23)?,
+            gst_type:         r.get(24)?,
         })
     }).context("get_transactions query")?;
     rows.collect::<rusqlite::Result<Vec<_>>>().context("get_transactions collect")
@@ -227,7 +234,8 @@ pub fn get_transactions_for_import(conn: &Connection, import_id: i64) -> Result<
         "SELECT id, import_id, bank_name, account_no, date, date_ts,
                 narration, reference, debit, credit, balance, prev_balance,
                 vendor, account_head, txn_type, status, confidence, tags,
-                balance_ok, is_opening_bal, dup_flag, classified_by
+                balance_ok, is_opening_bal, dup_flag, classified_by,
+                gst_rate, gst_amount, gst_type
          FROM transactions WHERE import_id = ?1
          ORDER BY date_ts ASC, rowid ASC"
     ).context("get_transactions_for_import prepare")?;
@@ -265,6 +273,9 @@ pub fn get_transactions_for_import(conn: &Connection, import_id: i64) -> Result<
             tags,
             balance_ok:       balance_ok_raw.map(|v| v != 0),
             is_opening_balance: is_ob != 0,
+            gst_rate:         r.get(22)?,
+            gst_amount:       r.get(23)?,
+            gst_type:         r.get(24)?,
             dup_flag:         dup != 0,
         })
     }).context("get_transactions_for_import query")?;
@@ -602,6 +613,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
             created_at TEXT    NOT NULL DEFAULT (datetime('now'))
          );
          CREATE INDEX IF NOT EXISTS idx_audit_client ON audit_log(client_id, id DESC);"),
+    // gst_engine::analyse() has always computed these per transaction, but
+    // the result was discarded after a single tag/ledger-fallback use —
+    // see PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 3.
+    (3, "ALTER TABLE transactions ADD COLUMN gst_rate REAL;
+         ALTER TABLE transactions ADD COLUMN gst_amount REAL;
+         ALTER TABLE transactions ADD COLUMN gst_type TEXT;"),
 ];
 
 /// The highest migration version every database created by a pre-migration-
@@ -799,6 +816,15 @@ mod tests {
         conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
     }
 
+    /// The highest version in the real MIGRATIONS list — what any database
+    /// (fresh or legacy) should end up at after init_schema, since every
+    /// test in this module runs against the real migration list. Avoids
+    /// hardcoding a version number that goes stale every time a migration
+    /// is appended.
+    fn latest_migration_version() -> i64 {
+        MIGRATIONS.last().unwrap().0
+    }
+
     #[test]
     fn fresh_database_actually_runs_migrations_and_lands_on_baseline() {
         // A genuinely new database does NOT have dup_flag/audit_log from
@@ -806,8 +832,9 @@ mod tests {
         // not from being skipped as "already legacy-applied".
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).expect("schema init failed on fresh in-memory DB");
-        assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+        assert_eq!(user_version(&conn), latest_migration_version());
         assert!(column_exists(&conn, "transactions", "dup_flag").unwrap());
+        assert!(column_exists(&conn, "transactions", "gst_rate").unwrap());
         let audit_log_exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_log'",
             [], |r| r.get(0),
@@ -820,7 +847,9 @@ mod tests {
         // Simulate a real pre-migration-framework database: base schema
         // already applied, dup_flag/audit_log already present from the old
         // best-effort ALTER/CREATE-IF-NOT-EXISTS calls, but user_version
-        // still 0 because nothing ever set it.
+        // still 0 because nothing ever set it. Migrations newer than the
+        // legacy baseline (e.g. migration 3's gst_* columns) are still
+        // genuinely new to this database and must still apply.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
         conn.execute("ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0", []).unwrap();
@@ -834,7 +863,9 @@ mod tests {
 
         // Must NOT error with "duplicate column dup_flag".
         init_schema(&conn).expect("init_schema must not replay already-applied legacy migrations");
-        assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+        assert_eq!(user_version(&conn), latest_migration_version());
+        assert!(column_exists(&conn, "transactions", "gst_rate").unwrap(),
+            "migration 3 is newer than the legacy baseline and must still have applied");
     }
 
     #[test]
@@ -880,6 +911,27 @@ mod tests {
         ];
         apply_migrations(&conn, synthetic, 2).expect("must not replay 1/2 against a legacy DB");
         assert_eq!(user_version(&conn), 2, "user_version must settle, not stay 0 forever");
+    }
+
+    #[test]
+    fn gst_fields_round_trip_through_upsert_and_get() {
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+
+        let mut t = Transaction::new("t_gst");
+        t.date = "01/04/2026".to_string();
+        t.narration = "AIRTEL POSTPAID BILL".to_string();
+        t.debit = Some(999.0);
+        t.gst_rate = Some(18.0);
+        t.gst_amount = Some(152.37);
+        t.gst_type = Some("CGST+SGST".to_string());
+
+        upsert_transactions(&conn, client_id, None, &[t]).expect("upsert");
+        let fetched = get_transactions(&conn, client_id).expect("get_transactions");
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].gst_rate, Some(18.0));
+        assert_eq!(fetched[0].gst_amount, Some(152.37));
+        assert_eq!(fetched[0].gst_type.as_deref(), Some("CGST+SGST"));
     }
 
     #[test]
@@ -946,12 +998,12 @@ mod tests {
 
         {
             let conn = open(&path).expect("first open of fresh file DB");
-            assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+            assert_eq!(user_version(&conn), latest_migration_version());
         }
         // Reopen twice more — must stay idempotent, no "duplicate column" etc.
         for _ in 0..2 {
             let conn = open(&path).expect("re-open of existing file DB");
-            assert_eq!(user_version(&conn), LEGACY_BASELINE_VERSION);
+            assert_eq!(user_version(&conn), latest_migration_version());
         }
 
         let _ = std::fs::remove_file(&path);
