@@ -88,6 +88,20 @@ fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationR
             t.tags.push(tag);
         }
     }
+
+    // 5. Richer GST analysis (rate/vendor-map aware — port of GSTEngine.processBatch),
+    // catching GST-applicable vendors by name alone even without an explicit
+    // GST/IGST/CGST/SGST keyword, and auto-suggesting an expense ledger when blank.
+    if let Some(gst) = crate::gst_engine::analyse(&t.narration, &t.reference, &t.vendor, t.debit, t.credit) {
+        if !t.tags.contains(&"GST".to_string()) {
+            t.tags.push("GST".to_string());
+        }
+        if t.account_head.is_empty() {
+            if let Some(ledger) = gst.expense_ledger {
+                t.account_head = ledger;
+            }
+        }
+    }
 }
 
 struct KwResult {

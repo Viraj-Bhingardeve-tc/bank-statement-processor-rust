@@ -47,6 +47,51 @@ fn csv_row(cells: &[&str]) -> String {
     cells.iter().map(|c| csv_val(c)).collect::<Vec<_>>().join(",")
 }
 
+// ── Posting ledger / party group (mirrors export/accounting.rs + tally.rs) ───
+
+fn posting_ledger(t: &Transaction) -> &str {
+    if !t.account_head.is_empty() { return &t.account_head; }
+    if !t.vendor.is_empty()       { return &t.vendor; }
+    "Unclassified"
+}
+
+/// "SDr"/"SCr" for party (vendor-as-ledger) rows, empty for category-head rows —
+/// mirrors Electron's `t.partyGroup`, which Rust doesn't track as a stored field.
+fn party_group(t: &Transaction) -> &'static str {
+    if !t.account_head.is_empty() { return ""; }
+    if t.vendor.is_empty() { return ""; }
+    if t.credit.is_some() && t.debit.is_none() { "SDr" } else { "SCr" }
+}
+
+/// Per (bank, account) breakdown: opening balance, closing balance, txn count.
+struct AccountBreakdown {
+    bank_name:   String,
+    account_no:  String,
+    opening_bal: Option<f64>,
+    closing_bal: Option<f64>,
+    txn_count:   usize,
+}
+
+fn account_breakdowns(real: &[&Transaction]) -> Vec<AccountBreakdown> {
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut groups: std::collections::HashMap<(String, String), Vec<&Transaction>> = std::collections::HashMap::new();
+    for t in real {
+        let key = (t.bank_name.clone(), t.account_no.clone());
+        if !groups.contains_key(&key) { order.push(key.clone()); }
+        groups.entry(key).or_default().push(t);
+    }
+    order.into_iter().map(|key| {
+        let txns = &groups[&key];
+        AccountBreakdown {
+            bank_name:   key.0,
+            account_no:  key.1,
+            opening_bal: txns.first().and_then(|t| t.prev_balance),
+            closing_bal: txns.last().and_then(|t| t.balance),
+            txn_count:   txns.len(),
+        }
+    }).collect()
+}
+
 // ── Main export function ──────────────────────────────────────────────────────
 
 /// Export transactions to a CSV file at `path`.
@@ -76,10 +121,13 @@ pub fn export_csv(
     lines.push("=== TRANSACTIONS ===".to_string());
     lines.push(csv_row(&[
         "Date","Narration","Reference","Debit","Credit","Balance",
-        "Vendor","Account Head","Type","Status","Tags","Confidence",
+        "Vendor","Account Head","Ledger for Posting","Party Group",
+        "Type","Status","Tags",
+        "Confidence","Classification Source","Classification Reason","Classified By",
         "Bank Name","Account No"
     ]));
     for t in &real {
+        let classified_by = if t.classification_source.is_empty() { "local" } else { &t.classification_source };
         lines.push(csv_row(&[
             &t.date,
             &t.narration,
@@ -89,10 +137,15 @@ pub fn export_csv(
             &fmt_amt(t.balance),
             &t.vendor,
             &t.account_head,
+            posting_ledger(t),
+            party_group(t),
             &t.txn_type.to_string(),
             &t.status.to_string(),
             &t.tags.join("; "),
             &format!("{:.2}", t.confidence),
+            &t.classification_source,
+            "",
+            classified_by,
             &t.bank_name,
             &t.account_no,
         ]));
@@ -125,6 +178,20 @@ pub fn export_csv(
     ];
     for row in &summary_rows {
         lines.push(csv_row(&[row.0, row.1.as_str()]));
+    }
+
+    let breakdowns = account_breakdowns(&real);
+    if breakdowns.len() > 1 {
+        lines.push(String::new());
+        lines.push("=== BANK ACCOUNT BREAKDOWNS ===".to_string());
+        lines.push(csv_row(&["Bank Name","Account No","Opening Balance","Closing Balance","Transactions"]));
+        for b in &breakdowns {
+            lines.push(csv_row(&[
+                &b.bank_name, &b.account_no,
+                &fmt_amt(b.opening_bal), &fmt_amt(b.closing_bal),
+                &b.txn_count.to_string(),
+            ]));
+        }
     }
 
     // ── Sheet: Receipt Heads ──────────────────────────────────────────────────
@@ -202,7 +269,9 @@ pub fn export_xlsx(
     ws.set_name("Transactions")?;
     let txn_headers = [
         "Date","Narration","Reference","Debit","Credit","Balance",
-        "Vendor","Account Head","Type","Status","Tags","Confidence",
+        "Vendor","Account Head","Ledger for Posting","Party Group",
+        "Type","Status","Tags",
+        "Confidence","Classification Source","Classification Reason","Classified By",
         "Bank Name","Account No",
     ];
     for (c, h) in txn_headers.iter().enumerate() {
@@ -210,6 +279,7 @@ pub fn export_xlsx(
     }
     for (r, t) in real.iter().enumerate() {
         let row = (r + 1) as u32;
+        let classified_by = if t.classification_source.is_empty() { "local" } else { t.classification_source.as_str() };
         ws.write(row, 0,  t.date.as_str())?;
         ws.write(row, 1,  t.narration.as_str())?;
         ws.write(row, 2,  t.reference.as_str())?;
@@ -218,12 +288,17 @@ pub fn export_xlsx(
         if let Some(v) = t.balance { ws.write(row, 5, v)?; }
         ws.write(row, 6,  t.vendor.as_str())?;
         ws.write(row, 7,  t.account_head.as_str())?;
-        ws.write(row, 8,  t.txn_type.to_string().as_str())?;
-        ws.write(row, 9,  t.status.to_string().as_str())?;
-        ws.write(row, 10, t.tags.join("; ").as_str())?;
-        ws.write(row, 11, t.confidence)?;
-        ws.write(row, 12, t.bank_name.as_str())?;
-        ws.write(row, 13, t.account_no.as_str())?;
+        ws.write(row, 8,  posting_ledger(t))?;
+        ws.write(row, 9,  party_group(t))?;
+        ws.write(row, 10, t.txn_type.to_string().as_str())?;
+        ws.write(row, 11, t.status.to_string().as_str())?;
+        ws.write(row, 12, t.tags.join("; ").as_str())?;
+        ws.write(row, 13, t.confidence)?;
+        ws.write(row, 14, t.classification_source.as_str())?;
+        ws.write(row, 15, "")?;
+        ws.write(row, 16, classified_by)?;
+        ws.write(row, 17, t.bank_name.as_str())?;
+        ws.write(row, 18, t.account_no.as_str())?;
     }
 
     // ── Sheet 2: Summary ──────────────────────────────────────────────────────
@@ -254,6 +329,24 @@ pub fn export_xlsx(
     for (r, (k, v)) in summary.iter().enumerate() {
         ws2.write(r as u32, 0, *k)?;
         ws2.write(r as u32, 1, v.as_str())?;
+    }
+
+    let breakdowns = account_breakdowns(&real);
+    if breakdowns.len() > 1 {
+        let mut row = (summary.len() + 1) as u32;
+        ws2.write(row, 0, "Bank Account Breakdowns")?;
+        row += 1;
+        for (c, h) in ["Bank Name","Account No","Opening Balance","Closing Balance","Transactions"].iter().enumerate() {
+            ws2.write(row, c as u16, *h)?;
+        }
+        for b in &breakdowns {
+            row += 1;
+            ws2.write(row, 0, b.bank_name.as_str())?;
+            ws2.write(row, 1, b.account_no.as_str())?;
+            if let Some(v) = b.opening_bal { ws2.write(row, 2, v)?; }
+            if let Some(v) = b.closing_bal { ws2.write(row, 3, v)?; }
+            ws2.write(row, 4, b.txn_count as f64)?;
+        }
     }
 
     // ── Sheet 3: Receipt Heads ────────────────────────────────────────────────

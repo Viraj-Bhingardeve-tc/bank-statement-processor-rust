@@ -16,6 +16,7 @@ mod db;
 mod export;
 mod narration_cleaner;
 mod tally_group_engine;
+mod gst_engine;
 mod parser;
 mod settings;
 mod ui;
@@ -1253,13 +1254,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     };
 
-                let result = match parse_result {
+                let mut result = match parse_result {
                     Some(r) => r,
                     None => {
                         h.set_status_bank(SharedString::from("No transactions found"));
                         return;
                     }
                 };
+
+                // Cross-import dedup — catches the same statement being re-loaded in a
+                // separate session, not just duplicate rows within one load. Synthetic
+                // (opening-balance) rows are always kept.
+                if h.get_dedup_enabled() {
+                    let client_id = state_ref.lock().unwrap().client_id;
+                    if let Some(cid) = client_id {
+                        let known = {
+                            let db = db_ref.lock().unwrap();
+                            db.as_ref().and_then(|conn| db::get_dedupe_hashes(conn, cid).ok())
+                                .unwrap_or_default()
+                        };
+                        let before = result.transactions.iter().filter(|t| !t.is_opening_balance).count();
+                        result.transactions.retain(|t| t.is_opening_balance || !known.contains(&t.hash()));
+                        let after = result.transactions.iter().filter(|t| !t.is_opening_balance).count();
+                        let skipped = before.saturating_sub(after);
+                        if after == 0 {
+                            h.set_toast_msg(SharedString::from(
+                                "All transactions in this file already loaded (dedupe)"));
+                            h.set_toast_kind(2);
+                            h.set_status_bank(SharedString::from("Dedupe: nothing new to load"));
+                            return;
+                        }
+                        if skipped > 0 {
+                            h.set_toast_msg(SharedString::from(
+                                format!("Dedupe: skipped {} duplicate row(s)", skipped).as_str()));
+                            h.set_toast_kind(2);
+                        }
+                        let new_hashes: Vec<String> = result.transactions.iter()
+                            .filter(|t| !t.is_opening_balance)
+                            .map(|t| t.hash())
+                            .collect();
+                        let db = db_ref.lock().unwrap();
+                        if let Some(conn) = db.as_ref() {
+                            let _ = db::add_dedupe_hashes(conn, cid, &new_hashes);
+                        }
+                    }
+                }
 
                 apply_parse_result(&h, &state_ref, &db_ref, result, &file_name);
             });
@@ -1287,6 +1326,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let st = state_ref.lock().unwrap();
                     st.transactions.clone()
                 };
+                let batch_client_id = state_ref.lock().unwrap().client_id;
+                let persisted_hashes: std::collections::HashSet<String> = batch_client_id
+                    .and_then(|cid| {
+                        let db = db_ref.lock().unwrap();
+                        db.as_ref().and_then(|conn| db::get_dedupe_hashes(conn, cid).ok())
+                    })
+                    .unwrap_or_default();
                 let mut loaded = 0usize;
                 let mut skipped = 0usize;
                 let mut errors = 0usize;
@@ -1349,8 +1395,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ok:      true,
                                 err_msg: String::new(),
                             });
-                            let existing_hashes: std::collections::HashSet<String> =
+                            let mut existing_hashes: std::collections::HashSet<String> =
                                 all_txns.iter().map(|t| t.hash()).collect();
+                            existing_hashes.extend(persisted_hashes.iter().cloned());
                             let new_txns: Vec<parser::Transaction> = r.transactions.into_iter()
                                 .filter(|t| t.is_opening_balance || !existing_hashes.contains(&t.hash()))
                                 .collect();
@@ -1388,6 +1435,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if all_txns.is_empty() { return; }
+
+                if let Some(cid) = batch_client_id {
+                    let new_hashes: Vec<String> = all_txns.iter()
+                        .filter(|t| !t.is_opening_balance)
+                        .map(|t| t.hash())
+                        .collect();
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        let _ = db::add_dedupe_hashes(conn, cid, &new_hashes);
+                    }
+                }
 
                 // Classify and build model
                 let (bank_ledger, client_id2) = {
@@ -1785,33 +1843,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None    => return,
                 };
 
-                use calamine::{open_workbook_auto, Reader};
-                let mut wb = match open_workbook_auto(&path) {
-                    Ok(wb) => wb,
-                    Err(e) => {
-                        log::error!("[ImportLedgers] open failed: {}", e);
-                        h.set_toast_msg(SharedString::from("Could not open file"));
-                        h.set_toast_kind(2);
-                        return;
-                    }
-                };
-                let sheet_name = match wb.sheet_names().first() {
-                    Some(n) => n.clone(),
-                    None => { h.set_toast_msg(SharedString::from("File has no sheets")); h.set_toast_kind(2); return; }
-                };
-                let range = match wb.worksheet_range(&sheet_name) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        log::error!("[ImportLedgers] sheet error: {}", e);
-                        h.set_toast_msg(SharedString::from("Could not read sheet"));
-                        h.set_toast_kind(2);
-                        return;
-                    }
-                };
+                let is_csv = path.extension().and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("csv")).unwrap_or(false);
 
-                let rows: Vec<Vec<String>> = range.rows().map(|row| {
-                    row.iter().map(|c| c.to_string().trim().to_string()).collect()
-                }).collect();
+                let rows: Vec<Vec<String>> = if is_csv {
+                    let mut reader = match csv::ReaderBuilder::new()
+                        .has_headers(false)
+                        .flexible(true)
+                        .from_path(&path)
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("[ImportLedgers] CSV open failed: {}", e);
+                            h.set_toast_msg(SharedString::from("Could not open file"));
+                            h.set_toast_kind(2);
+                            return;
+                        }
+                    };
+                    reader.records()
+                        .filter_map(|rec| rec.ok())
+                        .map(|rec| rec.iter().map(|c| c.trim().to_string()).collect())
+                        .collect()
+                } else {
+                    use calamine::{open_workbook_auto, Reader};
+                    let mut wb = match open_workbook_auto(&path) {
+                        Ok(wb) => wb,
+                        Err(e) => {
+                            log::error!("[ImportLedgers] open failed: {}", e);
+                            h.set_toast_msg(SharedString::from("Could not open file"));
+                            h.set_toast_kind(2);
+                            return;
+                        }
+                    };
+                    let sheet_name = match wb.sheet_names().first() {
+                        Some(n) => n.clone(),
+                        None => { h.set_toast_msg(SharedString::from("File has no sheets")); h.set_toast_kind(2); return; }
+                    };
+                    let range = match wb.worksheet_range(&sheet_name) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            log::error!("[ImportLedgers] sheet error: {}", e);
+                            h.set_toast_msg(SharedString::from("Could not read sheet"));
+                            h.set_toast_kind(2);
+                            return;
+                        }
+                    };
+                    range.rows().map(|row| {
+                        row.iter().map(|c| c.to_string().trim().to_string()).collect()
+                    }).collect()
+                };
 
                 if rows.len() < 2 {
                     h.set_toast_msg(SharedString::from("File appears empty"));
@@ -2064,13 +2144,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let from    = h.get_wiz_date_from().to_string();
                 let to      = h.get_wiz_date_to().to_string();
 
+                const FY_OPTS:    [&str; 4] = ["2024-25", "2023-24", "2022-23", "2021-22"];
+                const STATE_OPTS: [&str; 9] = ["MH", "GJ", "DL", "KA", "TN", "TG", "RJ", "UP", "WB"];
+                let fy = FY_OPTS.get(h.get_wiz_fy_idx() as usize).copied().unwrap_or("2024-25").to_string();
+                let state_code = STATE_OPTS.get(h.get_wiz_state_idx() as usize).copied().unwrap_or("MH").to_string();
+
                 let software = export::accounting::Software::from_idx(sw_idx);
                 let opts = export::accounting::AccountingOpts {
                     software,
                     company:            if company.is_empty() { st.client_name.clone() } else { company },
                     gstin,
-                    fy:                 String::new(),
-                    state_code:         "MH".to_string(),
+                    fy,
+                    state_code,
                     currency:           "INR".to_string(),
                     bank_ledger:        st.tally_ledger.clone(),
                     date_from:          if from.is_empty() { None } else { Some(from) },
@@ -2082,6 +2167,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     only_classified:    h.get_wiz_opt_classified(),
                     skip_low_conf:      h.get_wiz_opt_skip_low(),
                 };
+
+                let validation = export::accounting::validate(&st.transactions, &opts);
+                if !validation.can_export() {
+                    let msg = format!("Cannot export: {}", validation.errors.join("; "));
+                    log::warn!("[ExportAccounting] blocked: {}", msg);
+                    h.set_toast_msg(SharedString::from(msg.as_str()));
+                    h.set_toast_kind(2);
+                    return;
+                }
+                if !validation.warnings.is_empty() {
+                    log::warn!("[ExportAccounting] warnings: {}", validation.warnings.join("; "));
+                }
+
                 let content  = export::accounting::generate(&st.transactions, &opts, st.opening_balance);
                 let ext      = software.ext();
                 let label    = software.label();
@@ -2111,18 +2209,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let st = state_ref.lock().unwrap();
                 if st.transactions.is_empty() {
                     h.set_export_preview_text(SharedString::from("No transactions loaded"));
+                    h.set_wiz_can_export(false);
                     return;
                 }
+                let sw_idx  = h.get_wiz_sw_idx();
+                let company = h.get_wiz_company().to_string();
+                let gstin   = h.get_wiz_gstin().to_string();
                 let from = h.get_wiz_date_from().to_string();
                 let to   = h.get_wiz_date_to().to_string();
-                let opts = export::tally::TallyOpts {
-                    only_classified: h.get_wiz_opt_classified(),
-                    skip_low_conf:   h.get_wiz_opt_skip_low(),
-                    date_from: if from.is_empty() { None } else { Some(from) },
-                    date_to:   if to.is_empty()   { None } else { Some(to) },
+
+                const FY_OPTS:    [&str; 4] = ["2024-25", "2023-24", "2022-23", "2021-22"];
+                const STATE_OPTS: [&str; 9] = ["MH", "GJ", "DL", "KA", "TN", "TG", "RJ", "UP", "WB"];
+                let fy = FY_OPTS.get(h.get_wiz_fy_idx() as usize).copied().unwrap_or("2024-25").to_string();
+                let state_code = STATE_OPTS.get(h.get_wiz_state_idx() as usize).copied().unwrap_or("MH").to_string();
+
+                let software = export::accounting::Software::from_idx(sw_idx);
+                let opts = export::accounting::AccountingOpts {
+                    software,
+                    company:            if company.is_empty() { st.client_name.clone() } else { company },
+                    gstin,
+                    fy,
+                    state_code,
+                    currency:           "INR".to_string(),
+                    bank_ledger:        st.tally_ledger.clone(),
+                    date_from:          if from.is_empty() { None } else { Some(from) },
+                    date_to:            if to.is_empty()   { None } else { Some(to) },
+                    include_ob:         h.get_wiz_opt_ob(),
+                    include_gst:        h.get_wiz_opt_gst(),
+                    include_ledgers:    h.get_wiz_opt_ledger(),
+                    include_narrations: h.get_wiz_opt_narr(),
+                    only_classified:    h.get_wiz_opt_classified(),
+                    skip_low_conf:      h.get_wiz_opt_skip_low(),
+                };
+
+                let validation = export::accounting::validate(&st.transactions, &opts);
+
+                let tally_opts = export::tally::TallyOpts {
+                    only_classified: opts.only_classified,
+                    skip_low_conf:   opts.skip_low_conf,
+                    date_from: opts.date_from.clone(),
+                    date_to:   opts.date_to.clone(),
                     ..Default::default()
                 };
-                let p = export::tally::count_preview(&st.transactions, &opts);
+                let p = export::tally::count_preview(&st.transactions, &tally_opts);
                 let mut parts = vec![
                     format!("{} transactions", p.total),
                     format!("{} Payments", p.payment),
@@ -2131,8 +2260,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if p.contra > 0 { parts.push(format!("{} Contra", p.contra)); }
                 if p.gst    > 0 { parts.push(format!("{} GST", p.gst)); }
                 if p.skipped > 0 { parts.push(format!("{} skipped", p.skipped)); }
-                let text = parts.join("  •  ");
+                let mut text = parts.join("  •  ");
+                if !validation.errors.is_empty() {
+                    text.push_str(&format!("\nErrors: {}", validation.errors.join("; ")));
+                }
+                if !validation.warnings.is_empty() {
+                    text.push_str(&format!("\nWarnings: {}", validation.warnings.join("; ")));
+                }
                 h.set_export_preview_text(SharedString::from(text.as_str()));
+                h.set_wiz_can_export(validation.can_export());
                 log::info!("[ExportPreview] {}", text);
             });
         }
@@ -2352,6 +2488,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(conn) = db.as_ref() {
                         let _ = db::update_dup_flags(conn, &txns_snap);
                         let _ = db::push_audit_event(conn, cid, &event_str);
+                        // Also clears the persisted cross-import dedup history (port of
+                        // Electron's btnResetDedupe -> DB.resetDedupeHashes), so previously
+                        // loaded statements are no longer treated as duplicates on re-import.
+                        let _ = db::reset_dedupe_hashes(conn, cid);
                     }
                 }
             });

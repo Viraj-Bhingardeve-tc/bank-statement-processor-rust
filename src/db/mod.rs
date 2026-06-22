@@ -465,6 +465,35 @@ pub fn clear_all_audit_events(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ── Persisted dedup hashes (cross-import duplicate guard) ─────────────────────
+// Port of Electron's DB.getDedupeHashes/addDedupeHash/resetDedupeHashes — lets
+// dedup catch the same statement being re-loaded across separate import
+// sessions, not just duplicate rows within one load.
+
+pub fn get_dedupe_hashes(conn: &Connection, client_id: i64) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT hash FROM dedupe_hashes WHERE client_id = ?1")
+        .context("get_dedupe_hashes prepare")?;
+    let rows = stmt.query_map(rusqlite::params![client_id], |r| r.get::<_, String>(0))
+        .context("get_dedupe_hashes query")?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn add_dedupe_hashes(conn: &Connection, client_id: i64, hashes: &[String]) -> Result<()> {
+    for h in hashes {
+        conn.execute(
+            "INSERT OR IGNORE INTO dedupe_hashes (client_id, hash) VALUES (?1, ?2)",
+            rusqlite::params![client_id, h],
+        ).context("add_dedupe_hashes")?;
+    }
+    Ok(())
+}
+
+pub fn reset_dedupe_hashes(conn: &Connection, client_id: i64) -> Result<()> {
+    conn.execute("DELETE FROM dedupe_hashes WHERE client_id = ?1", rusqlite::params![client_id])
+        .context("reset_dedupe_hashes")?;
+    Ok(())
+}
+
 // ── Ledger Import ─────────────────────────────────────────────────────────────
 
 /// Insert ledger entries for `client_id`. Each entry is (name, group).
@@ -635,6 +664,14 @@ CREATE TABLE IF NOT EXISTS settings (
     key         TEXT PRIMARY KEY,
     value       TEXT NOT NULL,
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Persisted dedup hashes (cross-import duplicate guard) ────────────────────
+CREATE TABLE IF NOT EXISTS dedupe_hashes (
+    client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    hash        TEXT    NOT NULL,
+    added_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (client_id, hash)
 );
 ";
 

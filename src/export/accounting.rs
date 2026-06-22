@@ -95,6 +95,61 @@ pub fn generate(txns: &[Transaction], opts: &AccountingOpts, opening_bal: Option
     }
 }
 
+// ── Pre-export validation ──────────────────────────────────────────────────────
+// Port of Electron's AccountingExportEngine.validate(): runs against exactly the
+// same filtered set generate() would export, so warnings/errors always match
+// what's about to be written. Errors block export; warnings don't.
+
+#[derive(Debug, Clone, Default)]
+pub struct ExportValidation {
+    pub errors:   Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+impl ExportValidation {
+    pub fn can_export(&self) -> bool { self.errors.is_empty() }
+}
+
+pub fn validate(txns: &[Transaction], opts: &AccountingOpts) -> ExportValidation {
+    let filtered = filter_txns(txns, opts);
+    let mut errors   = Vec::new();
+    let mut warnings = Vec::new();
+
+    let self_posted = filtered.iter()
+        .filter(|t| !opts.bank_ledger.is_empty() && posting_ledger(t) == opts.bank_ledger.as_str())
+        .count();
+    let bad_date = filtered.iter()
+        .filter(|t| t.date.is_empty() || t.date.split('/').count() != 3)
+        .count();
+    let zero_amt = filtered.iter().filter(|t| amt(t) <= 0.0).count();
+    let unclassified = filtered.iter().filter(|t| posting_ledger(t) == "Unclassified").count();
+    let low_conf = filtered.iter().filter(|t| t.confidence > 0.0 && t.confidence < 0.4).count();
+    let gst_tagged = filtered.iter()
+        .filter(|t| t.tags.iter().any(|g| g == "GST" || g == "TAX"))
+        .count();
+
+    if self_posted > 0 {
+        errors.push(format!("{} voucher(s) have identical Dr/Cr ledger — Tally will reject", self_posted));
+    }
+    if bad_date > 0 {
+        errors.push(format!("{} voucher(s) have missing or invalid dates", bad_date));
+    }
+    if zero_amt > 0 {
+        warnings.push(format!("{} voucher(s) have zero or negative amount", zero_amt));
+    }
+    if unclassified > 0 {
+        warnings.push(format!("{} voucher(s) map to \"Unclassified\" ledger — verify in your accounting software", unclassified));
+    }
+    if low_conf > 0 {
+        warnings.push(format!("{} voucher(s) have low confidence (<40%) — ledger may be incorrect", low_conf));
+    }
+    if gst_tagged > 0 {
+        warnings.push(format!("{} GST-tagged voucher(s) — manually verify CGST/SGST/IGST split", gst_tagged));
+    }
+
+    ExportValidation { errors, warnings }
+}
+
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn filter_txns<'a>(txns: &'a [Transaction], opts: &AccountingOpts) -> Vec<&'a Transaction> {

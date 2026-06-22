@@ -76,6 +76,8 @@ export component AppWindow inherits Window {
     in-out property <string> wiz-gstin:     "";
     in-out property <string> wiz-date-from: "";
     in-out property <string> wiz-date-to:   "";
+    in-out property <int>    wiz-fy-idx:    0;
+    in-out property <int>    wiz-state-idx: 0;
     in-out property <bool>   wiz-opt-ob:         false;
     in-out property <bool>   wiz-opt-gst:         true;
     in-out property <bool>   wiz-opt-ledger:      true;
@@ -155,6 +157,7 @@ export component AppWindow inherits Window {
     in property <[BatchFileRow]>  batch-file-rows: [];
     // ── Export wizard step 4 preview ──────────────────────────────────────────
     in property <string>          export-preview-text: "";
+    in property <bool>            wiz-can-export: true;
     // ── Reconcile counters ────────────────────────────────────────────────────
     in property <string>     recon-matched:    "0";
     in property <string>     recon-likely:     "0";
@@ -268,6 +271,8 @@ export component AppWindow inherits Window {
         wiz-gstin   <=> root.wiz-gstin;
         wiz-from    <=> root.wiz-date-from;
         wiz-to      <=> root.wiz-date-to;
+        wiz-fy-idx    <=> root.wiz-fy-idx;
+        wiz-state-idx <=> root.wiz-state-idx;
         wiz-opt-ob          <=> root.wiz-opt-ob;
         wiz-opt-gst         <=> root.wiz-opt-gst;
         wiz-opt-ledger      <=> root.wiz-opt-ledger;
@@ -369,6 +374,7 @@ export component AppWindow inherits Window {
         batch-log:             root.batch-log;
         batch-file-rows:       root.batch-file-rows;
         export-preview-text:   root.export-preview-text;
+        wiz-can-export:        root.wiz-can-export;
         recon-matched:         root.recon-matched;
         recon-likely:          root.recon-likely;
         recon-unmatched:       root.recon-unmatched;
