@@ -102,3 +102,7 @@ strip     = true
 [profile.dev]
 opt-level = 0
 debug     = true
+# Disabled: the incremental cache for this binary (Slint + ~30 deps) grows
+# to multiple GB across a handful of rebuilds, which doesn't fit on a
+# constrained dev disk. Trades faster rebuilds for flat disk usage.
+incremental = false
