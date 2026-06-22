@@ -6,6 +6,16 @@
 //   3. Base64url-encode (no padding) the digest
 //   4. Keep only alphanumeric chars, uppercase, take first 32
 //   5. Split into 4 groups of 8 separated by "-"
+//
+// THREAT MODEL: `SK_FRAGMENTS` below ships inside the application binary.
+// Anyone who has the binary (or this source) can reassemble the secret and
+// compute a valid password for any email/month entirely offline, without
+// ever needing to guess or brute-force it through the UI. This is true of
+// any client-side-only shared-secret scheme and cannot be closed by
+// obfuscating the fragments further — it would require a server-side check
+// or per-user identity, which this app deliberately does not have. Treat
+// this purely as a monthly license/anti-piracy gate, never as the thing
+// standing between an attacker and the client banking data this app holds.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Local;
