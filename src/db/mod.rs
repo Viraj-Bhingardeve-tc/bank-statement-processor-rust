@@ -535,6 +535,12 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", rusqlite::params![key])
+        .context("delete_setting")?;
+    Ok(())
+}
+
 /// Open (or create) the SQLite database at `path` and run the schema migration.
 pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
     let conn = Connection::open(&path)

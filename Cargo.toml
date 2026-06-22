@@ -77,6 +77,9 @@ lopdf = "0.33"
 # ── Parallel processing (batch — Phase 9+) ───────────────────────────────────
 rayon = "1"
 
+# ── OS credential store (secrets at rest — audit remediation) ───────────────
+keyring = "4.1.2"
+
 # ── Features ─────────────────────────────────────────────────────────────────
 [features]
 # "slint-ui" gates the entire Slint + window subsystem.
