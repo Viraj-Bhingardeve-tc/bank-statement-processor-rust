@@ -1,5 +1,7 @@
 // db/mod.rs — SQLite persistence layer with full CRUD.
 
+mod encryption;
+
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
@@ -566,9 +568,22 @@ pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
 /// A migration failure is fatal and propagates as `Err` rather than being
 /// silently swallowed — callers must treat this as a startup-blocking error,
 /// not continue with a database that may be missing schema it now expects.
+///
+/// For real file paths, this transparently encrypts the database at rest
+/// (SQLCipher) — see `encryption::open_encrypted` for the one-time
+/// migration of a pre-existing plaintext database and the startup recovery
+/// path if a previous migration attempt was interrupted. `:memory:` (used
+/// throughout the test suite) is intentionally exempt: there is no file to
+/// protect, and a large number of existing tests assume a plain, keyless
+/// in-memory connection.
 pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
-    let conn = Connection::open(&path)
-        .with_context(|| format!("Cannot open database at {:?}", path.as_ref()))?;
+    let path = path.as_ref();
+    let conn = if path == Path::new(":memory:") {
+        Connection::open(path).with_context(|| format!("Cannot open database at {path:?}"))?
+    } else {
+        encryption::open_encrypted(path)
+            .with_context(|| format!("Cannot open encrypted database at {path:?}"))?
+    };
 
     // Enable WAL mode for better concurrent read performance and crash safety.
     conn.pragma_update(None, "journal_mode", "WAL")
@@ -578,7 +593,7 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
 
     init_schema(&conn).context("Schema initialisation failed")?;
 
-    log::info!("Database opened at {:?}", path.as_ref());
+    log::info!("Database opened at {path:?}");
     Ok(conn)
 }
 
@@ -990,11 +1005,17 @@ mod tests {
     fn real_file_database_opens_idempotently_across_repeated_opens() {
         // Exercises the actual `open()`/`Connection::open` file path (not
         // just open_in_memory), since that's what the running app uses.
+        // `open()` on a real path now goes through encryption::open_encrypted,
+        // which touches the shared OS keyring test entry — hold the same
+        // lock encryption::tests uses so the two modules' tests don't race
+        // on that one entry.
+        let _guard = encryption::ENCRYPTION_KEYRING_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = std::env::temp_dir().join(format!(
             "bsp_migration_smoke_{}.db",
             std::process::id(),
         ));
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.bak", path.display()));
 
         {
             let conn = open(&path).expect("first open of fresh file DB");

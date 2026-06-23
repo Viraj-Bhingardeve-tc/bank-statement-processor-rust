@@ -23,8 +23,12 @@ slint = { version = "1.7", optional = true }
 rfd = { version = "0.15", optional = true }
 
 # ── Database ─────────────────────────────────────────────────────────────────
-# bundled = statically links SQLite; no system SQLite required
-rusqlite = { version = "0.31", features = ["bundled"] }
+# bundled-sqlcipher = statically-compiled SQLCipher (encrypted SQLite), linked
+# dynamically against an existing OpenSSL libcrypto found via OPENSSL_DIR (see
+# .cargo/config.toml) — no vendored OpenSSL build, no Perl required. The build
+# output depends on libcrypto-3-x64.dll at runtime; see src/db/encryption.rs
+# for the exact packaging requirement.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
 
 # ── Authentication ────────────────────────────────────────────────────────────
 hmac    = "0.12"
@@ -77,8 +81,9 @@ lopdf = "0.33"
 # ── Parallel processing (batch — Phase 9+) ───────────────────────────────────
 rayon = "1"
 
-# ── OS credential store (secrets at rest — audit remediation) ───────────────
+# ── OS credential store + key generation (secrets/encryption at rest) ───────
 keyring = "4.1.2"
+rand    = "0.10.1"
 
 # ── Features ─────────────────────────────────────────────────────────────────
 [features]

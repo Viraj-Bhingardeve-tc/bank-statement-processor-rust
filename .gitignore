@@ -2,4 +2,6 @@
 *.db
 *.db-shm
 *.db-wal
+*.db.bak
+*.db.migrating
 .env

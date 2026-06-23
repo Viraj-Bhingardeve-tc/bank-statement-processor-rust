@@ -1,0 +1,21 @@
+# Build-time configuration for rusqlite's "bundled-sqlcipher" feature.
+#
+# libsqlite3-sys's build script requires OPENSSL_DIR (or OPENSSL_LIB_DIR +
+# OPENSSL_INCLUDE_DIR) on Windows to locate an OpenSSL dev kit (headers +
+# .lib import library) to link SQLCipher's crypto calls against. This repo
+# does not vendor/build OpenSSL from source (that path needs a full Perl/CPAN
+# environment) — instead it links dynamically against an OpenSSL already
+# present on the build machine.
+#
+# Default below points at PostgreSQL's bundled OpenSSL, since PostgreSQL is
+# already installed on this project's dev machine and ships a complete MSVC
+# dev kit. Cargo's [env] does NOT override a variable already set in the
+# actual process environment, so:
+#   - If you don't have PostgreSQL at this path, set OPENSSL_DIR yourself
+#     (any OpenSSL 3.x dev kit works) before running cargo build/test, and
+#     this default will be ignored.
+#   - CI runners typically don't have PostgreSQL preinstalled — install an
+#     OpenSSL dev package there explicitly (e.g. via choco/vcpkg) and set
+#     OPENSSL_DIR in the CI environment instead of relying on this file.
+[env]
+OPENSSL_DIR = { value = "C:\\Program Files\\PostgreSQL\\18", force = false }
