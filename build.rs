@@ -34,6 +34,8 @@ fn copy_sqlcipher_runtime_dlls() {
     if !cfg!(windows) {
         return;
     }
+    println!("cargo:rerun-if-env-changed=OPENSSL_DIR");
+
     let Ok(openssl_dir) = std::env::var("OPENSSL_DIR") else {
         println!("cargo:warning=OPENSSL_DIR not set — cannot copy SQLCipher's runtime DLLs; the built binary may fail to start with STATUS_DLL_NOT_FOUND unless a compatible libcrypto-3-x64.dll is already on PATH");
         return;
@@ -46,9 +48,26 @@ fn copy_sqlcipher_runtime_dlls() {
     // copy into .../deps, where `cargo test` puts its test executables.
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set by cargo");
     let Some(profile_dir) = std::path::Path::new(&out_dir).ancestors().nth(3) else {
-        println!("cargo:warning=could not locate target/<profile> from OUT_DIR={out_dir}; SQLCipher runtime DLLs not copied");
-        return;
+        panic!("could not locate target/<profile> from OUT_DIR={out_dir}; cannot place SQLCipher runtime DLLs");
     };
+
+    // CRITICAL: Cargo only re-invokes a build script when one of its
+    // declared `rerun-if-*` dependencies has changed since the last
+    // successful run — it does NOT notice if a file the script previously
+    // *produced* (these DLLs) was since deleted by something else (a
+    // partial clean, an antivirus quarantine, a person tidying target/ by
+    // hand). Without watching the destination paths themselves, `cargo
+    // build` reports success and silently skips re-running this function,
+    // leaving the binary unable to start. Verified empirically: deleting
+    // just these DLLs (no `cargo clean`) and re-running `cargo build`
+    // finished in ~1.7s with the DLLs never restored, before this fix.
+    // `rerun-if-changed` treats a missing watched path the same as a
+    // changed one, which is exactly the self-healing behavior needed here.
+    for dest_dir in [profile_dir.to_path_buf(), profile_dir.join("deps")] {
+        for dll in dlls {
+            println!("cargo:rerun-if-changed={}", dest_dir.join(dll).display());
+        }
+    }
 
     for dest_dir in [profile_dir.to_path_buf(), profile_dir.join("deps")] {
         if !dest_dir.is_dir() {
@@ -58,8 +77,16 @@ fn copy_sqlcipher_runtime_dlls() {
             let src = dll_src_dir.join(dll);
             let dest = dest_dir.join(dll);
             if !src.is_file() {
-                println!("cargo:warning={} not found under OPENSSL_DIR/bin ({}) — SQLCipher runtime DLL not bundled", dll, dll_src_dir.display());
-                continue;
+                // OPENSSL_DIR is set but doesn't actually have the DLL —
+                // a build that "succeeds" here produces a binary that
+                // cannot start. That must be a hard failure, not a
+                // warning easy to miss in build output.
+                panic!(
+                    "{dll} not found under OPENSSL_DIR/bin ({}) — the build would succeed but the \
+                     resulting binary cannot start (STATUS_DLL_NOT_FOUND). Set OPENSSL_DIR to a \
+                     directory whose bin/ subfolder actually contains {dll}.",
+                    dll_src_dir.display(),
+                );
             }
             // Skip the copy if an identical-size file is already there —
             // avoids rewriting a multi-MB file on every incremental build.
@@ -69,11 +96,9 @@ fn copy_sqlcipher_runtime_dlls() {
             {
                 continue;
             }
-            if let Err(e) = std::fs::copy(&src, &dest) {
-                println!("cargo:warning=failed to copy {} to {}: {}", src.display(), dest.display(), e);
-            }
+            std::fs::copy(&src, &dest).unwrap_or_else(|e| {
+                panic!("failed to copy {} to {}: {e}", src.display(), dest.display())
+            });
         }
     }
-
-    println!("cargo:rerun-if-env-changed=OPENSSL_DIR");
 }
