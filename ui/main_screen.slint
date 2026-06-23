@@ -64,6 +64,9 @@ component TBtn inherits Rectangle {
     border-width:  1px;
     border-color:  root.enabled ? (root.bg == #FFFFFF ? #90CAF9 : root.bg) : #FFFFFF20;
     opacity:       root.enabled ? 1.0 : 0.4;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
 
     TouchArea {
         enabled: root.enabled;
@@ -89,6 +92,10 @@ component QBtn inherits Rectangle {
     border-radius: 4px;
     border-width:  1px;
     border-color:  root.active ? #1565C0 : #B0C8E8;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checked: root.active;
 
     TouchArea {
         enabled: root.enabled;
@@ -118,6 +125,9 @@ component FBtn inherits Rectangle {
     border-radius: 3px;
     border-width:  1px;
     border-color:  root.active ? root.a-bg : root.i-border;
+    accessible-role: button;
+    accessible-label: root.count != "" ? root.label + " (" + root.count + ")" : root.label;
+    accessible-checked: root.active;
 
     TouchArea { clicked => { root.clicked(); } }
     HorizontalBox {
@@ -151,6 +161,9 @@ component VTab inherits Rectangle {
 
     height: 36px; min-width: 110px;
     background: transparent; border-width: 0px;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-item-selected: root.active;
 
     // Active bottom border (3px, light blue)
     Rectangle {
@@ -183,6 +196,9 @@ component FootBtn inherits Rectangle {
     border-width:  1px;
     border-color:  root.enabled ? root.border-clr : #E0E0E0;
     opacity:       root.enabled ? 1.0 : 0.4;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
 
     TouchArea {
         enabled: root.enabled;
@@ -248,6 +264,9 @@ component MBtn inherits Rectangle {
     border-radius: 4px;
     border-width:  root.enabled ? 0px : 1px;
     border-color:  #D0D0D0;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
 
     TouchArea {
         enabled: root.enabled;
@@ -282,6 +301,8 @@ component MHdr inherits Rectangle {
         }
         Rectangle {
             width: 28px; height: 28px; border-radius: 14px; background: transparent;
+            accessible-role: button;
+            accessible-label: "Close";
             TouchArea { clicked => { root.close(); } }
             Text {
                 text: "\u{2715}"; font-size: 22px; color: #AAAAAA;
@@ -313,6 +334,8 @@ component MFtr inherits Rectangle {
 // Generated columns have font-style:italic. Debit header color:#FFCDD2, Credit:#C8E6C9
 component TxnHeader inherits Rectangle {
     height: 32px; background: #1565C0;
+    accessible-role: table;
+    accessible-label: "Transactions table header";
     Rectangle { y: 31px; height: 1px; background: #1976D2; }
 
     HorizontalBox {
@@ -405,6 +428,12 @@ component TxnTableRow inherits Rectangle {
         root.data.row-color == 5 ? #FCE4EC :
         root.data.row-color == 6 ? #E3F2FD :
         #FFFFFF;
+    accessible-role: list-item;
+    accessible-label: root.data.date + ", " + root.data.narration
+        + (root.data.debit != "" ? ", Debit " + root.data.debit : "")
+        + (root.data.credit != "" ? ", Credit " + root.data.credit : "")
+        + ", Balance " + root.data.balance
+        + ", " + root.data.status-text;
 
     // Bottom row separator
     Rectangle { y: parent.height - 1px; height: 1px; background: #E3F2FD; }
@@ -1132,56 +1161,56 @@ export component MainScreen inherits Rectangle {
                             height: 20px; border-radius: 10px; background: #E65100;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Unreviewed"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("unreviewed"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Unreviewed filter"; TouchArea { clicked => { root.toggle-status("unreviewed"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.fs-suspense : Rectangle {
                             height: 20px; border-radius: 10px; background: #7B1FA2;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Suspense"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("suspense"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Suspense filter"; TouchArea { clicked => { root.toggle-status("suspense"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.fs-high : Rectangle {
                             height: 20px; border-radius: 10px; background: #1B5E20;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "High Conf."; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("high"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove High Confidence filter"; TouchArea { clicked => { root.toggle-status("high"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.fs-dups : Rectangle {
                             height: 20px; border-radius: 10px; background: #880E4F;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Duplicates"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("duplicates"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Duplicates filter"; TouchArea { clicked => { root.toggle-status("duplicates"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.fs-gst : Rectangle {
                             height: 20px; border-radius: 10px; background: #2E7D32;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "GST/Tax"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("gst"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove GST/Tax filter"; TouchArea { clicked => { root.toggle-status("gst"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.fs-review : Rectangle {
                             height: 20px; border-radius: 10px; background: #E65100;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Needs Review"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("needs_review"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Needs Review filter"; TouchArea { clicked => { root.toggle-status("needs_review"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.fs-credits : Rectangle {
                             height: 20px; border-radius: 10px; background: #2E7D32;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Credits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("credits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Credits Only filter"; TouchArea { clicked => { root.toggle-status("credits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.fs-debits : Rectangle {
                             height: 20px; border-radius: 10px; background: #C62828;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Debits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; TouchArea { clicked => { root.toggle-status("debits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Debits Only filter"; TouchArea { clicked => { root.toggle-status("debits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
                             }
                         }
                         if root.sel-bank != "All Banks" && root.sel-bank != "" : Rectangle {
@@ -1189,6 +1218,8 @@ export component MainScreen inherits Rectangle {
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: root.sel-bank; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
                                 Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    accessible-role: button;
+                                    accessible-label: "Remove " + root.sel-bank + " bank filter";
                                     TouchArea { clicked => { root.sel-bank = "All Banks"; root.bank-filter-changed("All Banks"); } }
                                     Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
                                 }
@@ -1199,6 +1230,8 @@ export component MainScreen inherits Rectangle {
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: root.sel-vendor; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
                                 Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    accessible-role: button;
+                                    accessible-label: "Remove " + root.sel-vendor + " vendor filter";
                                     TouchArea { clicked => { root.sel-vendor = ""; root.vendor-filter-changed(""); } }
                                     Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
                                 }
@@ -1209,6 +1242,8 @@ export component MainScreen inherits Rectangle {
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: root.sel-head; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
                                 Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    accessible-role: button;
+                                    accessible-label: "Remove " + root.sel-head + " ledger filter";
                                     TouchArea { clicked => { root.sel-head = ""; root.head-filter-changed(""); } }
                                     Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
                                 }
@@ -1910,6 +1945,8 @@ export component MainScreen inherits Rectangle {
                         Rectangle {
                             height: 30px; width: 140px;
                             background: #C62828; border-radius: 4px;
+                            accessible-role: button;
+                            accessible-label: "Clear All Logs";
                             TouchArea { clicked => { root.clear-logs(); } }
                             Text { text: "Clear All Logs"; font-size: 11px; color: white;
                                    horizontal-alignment: center; vertical-alignment: center; }
@@ -2459,6 +2496,9 @@ export component MainScreen inherits Rectangle {
                             background: root.wiz-sw-idx == sw.n ? #EEF4FF : #FFFFFF;
                             border-radius: 8px; border-width: 2px;
                             border-color: root.wiz-sw-idx == sw.n ? #1565C0 : #D8E4F5;
+                            accessible-role: radio-button;
+                            accessible-label: sw.nm + " (" + sw.sub + ")";
+                            accessible-checked: root.wiz-sw-idx == sw.n;
                             TouchArea { clicked => { root.wiz-sw-idx = sw.n; } }
                             VerticalBox { padding: 10px; spacing: 3px; alignment: center;
                                 Rectangle {
@@ -2480,6 +2520,9 @@ export component MainScreen inherits Rectangle {
                             background: root.wiz-sw-idx == sw.n ? #EEF4FF : #FFFFFF;
                             border-radius: 8px; border-width: 2px;
                             border-color: root.wiz-sw-idx == sw.n ? #1565C0 : #D8E4F5;
+                            accessible-role: radio-button;
+                            accessible-label: sw.nm + " (" + sw.sub + ")";
+                            accessible-checked: root.wiz-sw-idx == sw.n;
                             TouchArea { clicked => { root.wiz-sw-idx = sw.n; } }
                             VerticalBox { padding: 10px; spacing: 3px; alignment: center;
                                 Rectangle {
@@ -2787,6 +2830,11 @@ export component MainScreen inherits Rectangle {
                 // Progress bar
                 Rectangle {
                     height: 10px; background: #EDE7F6; border-radius: 5px;
+                    accessible-role: progress-indicator;
+                    accessible-label: "AI classification progress";
+                    accessible-value: root.ai-pct + "%";
+                    accessible-value-minimum: 0;
+                    accessible-value-maximum: 100;
                     Rectangle {
                         width: parent.width * root.ai-pct / 100;
                         height: parent.height; background: #6B2FB8; border-radius: 5px;
@@ -2797,6 +2845,8 @@ export component MainScreen inherits Rectangle {
                 Rectangle {
                     height: 30px; width: 100px;
                     background: #FFFFFF; border-radius: 4px; border-width: 1px; border-color: #90CAF9;
+                    accessible-role: button;
+                    accessible-label: "Cancel";
                     TouchArea { clicked => { root.ai-cancel(); } }
                     Text { text: "Cancel"; font-size: 12px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
                 }

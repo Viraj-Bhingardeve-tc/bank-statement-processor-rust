@@ -76,6 +76,7 @@ export component LoginScreen inherits Rectangle {
                     vertical-alignment: center;
                     enabled: !root.is-loading;
                     text <=> root.email-val;
+                    accessible-label: "Work email";
                     accepted => { pwd-ti.focus(); }
                 }
             }
@@ -104,6 +105,7 @@ export component LoginScreen inherits Rectangle {
                     input-type: password;
                     enabled: !root.is-loading;
                     text <=> root.pwd-val;
+                    accessible-label: "This month's password";
                     accepted => {
                         if root.email-val != "" && root.pwd-val != "" {
                             root.attempt-login(root.email-val, root.pwd-val);
@@ -119,6 +121,9 @@ export component LoginScreen inherits Rectangle {
                 height:        40px;
                 background:    root.is-loading ? #90CAF9 : #1565C0;
                 border-radius: 5px;
+                accessible-role: button;
+                accessible-label: root.is-loading ? "Verifying" : "Sign In";
+                accessible-enabled: !root.is-loading;
                 TouchArea {
                     enabled: !root.is-loading;
                     mouse-cursor: pointer;
