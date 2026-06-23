@@ -1,6 +1,7 @@
 // db/mod.rs — SQLite persistence layer with full CRUD.
 
 mod encryption;
+pub use encryption::diagnostics;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;

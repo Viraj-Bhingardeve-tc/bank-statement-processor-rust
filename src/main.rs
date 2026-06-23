@@ -1124,10 +1124,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p.push("bsp_data.db");
         p
     };
+    // Captured so the UI can surface a startup DB failure to the user below,
+    // instead of it being visible only in the log (the previous behavior —
+    // the app would silently run in a no-database mode with no on-screen
+    // indication anything was wrong). See db/encryption.rs's RUNTIME
+    // DEPENDENCY comment for why a *missing crypto DLL* specifically can
+    // never reach this point at all (the process wouldn't have launched);
+    // this path is for every other way db::open() can fail.
+    let mut db_open_error: Option<String> = None;
     let db_conn: Arc<Mutex<Option<rusqlite::Connection>>> = Arc::new(Mutex::new(
         match db::open(&db_path) {
-            Ok(c)    => { log::info!("Database ready at {:?}", db_path); Some(c) }
-            Err(err) => { log::warn!("Database init failed (non-fatal): {}", err); None }
+            Ok(c) => {
+                log::info!("Database ready at {:?}", db_path);
+                log::info!("[db] {}", db::diagnostics(&c));
+                Some(c)
+            }
+            Err(err) => {
+                log::error!("Database init failed: {}", err);
+                db_open_error = Some(err.to_string());
+                None
+            }
         }
     ));
 
@@ -1136,6 +1152,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let app = AppWindow::new()?;
         // Login screen shown by default (logged-in = false, set by Slint default)
+
+        if let Some(err) = &db_open_error {
+            app.set_toast_msg(SharedString::from(
+                format!("Database unavailable — imports/saves will not work until this is fixed: {err}").as_str(),
+            ));
+            app.set_toast_kind(2);
+        }
 
         let app_state: Arc<Mutex<ui::AppState>> =
             Arc::new(Mutex::new(ui::AppState { dedup_enabled: true, ..Default::default() }));

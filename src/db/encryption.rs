@@ -22,7 +22,38 @@
 //       release installer/distribution MUST bundle this one DLL alongside
 //       bank-statement-processor.exe (copy it from the OPENSSL_DIR used at
 //       build time, e.g. "C:\Program Files\PostgreSQL\18\bin\libcrypto-3-x64.dll").
-//       Without it, the app will fail to launch with a missing-DLL error.
+//
+// WHAT HAPPENS IF THE DLL IS MISSING — empirically verified, not assumed:
+//   `libcrypto-3-x64.dll` is a hard (implicit) import, confirmed via
+//   `dumpbin /dependents` (it appears under the plain import list, not a
+//   delay-load section). I tested this directly: running the built .exe
+//   with a PATH stripped down to exclude every directory providing that
+//   DLL, the process does not start at all — Windows' loader returns
+//   STATUS_DLL_NOT_FOUND (0xC0000135, exit code -1073741515) before a
+//   single line of this application's code executes, including `main()`.
+//   On a real desktop this surfaces as Windows' own system dialog:
+//   "The code execution cannot proceed because libcrypto-3-x64.dll was
+//   not found. Reinstalling the program may fix this problem."
+//
+//   This means NO in-application diagnostic (toast, log line, startup
+//   check) is reachable for a genuinely-missing DLL — there is no Rust
+//   code path that runs before the OS loader's resolution step. Making
+//   that interceptable would require converting the import to a delay-
+//   loaded one (MSVC `/DELAYLOAD` + a custom `unsafe` failure hook) — given
+//   this codebase has zero `unsafe` blocks today (a real, audited quality
+//   signal), that tradeoff was rejected in favor of:
+//     1. Documenting the exact error here so it's immediately recognizable
+//        rather than mysterious.
+//     2. Making the *installer/packaging step* responsible for verifying
+//        the DLL is present (the only point where this is actually
+//        preventable) — see PACKAGING IMPLICATION above.
+//   What IS reachable and implemented below (see `diagnostics()` and its
+//   call site in `main.rs`): once the process has launched — meaning the
+//   hard DLL dependency was already satisfied — confirm SQLCipher is
+//   genuinely active via `PRAGMA cipher_version`/`cipher_provider`, and
+//   surface any `db::open()` failure to the user via the UI instead of
+//   only a log line, since "the database silently isn't available" was
+//   the previous (also audit-flagged) behavior.
 
 use anyhow::{Context, Result};
 use rand::RngExt;
@@ -167,6 +198,33 @@ pub fn open_encrypted(path: &Path) -> Result<Connection> {
     }
 }
 
+/// Confirms encryption is genuinely active on an already-open connection by
+/// querying SQLCipher's own `cipher_version`/`cipher_provider` pragmas, and
+/// returns a one-line summary suitable for a startup log message.
+///
+/// This is NOT a check for whether the crypto DLL is *missing* — by the time
+/// any of this code runs, the hard DLL dependency has already been resolved
+/// by the OS loader, or the process wouldn't have started at all (see the
+/// RUNTIME DEPENDENCY comment at the top of this file). What this DOES catch
+/// is a more subtle problem: a `libcrypto-3-x64.dll` that loads (so the
+/// process starts) but isn't actually a build SQLCipher can use — e.g. the
+/// wrong major version, or a build missing expected symbols — which would
+/// otherwise show up only as a confusing later failure on the first real
+/// `PRAGMA key`/query.
+pub fn diagnostics(conn: &Connection) -> String {
+    let version: Option<String> = conn
+        .query_row("PRAGMA cipher_version", [], |r| r.get(0))
+        .ok();
+    let provider: Option<String> = conn
+        .query_row("PRAGMA cipher_provider", [], |r| r.get(0))
+        .ok();
+    match (version, provider) {
+        (Some(v), Some(p)) => format!("SQLCipher {v} active (crypto provider: {p})"),
+        (Some(v), None) => format!("SQLCipher {v} active (crypto provider unknown)"),
+        (None, _) => "WARNING: SQLCipher version pragma returned nothing — encryption may not be active as expected".to_string(),
+    }
+}
+
 /// Performs the one-time plaintext→encrypted migration for `path`:
 /// backup → export to a temp encrypted copy → verify → atomically replace.
 /// On any failure before the final replace, `path` (the original plaintext
@@ -221,6 +279,24 @@ fn verify_migrated_db(original_path: &Path, new_path: &Path, key: &str) -> Resul
         .context("run integrity_check on migrated db")?;
     if integrity != "ok" {
         anyhow::bail!("integrity_check on migrated db returned {integrity:?}, expected \"ok\"");
+    }
+
+    // SQLCipher's own check, distinct from the generic one above: walks
+    // every page and verifies its HMAC against the real key, which catches
+    // encryption-specific corruption (e.g. a bad page written mid-crash)
+    // that a plain integrity_check can't see since it just confirms the
+    // (already-decrypted) B-tree structure is consistent. Returns zero rows
+    // on success, one row per problem found otherwise.
+    let cipher_problems: Vec<String> = {
+        let mut stmt = new_conn
+            .prepare("PRAGMA cipher_integrity_check")
+            .context("prepare cipher_integrity_check")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))
+            .context("run cipher_integrity_check on migrated db")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("collect cipher_integrity_check results")?
+    };
+    if !cipher_problems.is_empty() {
+        anyhow::bail!("cipher_integrity_check on migrated db found problems: {}", cipher_problems.join("; "));
     }
 
     let orig_conn = Connection::open(original_path).context("reopen original plaintext db for row-count comparison")?;
@@ -318,6 +394,25 @@ mod tests {
         let conn = open_encrypted(&path).expect("re-open fresh encrypted db");
         let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(v, "secret");
+
+        cleanup(&path);
+        clear_test_key();
+    }
+
+    #[test]
+    fn diagnostics_confirms_sqlcipher_is_active_on_an_encrypted_connection() {
+        let _guard = lock();
+        clear_test_key();
+        let path = temp_path("diag");
+        cleanup(&path);
+
+        let conn = open_encrypted(&path).expect("create fresh encrypted db");
+        let summary = diagnostics(&conn);
+        assert!(
+            summary.starts_with("SQLCipher "),
+            "expected a real version string, got: {summary}"
+        );
+        assert!(!summary.contains("WARNING"), "got: {summary}");
 
         cleanup(&path);
         clear_test_key();
