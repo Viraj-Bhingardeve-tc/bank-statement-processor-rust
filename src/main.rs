@@ -734,7 +734,119 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
     h.set_dash_pay_ledgers(slint::ModelRc::new(slint::VecModel::from(make_ledger_rows(pay_map))));
 }
 
-// ── main ──────────────────────────────────────────────────────────────────────
+// ── OCR pipelines (run off the UI thread — see on_do_load_file) ───────────────
+//
+// Pure parsing logic, no Slint handle access, safe to call from a spawned
+// thread. Previously this work (including the Tesseract subprocess call,
+// which can take seconds per page) ran synchronously inside the
+// on_do_load_file Slint callback, freezing the whole UI with no feedback —
+// the built ocr-visible/ocr-msg/ocr-pct progress overlay existed in the
+// .slint file but nothing ever drove it. See
+// PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 8.
+
+#[cfg(feature = "slint-ui")]
+fn run_pdf_ocr_pipeline(path: &std::path::Path, file_name: &str) -> Result<parser::ParseResult, String> {
+    let full_text = parser::text_extractor::extract_full_text(path);
+    let effective_text = if full_text.trim().is_empty() {
+        match parser::ocr_extractor::extract_via_tesseract(path) {
+            Some(t) if !t.trim().is_empty() => t,
+            _ => return Err("Scanned PDF — install Tesseract for OCR support".to_string()),
+        }
+    } else {
+        full_text
+    };
+
+    let ocr = parser::ocr_parser::parse_ocr_text(&effective_text, file_name);
+    let real_count = ocr.transactions.iter().filter(|t| !t.is_opening_balance).count();
+    if real_count > 0 {
+        return Ok(ocr);
+    }
+
+    let preprocessed = parser::ocr_parser::preprocess_multiline(&effective_text);
+    if !preprocessed.trim().is_empty() {
+        let ml = parser::ocr_parser::parse_ocr_text(&preprocessed, file_name);
+        let ml_count = ml.transactions.iter().filter(|t| !t.is_opening_balance).count();
+        if ml_count > 0 {
+            return Ok(ml);
+        }
+    }
+    Err("No transactions found — PDF may use embedded fonts".to_string())
+}
+
+#[cfg(feature = "slint-ui")]
+fn run_image_ocr_pipeline(path: &std::path::Path, file_name: &str) -> Result<parser::ParseResult, String> {
+    match parser::ocr_extractor::extract_image_via_tesseract(path) {
+        Some(text) if !text.trim().is_empty() => {
+            let ocr = parser::ocr_parser::parse_ocr_text(&text, file_name);
+            let real_count = ocr.transactions.iter().filter(|t| !t.is_opening_balance).count();
+            if real_count > 0 {
+                Ok(ocr)
+            } else {
+                Err("No transactions found in image — check image quality".to_string())
+            }
+        }
+        _ => Err("Image OCR failed — install Tesseract for image support".to_string()),
+    }
+}
+
+/// Cross-import dedup + persistence + UI refresh — the common tail shared by
+/// every successful parse path in on_do_load_file, whether it returned
+/// synchronously (Excel, plain-text PDF) or via the background OCR pipelines
+/// above.
+#[cfg(feature = "slint-ui")]
+fn finish_load_file(
+    h: &AppWindow,
+    state_ref: &Arc<Mutex<ui::AppState>>,
+    db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
+    mut result: parser::ParseResult,
+    file_name: &str,
+) {
+    // Cross-import dedup — catches the same statement being re-loaded in a
+    // separate session, not just duplicate rows within one load. Synthetic
+    // (opening-balance) rows are always kept.
+    if h.get_dedup_enabled() {
+        let client_id = state_ref.lock().unwrap().client_id;
+        if let Some(cid) = client_id {
+            let known = {
+                let db = db_ref.lock().unwrap();
+                db.as_ref().and_then(|conn| db::get_dedupe_hashes(conn, cid).ok())
+                    .unwrap_or_default()
+            };
+            let before = result.transactions.iter().filter(|t| !t.is_opening_balance).count();
+            result.transactions.retain(|t| t.is_opening_balance || !known.contains(&t.hash()));
+            let after = result.transactions.iter().filter(|t| !t.is_opening_balance).count();
+            let skipped = before.saturating_sub(after);
+            if after == 0 {
+                h.set_toast_msg(SharedString::from(
+                    "All transactions in this file already loaded (dedupe)"));
+                h.set_toast_kind(2);
+                h.set_status_bank(SharedString::from("Dedupe: nothing new to load"));
+                return;
+            }
+            if skipped > 0 {
+                h.set_toast_msg(SharedString::from(
+                    format!("Dedupe: skipped {} duplicate row(s)", skipped).as_str()));
+                h.set_toast_kind(2);
+            }
+            let new_hashes: Vec<String> = result.transactions.iter()
+                .filter(|t| !t.is_opening_balance)
+                .map(|t| t.hash())
+                .collect();
+            let db = db_ref.lock().unwrap();
+            if let Some(conn) = db.as_ref() {
+                // Not user-facing-critical (the transactions themselves are
+                // about to be persisted by apply_parse_result below) — but a
+                // failure here means future imports won't recognize these rows
+                // as already-seen, so it's worth a clear log even without a toast.
+                if let Err(e) = db::add_dedupe_hashes(conn, cid, &new_hashes) {
+                    log::error!("[LoadFile] failed to persist dedupe hashes: {}", e);
+                }
+            }
+        }
+    }
+
+    apply_parse_result(h, state_ref, db_ref, result, file_name);
+}
 
 #[cfg(feature = "slint-ui")]
 fn apply_parse_result(
@@ -1140,183 +1252,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 h.set_status_file(SharedString::from(file_name.as_str()));
                 h.set_status_bank(SharedString::from("Parsing…"));
 
-                let parse_result: Option<parser::ParseResult> =
-                    if ["xlsx", "xls", "xlsm"].contains(&ext.as_str()) {
-                        match parser::excel_parser::parse_excel_file(&path) {
-                            Ok(r) => {
-                                log::info!("Excel OK: {} rows", r.transactions.len());
-                                Some(r)
-                            }
-                            Err(e) => {
-                                log::error!("Excel parse error: {}", e);
-                                h.set_status_bank(SharedString::from("Excel parse error — see log"));
-                                return;
-                            }
+                // Excel and (non-scanned) PDF parsing are fast enough to stay
+                // synchronous on the UI thread — only the genuinely slow paths
+                // (Tesseract OCR, which can take seconds per page) are
+                // backgrounded below.
+                if ["xlsx", "xls", "xlsm"].contains(&ext.as_str()) {
+                    match parser::excel_parser::parse_excel_file(&path) {
+                        Ok(r) => {
+                            log::info!("Excel OK: {} rows", r.transactions.len());
+                            finish_load_file(&h, &state_ref, &db_ref, r, &file_name);
                         }
-                    } else if ext == "pdf" {
-                        // Stage 1: structured row parsing
-                        let stage1 = match parser::text_extractor::extract_pages(&path) {
-                            Ok(rows) => {
-                                if rows.is_empty() { None }
-                                else { parser::pdf_parser::parse_pdf_rows(rows, &file_name) }
-                            }
-                            Err(e) => {
-                                let emsg = e.to_string();
-                                if emsg.contains("password-protected") || emsg.to_lowercase().contains("encrypt") {
-                                    {
-                                        let mut st = state_ref.lock().unwrap();
-                                        st.pending_pdf_path = Some(path.clone());
-                                        st.pending_pdf_name = file_name.clone();
-                                    }
-                                    h.set_pdf_pwd_visible(true);
-                                    h.set_pdf_pwd_prompt(SharedString::from(
-                                        format!("'{}' is password-protected. Enter the PDF password:", file_name).as_str(),
-                                    ));
-                                    h.set_status_bank(SharedString::from("PDF password required\u{2026}"));
-                                    return;
-                                }
-                                log::error!("PDF extract error: {}", emsg);
-                                None
-                            }
-                        };
-
-                        if stage1.is_some() {
-                            stage1
-                        } else {
-                            // Stage 2a: OCR text parsing
-                            let full_text = parser::text_extractor::extract_full_text(&path);
-                            // When lopdf returns no text, try Tesseract CLI for scanned PDFs.
-                            let effective_text = if full_text.trim().is_empty() {
-                                h.set_status_bank(SharedString::from("Scanned PDF — trying OCR…"));
-                                match parser::ocr_extractor::extract_via_tesseract(&path) {
-                                    Some(t) if !t.trim().is_empty() => t,
-                                    _ => {
-                                        h.set_status_bank(SharedString::from(
-                                            "Scanned PDF — install Tesseract for OCR support",
-                                        ));
-                                        return;
-                                    }
-                                }
-                            } else {
-                                full_text.clone()
-                            };
-                            let full_text = effective_text;
-
-                            let ocr = parser::ocr_parser::parse_ocr_text(&full_text, &file_name);
-                            let real_count = ocr.transactions.iter()
-                                .filter(|t| !t.is_opening_balance)
-                                .count();
-
-                            if real_count > 0 {
-                                Some(ocr)
-                            } else {
-                                // Stage 2b: multiline preprocessor
-                                let preprocessed =
-                                    parser::ocr_parser::preprocess_multiline(&full_text);
-                                if !preprocessed.trim().is_empty() {
-                                    let ml = parser::ocr_parser::parse_ocr_text(
-                                        &preprocessed, &file_name,
-                                    );
-                                    let ml_count = ml.transactions.iter()
-                                        .filter(|t| !t.is_opening_balance)
-                                        .count();
-                                    if ml_count > 0 { Some(ml) } else {
-                                        h.set_status_bank(SharedString::from(
-                                            "No transactions found — PDF may use embedded fonts",
-                                        ));
-                                        return;
-                                    }
-                                } else {
-                                    h.set_status_bank(SharedString::from(
-                                        "No transactions found — PDF may use embedded fonts",
-                                    ));
-                                    return;
-                                }
-                            }
-                        }
-                    } else if parser::ocr_extractor::IMAGE_EXTS.contains(&ext.as_str()) {
-                        h.set_status_bank(SharedString::from("Image — running OCR…"));
-                        match parser::ocr_extractor::extract_image_via_tesseract(&path) {
-                            Some(text) if !text.trim().is_empty() => {
-                                let ocr = parser::ocr_parser::parse_ocr_text(&text, &file_name);
-                                let real_count = ocr.transactions.iter()
-                                    .filter(|t| !t.is_opening_balance)
-                                    .count();
-                                if real_count > 0 {
-                                    Some(ocr)
-                                } else {
-                                    h.set_status_bank(SharedString::from(
-                                        "No transactions found in image — check image quality",
-                                    ));
-                                    return;
-                                }
-                            }
-                            _ => {
-                                h.set_status_bank(SharedString::from(
-                                    "Image OCR failed — install Tesseract for image support",
-                                ));
-                                return;
-                            }
-                        }
-                    } else {
-                        log::warn!("Unsupported extension: {}", ext);
-                        h.set_status_bank(SharedString::from("Unsupported file type"));
-                        return;
-                    };
-
-                let mut result = match parse_result {
-                    Some(r) => r,
-                    None => {
-                        h.set_status_bank(SharedString::from("No transactions found"));
-                        return;
-                    }
-                };
-
-                // Cross-import dedup — catches the same statement being re-loaded in a
-                // separate session, not just duplicate rows within one load. Synthetic
-                // (opening-balance) rows are always kept.
-                if h.get_dedup_enabled() {
-                    let client_id = state_ref.lock().unwrap().client_id;
-                    if let Some(cid) = client_id {
-                        let known = {
-                            let db = db_ref.lock().unwrap();
-                            db.as_ref().and_then(|conn| db::get_dedupe_hashes(conn, cid).ok())
-                                .unwrap_or_default()
-                        };
-                        let before = result.transactions.iter().filter(|t| !t.is_opening_balance).count();
-                        result.transactions.retain(|t| t.is_opening_balance || !known.contains(&t.hash()));
-                        let after = result.transactions.iter().filter(|t| !t.is_opening_balance).count();
-                        let skipped = before.saturating_sub(after);
-                        if after == 0 {
-                            h.set_toast_msg(SharedString::from(
-                                "All transactions in this file already loaded (dedupe)"));
-                            h.set_toast_kind(2);
-                            h.set_status_bank(SharedString::from("Dedupe: nothing new to load"));
-                            return;
-                        }
-                        if skipped > 0 {
-                            h.set_toast_msg(SharedString::from(
-                                format!("Dedupe: skipped {} duplicate row(s)", skipped).as_str()));
-                            h.set_toast_kind(2);
-                        }
-                        let new_hashes: Vec<String> = result.transactions.iter()
-                            .filter(|t| !t.is_opening_balance)
-                            .map(|t| t.hash())
-                            .collect();
-                        let db = db_ref.lock().unwrap();
-                        if let Some(conn) = db.as_ref() {
-                            // Not user-facing-critical (the transactions themselves are
-                            // about to be persisted by apply_parse_result below) — but a
-                            // failure here means future imports won't recognize these rows
-                            // as already-seen, so it's worth a clear log even without a toast.
-                            if let Err(e) = db::add_dedupe_hashes(conn, cid, &new_hashes) {
-                                log::error!("[LoadFile] failed to persist dedupe hashes: {}", e);
-                            }
+                        Err(e) => {
+                            log::error!("Excel parse error: {}", e);
+                            h.set_status_bank(SharedString::from("Excel parse error — see log"));
                         }
                     }
+                    return;
                 }
 
-                apply_parse_result(&h, &state_ref, &db_ref, result, &file_name);
+                if ext == "pdf" {
+                    // Stage 1: structured row parsing — fast, no OCR.
+                    let stage1 = match parser::text_extractor::extract_pages(&path) {
+                        Ok(rows) => {
+                            if rows.is_empty() { None }
+                            else { parser::pdf_parser::parse_pdf_rows(rows, &file_name) }
+                        }
+                        Err(e) => {
+                            let emsg = e.to_string();
+                            if emsg.contains("password-protected") || emsg.to_lowercase().contains("encrypt") {
+                                {
+                                    let mut st = state_ref.lock().unwrap();
+                                    st.pending_pdf_path = Some(path.clone());
+                                    st.pending_pdf_name = file_name.clone();
+                                }
+                                h.set_pdf_pwd_visible(true);
+                                h.set_pdf_pwd_prompt(SharedString::from(
+                                    format!("'{}' is password-protected. Enter the PDF password:", file_name).as_str(),
+                                ));
+                                h.set_status_bank(SharedString::from("PDF password required\u{2026}"));
+                                return;
+                            }
+                            log::error!("PDF extract error: {}", emsg);
+                            None
+                        }
+                    };
+
+                    if let Some(r) = stage1 {
+                        finish_load_file(&h, &state_ref, &db_ref, r, &file_name);
+                        return;
+                    }
+
+                    // Stage 2: needs OCR — background thread, mirrors the
+                    // AI-classify pattern (main.rs on_do_ai_classify) of
+                    // spawning + marshaling results back via
+                    // invoke_from_event_loop instead of blocking the UI thread.
+                    h.set_ocr_visible(true);
+                    h.set_ocr_msg(SharedString::from("Scanned PDF — running OCR…"));
+                    h.set_ocr_pct(0);
+                    let handle2     = handle.clone();
+                    let state_ref2  = state_ref.clone();
+                    let db_ref2     = db_ref.clone();
+                    let path2       = path.clone();
+                    let file_name2  = file_name.clone();
+                    std::thread::spawn(move || {
+                        let outcome = run_pdf_ocr_pipeline(&path2, &file_name2);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(h2) = handle2.upgrade() else { return };
+                            h2.set_ocr_visible(false);
+                            match outcome {
+                                Ok(r) => finish_load_file(&h2, &state_ref2, &db_ref2, r, &file_name2),
+                                Err(msg) => h2.set_status_bank(SharedString::from(msg.as_str())),
+                            }
+                        });
+                    });
+                    return;
+                }
+
+                if parser::ocr_extractor::IMAGE_EXTS.contains(&ext.as_str()) {
+                    h.set_ocr_visible(true);
+                    h.set_ocr_msg(SharedString::from("Image — running OCR…"));
+                    h.set_ocr_pct(0);
+                    let handle2     = handle.clone();
+                    let state_ref2  = state_ref.clone();
+                    let db_ref2     = db_ref.clone();
+                    let path2       = path.clone();
+                    let file_name2  = file_name.clone();
+                    std::thread::spawn(move || {
+                        let outcome = run_image_ocr_pipeline(&path2, &file_name2);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(h2) = handle2.upgrade() else { return };
+                            h2.set_ocr_visible(false);
+                            match outcome {
+                                Ok(r) => finish_load_file(&h2, &state_ref2, &db_ref2, r, &file_name2),
+                                Err(msg) => h2.set_status_bank(SharedString::from(msg.as_str())),
+                            }
+                        });
+                    });
+                    return;
+                }
+
+                log::warn!("Unsupported extension: {}", ext);
+                h.set_status_bank(SharedString::from("Unsupported file type"));
             });
         }
 
