@@ -14,6 +14,28 @@ pub struct BatchFileResult {
     pub err_msg: String,
 }
 
+/// State for a batch-folder import that's paused waiting for a PDF password.
+/// Old app's batch loop can `await` a per-file password prompt inline
+/// (parser.js, single-threaded async); Rust's batch loop runs synchronously
+/// on the UI thread, so a password-protected file instead saves its
+/// in-progress accumulators here, shows the password modal (reusing
+/// `pending_pdf_path`/`pending_pdf_name`), and resumes from `remaining` once
+/// `on_do_pdf_pwd_confirm`/`on_do_pdf_pwd_cancel` fires.
+#[derive(Debug, Clone, Default)]
+pub struct BatchProgress {
+    pub remaining:        std::collections::VecDeque<std::path::PathBuf>,
+    pub all_txns:         Vec<crate::parser::Transaction>,
+    pub loaded:           usize,
+    pub skipped:          usize,
+    pub errors:           usize,
+    pub first_bank:       String,
+    pub first_ob:         Option<f64>,
+    pub new_import_ids:   Vec<i64>,
+    pub batch_results:    Vec<BatchFileResult>,
+    pub persisted_hashes: std::collections::HashSet<String>,
+    pub client_id:        Option<i64>,
+}
+
 /// Snapshot of editable transaction fields for the undo stack.
 #[derive(Debug, Clone)]
 pub struct UndoEntry {
@@ -87,6 +109,15 @@ pub struct AppState {
     // PDF password — path waiting for a password prompt
     pub pending_pdf_path: Option<std::path::PathBuf>,
     pub pending_pdf_name: String,
+    // Set while a batch-folder import is paused waiting for a PDF password —
+    // see BatchProgress doc comment.
+    pub batch_progress: Option<BatchProgress>,
+
+    // Set true to abort an in-flight AI classification run (checked between
+    // batches in ai_classifier::classify_with_ai). Reset to false at the start
+    // of each new run. Shared via Arc so the Cancel button's handler (which
+    // doesn't hold the classification thread) can reach the same flag.
+    pub ai_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {

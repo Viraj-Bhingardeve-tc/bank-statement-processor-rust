@@ -106,7 +106,14 @@ strip     = true
 
 [profile.dev]
 opt-level = 0
-debug     = true
+# Line-tables-only (not full debug info): this binary's link step was
+# crashing MSVC link.exe with an out-of-memory / stack-buffer-overrun on a
+# resource-constrained dev machine (~5GB free RAM, disk >90% full). Full
+# debug info (`debug = true`/2) makes the linker hold far more symbol data
+# than line-table info (`debug = 1`), which is enough for panic backtraces
+# but dramatically lighter to link. Trades some debugger fidelity for a
+# build that reliably completes.
+debug     = 1
 # Disabled: the incremental cache for this binary (Slint + ~30 deps) grows
 # to multiple GB across a handful of rebuilds, which doesn't fit on a
 # constrained dev disk. Trades faster rebuilds for flat disk usage.

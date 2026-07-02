@@ -19,8 +19,9 @@ use regex::Regex;
 use crate::parser::{
     ParseResult, Transaction,
     bank_detection::{detect, DetectOptions},
-    date_parser::{normalize_transaction_date, repair_ocr_chars},
+    date_parser::normalize_transaction_date,
     excel_parser::{compute_prev_balances, prepend_opening_balance_row},
+    ocr_correction,
 };
 
 // ── Regexes ───────────────────────────────────────────────────────────────────
@@ -92,18 +93,21 @@ fn extract_amounts(s: &str) -> Vec<AmountMatch> {
 
 /// Port of `Parser._parseOCRText(rawText, fileName)`.
 ///
-/// Call with the raw string produced by an OCR engine.  The function applies
-/// basic OCR character repair (`repair_ocr_chars`) then extracts transactions.
+/// Call with the raw string produced by an OCR engine.  The function runs the
+/// full `OCRCorrection.correctText()` pipeline (char repair + fuzzy banking-
+/// term correction, 2 passes) then extracts transactions.
 ///
 /// Returns a `ParseResult` with `source_name = "{file_name} [OCR]"`.
 /// Closing balance is always `None` (OCR text rarely contains it explicitly).
 pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
 
-    // 1. Apply OCR character repair (repairs l→1, O→0, S→5, … for date tokens).
+    // 1. Apply OCR correction (char repair l→1, O→0, S→5, … + fuzzy banking-
+    //    term correction against BANK_TERMS) — port of `OCRCorrection.correctText()`,
+    //    matching the old app's default 2-pass call (parser.js:2016).
     let corrected = if raw_text.is_empty() {
         raw_text.to_string()
     } else {
-        repair_ocr_chars(raw_text)
+        ocr_correction::correct_text(raw_text, 2)
     };
 
     // 2. Split + normalise lines; discard lines ≤ 4 chars.

@@ -505,7 +505,11 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
     h.set_dash_has_data(s.txn_count > 0);
     h.set_dash_opening(SharedString::from(fmt_amt(s.opening_bal).as_str()));
     h.set_dash_closing(SharedString::from(fmt_amt(s.closing_bal).as_str()));
-    h.set_dash_suspense(SharedString::from(s.suspense_count.to_string().as_str()));
+    // dash-suspense shows a ₹ amount (sum of suspense-txn amounts), not a row
+    // count — matches old app's Suspense summary card (app.js:2179-2183),
+    // which reads "Amount in suspense: ₹X", not a transaction count.
+    h.set_dash_suspense(SharedString::from(fmt_amt(Some(s.suspense_amount)).as_str()));
+    h.set_dash_has_suspense(s.suspense_amount > 0.0);
     h.set_dash_needs_review(SharedString::from(s.needs_review_count.to_string().as_str()));
     h.set_dash_duplicates(SharedString::from(s.duplicate_count.to_string().as_str()));
     h.set_dash_gst_count(SharedString::from(s.gst_count.to_string().as_str()));
@@ -745,9 +749,21 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
 // PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 8.
 
 #[cfg(feature = "slint-ui")]
-fn run_pdf_ocr_pipeline(path: &std::path::Path, file_name: &str) -> Result<parser::ParseResult, String> {
+// `progress(pct, msg)` reports real pipeline-stage checkpoints. Unlike old
+// app's Tesseract.js (which OCRs page-by-page in JS and can report percent
+// within a single page), Rust shells out to a system Tesseract binary as one
+// blocking call with no incremental hook — so this can't reproduce per-page
+// percentages, but it replaces the previous static "0%" (set once and never
+// updated) with real, monotonically-increasing stage progress.
+fn run_pdf_ocr_pipeline<F: Fn(i32, &str)>(
+    path: &std::path::Path,
+    file_name: &str,
+    progress: F,
+) -> Result<parser::ParseResult, String> {
+    progress(10, "Extracting embedded text\u{2026}");
     let full_text = parser::text_extractor::extract_full_text(path);
     let effective_text = if full_text.trim().is_empty() {
+        progress(25, "Running Tesseract OCR\u{2026}");
         match parser::ocr_extractor::extract_via_tesseract(path) {
             Some(t) if !t.trim().is_empty() => t,
             _ => return Err("Scanned PDF — install Tesseract for OCR support".to_string()),
@@ -756,17 +772,21 @@ fn run_pdf_ocr_pipeline(path: &std::path::Path, file_name: &str) -> Result<parse
         full_text
     };
 
+    progress(70, "Correcting OCR text\u{2026}");
     let ocr = parser::ocr_parser::parse_ocr_text(&effective_text, file_name);
     let real_count = ocr.transactions.iter().filter(|t| !t.is_opening_balance).count();
     if real_count > 0 {
+        progress(100, "Done");
         return Ok(ocr);
     }
 
+    progress(85, "Retrying with multi-line narration handling\u{2026}");
     let preprocessed = parser::ocr_parser::preprocess_multiline(&effective_text);
     if !preprocessed.trim().is_empty() {
         let ml = parser::ocr_parser::parse_ocr_text(&preprocessed, file_name);
         let ml_count = ml.transactions.iter().filter(|t| !t.is_opening_balance).count();
         if ml_count > 0 {
+            progress(100, "Done");
             return Ok(ml);
         }
     }
@@ -774,12 +794,19 @@ fn run_pdf_ocr_pipeline(path: &std::path::Path, file_name: &str) -> Result<parse
 }
 
 #[cfg(feature = "slint-ui")]
-fn run_image_ocr_pipeline(path: &std::path::Path, file_name: &str) -> Result<parser::ParseResult, String> {
+fn run_image_ocr_pipeline<F: Fn(i32, &str)>(
+    path: &std::path::Path,
+    file_name: &str,
+    progress: F,
+) -> Result<parser::ParseResult, String> {
+    progress(20, "Running Tesseract OCR\u{2026}");
     match parser::ocr_extractor::extract_image_via_tesseract(path) {
         Some(text) if !text.trim().is_empty() => {
+            progress(75, "Correcting OCR text\u{2026}");
             let ocr = parser::ocr_parser::parse_ocr_text(&text, file_name);
             let real_count = ocr.transactions.iter().filter(|t| !t.is_opening_balance).count();
             if real_count > 0 {
+                progress(100, "Done");
                 Ok(ocr)
             } else {
                 Err("No transactions found in image — check image quality".to_string())
@@ -1110,6 +1137,330 @@ fn apply_parse_result(
     log::info!("UI updated with {} transactions", real.len());
 }
 
+// ── Batch folder processing (resumable across a PDF password prompt) ─────────
+//
+// Old app's batch loop can `await` a per-file password prompt inline
+// (parser.js's async generator style); Rust's batch loop runs synchronously
+// on the UI thread, so a password-protected file instead pauses the batch —
+// saving its in-progress accumulators in `ui::BatchProgress` — shows the
+// existing single-file password modal, and resumes from `remaining` once
+// `on_do_pdf_pwd_confirm`/`on_do_pdf_pwd_cancel` fires (see those handlers).
+
+enum BatchFileOutcome {
+    Parsed(parser::ParseResult),
+    NeedsPassword,
+    Failed,
+}
+
+/// Try to parse one batch file. Mirrors the dispatch logic previously inline
+/// in `on_do_batch_folder`'s loop body.
+#[cfg(feature = "slint-ui")]
+fn try_parse_batch_file(path: &std::path::Path, file_name: &str) -> BatchFileOutcome {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+
+    if ["xlsx", "xls", "xlsm"].contains(&ext.as_str()) {
+        match parser::excel_parser::parse_excel_file(path) {
+            Ok(r) if !r.transactions.is_empty() => BatchFileOutcome::Parsed(r),
+            _ => BatchFileOutcome::Failed,
+        }
+    } else if ext == "pdf" {
+        match parser::text_extractor::extract_pages(path) {
+            Ok(pages) if !pages.is_empty() => {
+                match parser::pdf_parser::parse_pdf_rows(pages, file_name) {
+                    Some(r) if !r.transactions.is_empty() => BatchFileOutcome::Parsed(r),
+                    _ => BatchFileOutcome::Failed,
+                }
+            }
+            Ok(_) => {
+                let text = parser::text_extractor::extract_full_text(path);
+                if !text.trim().is_empty() {
+                    let r = parser::ocr_parser::parse_ocr_text(&text, file_name);
+                    if r.transactions.iter().any(|t| !t.is_opening_balance) {
+                        BatchFileOutcome::Parsed(r)
+                    } else {
+                        BatchFileOutcome::Failed
+                    }
+                } else {
+                    match parser::ocr_extractor::extract_via_tesseract(path) {
+                        Some(t) => {
+                            let r = parser::ocr_parser::parse_ocr_text(&t, file_name);
+                            if r.transactions.iter().any(|t| !t.is_opening_balance) {
+                                BatchFileOutcome::Parsed(r)
+                            } else {
+                                BatchFileOutcome::Failed
+                            }
+                        }
+                        None => BatchFileOutcome::Failed,
+                    }
+                }
+            }
+            Err(e) => {
+                let emsg = e.to_string();
+                if emsg.contains("password-protected") || emsg.to_lowercase().contains("encrypt") {
+                    BatchFileOutcome::NeedsPassword
+                } else {
+                    BatchFileOutcome::Failed
+                }
+            }
+        }
+    } else if parser::ocr_extractor::IMAGE_EXTS.contains(&ext.as_str()) {
+        match parser::ocr_extractor::extract_image_via_tesseract(path) {
+            Some(t) => {
+                let r = parser::ocr_parser::parse_ocr_text(&t, file_name);
+                if r.transactions.iter().any(|t| !t.is_opening_balance) {
+                    BatchFileOutcome::Parsed(r)
+                } else {
+                    BatchFileOutcome::Failed
+                }
+            }
+            None => BatchFileOutcome::Failed,
+        }
+    } else {
+        BatchFileOutcome::Failed
+    }
+}
+
+/// Record a successfully parsed batch file into the in-progress accumulators —
+/// mirrors what was previously the inline `Some(r) if !r.transactions.is_empty()`
+/// arm of `on_do_batch_folder`'s match.
+#[cfg(feature = "slint-ui")]
+fn record_batch_success(
+    bp: &mut ui::BatchProgress,
+    db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
+    path: &std::path::Path,
+    file_name: &str,
+    r: parser::ParseResult,
+) {
+    let r_bank    = r.bank_name.clone();
+    let r_account = r.account_no.clone();
+    let r_ob      = r.opening_balance;
+    let r_txns    = r.transactions.clone();
+    let r_cnt     = r_txns.iter().filter(|t| !t.is_opening_balance).count();
+    let non_ob: Vec<&parser::Transaction> = r_txns.iter().filter(|t| !t.is_opening_balance).collect();
+    let first_d = non_ob.first().map(|t| t.date.as_str()).unwrap_or("").to_string();
+    let last_d  = non_ob.last().map(|t| t.date.as_str()).unwrap_or("").to_string();
+    let period  = if first_d.is_empty() { "—".to_string() }
+                  else if first_d == last_d { first_d.clone() }
+                  else { format!("{} - {}", first_d, last_d) };
+
+    bp.batch_results.push(ui::BatchFileResult {
+        file:    file_name.chars().take(35).collect::<String>(),
+        bank:    r_bank.clone(),
+        account: r_account.clone(),
+        period,
+        txns:    r_cnt,
+        ok:      true,
+        err_msg: String::new(),
+    });
+
+    let mut existing_hashes: std::collections::HashSet<String> =
+        bp.all_txns.iter().map(|t| t.hash()).collect();
+    existing_hashes.extend(bp.persisted_hashes.iter().cloned());
+    let new_txns: Vec<parser::Transaction> = r.transactions.into_iter()
+        .filter(|t| t.is_opening_balance || !existing_hashes.contains(&t.hash()))
+        .collect();
+    let kept_cnt = new_txns.iter().filter(|t| !t.is_opening_balance).count();
+    bp.skipped += r_cnt.saturating_sub(kept_cnt);
+    bp.all_txns.extend(new_txns.clone());
+    bp.loaded += 1;
+    if bp.first_bank.is_empty() { bp.first_bank = r_bank.clone(); }
+    if bp.first_ob.is_none() { bp.first_ob = r_ob; }
+
+    if let Some(client_id) = bp.client_id.filter(|&c| c > 0) {
+        let db = db_ref.lock().unwrap();
+        if let Some(conn) = db.as_ref() {
+            match db::save_import(conn, client_id, file_name, &r_bank, &r_account, r_cnt) {
+                Ok(iid) => {
+                    if let Err(e) = db::upsert_transactions(conn, client_id, Some(iid), &new_txns) {
+                        log::error!("[Batch] failed to persist transactions for {:?}: {}", path, e);
+                        if let Some(last) = bp.batch_results.last_mut() {
+                            last.ok = false;
+                            last.err_msg = format!("Parsed but save failed: {}", e);
+                        }
+                    } else {
+                        bp.new_import_ids.push(iid);
+                    }
+                }
+                Err(e) => log::error!("[Batch] failed to record import history for {:?}: {}", path, e),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "slint-ui")]
+fn record_batch_failure(bp: &mut ui::BatchProgress, file_name: &str, err_msg: &str) {
+    bp.errors += 1;
+    log::warn!("[Batch] failed: {} — {}", file_name, err_msg);
+    bp.batch_results.push(ui::BatchFileResult {
+        file:    file_name.chars().take(35).collect::<String>(),
+        bank:    String::new(),
+        account: String::new(),
+        period:  String::new(),
+        txns:    0,
+        ok:      false,
+        err_msg: err_msg.to_string(),
+    });
+}
+
+/// Finalize a batch once every file in `remaining` has been processed —
+/// mirrors what was previously the tail of `on_do_batch_folder` after its loop.
+#[cfg(feature = "slint-ui")]
+fn finish_batch(
+    h: &AppWindow,
+    state_ref: &Arc<Mutex<ui::AppState>>,
+    db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
+) {
+    let bp = { state_ref.lock().unwrap().batch_progress.take() };
+    let Some(bp) = bp else { return };
+    let ui::BatchProgress {
+        mut all_txns, loaded, skipped, errors, first_bank, first_ob,
+        new_import_ids, batch_results, client_id, ..
+    } = bp;
+
+    if all_txns.is_empty() {
+        h.set_status_bank(SharedString::from("Batch: no transactions loaded"));
+        return;
+    }
+
+    if let Some(cid) = client_id {
+        let new_hashes: Vec<String> = all_txns.iter()
+            .filter(|t| !t.is_opening_balance)
+            .map(|t| t.hash())
+            .collect();
+        let db = db_ref.lock().unwrap();
+        if let Some(conn) = db.as_ref() {
+            if let Err(e) = db::add_dedupe_hashes(conn, cid, &new_hashes) {
+                log::error!("[Batch] failed to persist dedupe hashes: {}", e);
+            }
+        }
+    }
+
+    let (bank_ledger, client_id2) = {
+        let st = state_ref.lock().unwrap();
+        (st.tally_ledger.clone(), st.client_id.unwrap_or(0))
+    };
+    let rules = {
+        let db = db_ref.lock().unwrap();
+        if let Some(conn) = db.as_ref() { db::get_rules(conn, client_id2).unwrap_or_default() } else { vec![] }
+    };
+    let dedup_on = h.get_dedup_enabled();
+    classifier::classify_all(&mut all_txns, &bank_ledger, &rules, dedup_on);
+    parser::party_master::normalize_vendors(&mut all_txns);
+
+    let real: Vec<&parser::Transaction> = all_txns.iter().filter(|t| !t.is_opening_balance).collect();
+    let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
+    let row_models = build_txn_rows(&real);
+    let bank_set: std::collections::BTreeSet<String> = real.iter().map(|t| t.bank_name.clone()).collect();
+    let bank_names: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
+        .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
+        .collect();
+
+    h.set_transaction_rows(slint::ModelRc::new(slint::VecModel::from(row_models)));
+    h.set_bank_names(slint::ModelRc::new(slint::VecModel::from(bank_names)));
+    h.set_dash_credits(SharedString::from(ui::AppState::fmt_amount(Some(total_cr)).as_str()));
+    h.set_dash_debits(SharedString::from(ui::AppState::fmt_amount(Some(total_dr)).as_str()));
+    h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
+    h.set_status_bank(SharedString::from(first_bank.as_str()));
+    h.set_status_file(SharedString::from(format!("{} file(s)", loaded).as_str()));
+    h.set_fc_all(SharedString::from(real.len().to_string().as_str()));
+
+    {
+        let mut st = state_ref.lock().unwrap();
+        st.transactions    = all_txns.clone();
+        st.opening_balance = first_ob;
+        st.closing_balance = None;
+        st.total_debits    = total_dr;
+        st.total_credits   = total_cr;
+        st.txn_count       = real.len();
+        st.active_filter   = "all".to_string();
+        st.filter_statuses.clear();
+        st.date_from       = String::new();
+        st.date_to         = String::new();
+        st.bank_filter     = String::new();
+        st.vendor_filter   = String::new();
+        st.head_filter     = String::new();
+        st.import_ids.extend(new_import_ids.iter());
+        st.batch_file_results = batch_results;
+    }
+
+    push_dashboard(h, &all_txns, first_ob);
+    push_summary_extras(h, &all_txns);
+    let batch_event = format!("[{}] Import — {} file(s), {} transactions loaded", audit_now(), loaded, real.len());
+    {
+        let mut st = state_ref.lock().unwrap();
+        st.audit_events.push(batch_event.clone());
+    }
+    if client_id2 > 0 {
+        let db = db_ref.lock().unwrap();
+        if let Some(conn) = db.as_ref() {
+            if let Err(e) = db::push_audit_event(conn, client_id2, &batch_event) {
+                log::error!("[Batch] failed to persist audit event: {}", e);
+            }
+        }
+    }
+    log::info!("[Batch] loaded={} skipped={} errors={} total_txns={}", loaded, skipped, errors, real.len());
+    let mut summary = format!("{} file(s) loaded", loaded);
+    if skipped > 0 { summary.push_str(&format!(", {} dupe(s) skipped", skipped)); }
+    if errors  > 0 { summary.push_str(&format!(", {} file(s) failed", errors)); }
+    h.set_toast_msg(SharedString::from(summary.as_str()));
+    h.set_toast_kind(if errors > 0 { 3 } else { 1 });
+}
+
+/// Process files from `batch_progress.remaining` one at a time until either
+/// the batch completes (`finish_batch`) or a password-protected PDF pauses it.
+#[cfg(feature = "slint-ui")]
+fn continue_batch(
+    h: &AppWindow,
+    state_ref: &Arc<Mutex<ui::AppState>>,
+    db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
+) {
+    loop {
+        let next_path = {
+            let mut st = state_ref.lock().unwrap();
+            match st.batch_progress.as_mut() {
+                Some(bp) => bp.remaining.pop_front(),
+                None => return,
+            }
+        };
+        let Some(path) = next_path else {
+            finish_batch(h, state_ref, db_ref);
+            return;
+        };
+        let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+        match try_parse_batch_file(&path, &file_name) {
+            BatchFileOutcome::Parsed(r) => {
+                let mut st = state_ref.lock().unwrap();
+                if let Some(bp) = st.batch_progress.as_mut() {
+                    record_batch_success(bp, db_ref, &path, &file_name, r);
+                }
+            }
+            BatchFileOutcome::Failed => {
+                let mut st = state_ref.lock().unwrap();
+                if let Some(bp) = st.batch_progress.as_mut() {
+                    record_batch_failure(bp, &file_name, "Parse failed");
+                }
+            }
+            BatchFileOutcome::NeedsPassword => {
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.pending_pdf_path = Some(path.clone());
+                    st.pending_pdf_name = file_name.clone();
+                }
+                h.set_pdf_pwd_visible(true);
+                h.set_pdf_pwd_prompt(SharedString::from(
+                    format!("'{}' is password-protected. Enter the PDF password:", file_name).as_str(),
+                ));
+                h.set_status_bank(SharedString::from(
+                    format!("PDF password required for {}\u{2026}", file_name).as_str(),
+                ));
+                return; // paused — resumes via on_do_pdf_pwd_confirm/on_do_pdf_pwd_cancel
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
@@ -1216,11 +1567,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
 
-                if auth::validate_credentials(&email, &password) {
+                h.set_login_loading(true);
+                let ok = auth::validate_credentials(&email, &password);
+                h.set_login_loading(false);
+                if ok {
                     log::info!("Login successful for {}", email);
                     h.set_logged_in(true);
                     h.set_login_error("".into());
-                    h.set_login_loading(false);
                 } else {
                     ls.record_failure();
                     let remaining = ls.remaining();
@@ -1236,6 +1589,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     log::warn!("Login failed for {} — {} remaining", email, remaining);
                     h.set_login_error(msg);
+                    if remaining == 0 {
+                        // Auto-quit ~1.5s after the 3rd failed attempt, matching old
+                        // app's lockout (login.html:196-201, main.js:222-229) instead
+                        // of leaving a permanently-exhausted, un-retryable screen up.
+                        h.set_login_closing(true);
+                        slint::Timer::single_shot(std::time::Duration::from_millis(1500), || {
+                            let _ = slint::quit_event_loop();
+                        });
+                    }
                 }
             });
         }
@@ -1338,7 +1700,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let path2       = path.clone();
                     let file_name2  = file_name.clone();
                     std::thread::spawn(move || {
-                        let outcome = run_pdf_ocr_pipeline(&path2, &file_name2);
+                        let progress_handle = handle2.clone();
+                        let outcome = run_pdf_ocr_pipeline(&path2, &file_name2, move |pct, msg| {
+                            let h = progress_handle.clone();
+                            let msg = msg.to_string();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(h) = h.upgrade() {
+                                    h.set_ocr_pct(pct);
+                                    h.set_ocr_msg(SharedString::from(msg.as_str()));
+                                }
+                            });
+                        });
                         let _ = slint::invoke_from_event_loop(move || {
                             let Some(h2) = handle2.upgrade() else { return };
                             h2.set_ocr_visible(false);
@@ -1361,7 +1733,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let path2       = path.clone();
                     let file_name2  = file_name.clone();
                     std::thread::spawn(move || {
-                        let outcome = run_image_ocr_pipeline(&path2, &file_name2);
+                        let progress_handle = handle2.clone();
+                        let outcome = run_image_ocr_pipeline(&path2, &file_name2, move |pct, msg| {
+                            let h = progress_handle.clone();
+                            let msg = msg.to_string();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(h) = h.upgrade() {
+                                    h.set_ocr_pct(pct);
+                                    h.set_ocr_msg(SharedString::from(msg.as_str()));
+                                }
+                            });
+                        });
                         let _ = slint::invoke_from_event_loop(move || {
                             let Some(h2) = handle2.upgrade() else { return };
                             h2.set_ocr_visible(false);
@@ -1380,6 +1762,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // ── Batch Folder Processing ───────────────────────────────────────────
+        // Processing itself lives in continue_batch/finish_batch (module scope)
+        // so it can pause mid-batch for a PDF password prompt and resume from
+        // on_do_pdf_pwd_confirm/on_do_pdf_pwd_cancel — see those handlers.
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
@@ -1397,214 +1782,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     _ => return,
                 };
 
-                let mut all_txns: Vec<parser::Transaction> = {
+                let (all_txns, batch_client_id) = {
                     let st = state_ref.lock().unwrap();
-                    st.transactions.clone()
+                    (st.transactions.clone(), st.client_id)
                 };
-                let batch_client_id = state_ref.lock().unwrap().client_id;
                 let persisted_hashes: std::collections::HashSet<String> = batch_client_id
                     .and_then(|cid| {
                         let db = db_ref.lock().unwrap();
                         db.as_ref().and_then(|conn| db::get_dedupe_hashes(conn, cid).ok())
                     })
                     .unwrap_or_default();
-                let mut loaded = 0usize;
-                let mut skipped = 0usize;
-                let mut errors = 0usize;
-                let mut first_bank = String::new();
-                let mut first_ob: Option<f64> = None;
-                let mut new_import_ids: Vec<i64> = vec![];
-                let mut batch_results: Vec<ui::BatchFileResult> = vec![];
-
-                for path in &paths {
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-
-                    let result = if ["xlsx","xls","xlsm"].contains(&ext.as_str()) {
-                        parser::excel_parser::parse_excel_file(path).ok()
-                    } else if ext == "pdf" {
-                        let pages = parser::text_extractor::extract_pages(path).ok().unwrap_or_default();
-                        if !pages.is_empty() {
-                            parser::pdf_parser::parse_pdf_rows(pages, &file_name)
-                        } else {
-                            let text = parser::text_extractor::extract_full_text(path);
-                            if !text.trim().is_empty() {
-                                let r = parser::ocr_parser::parse_ocr_text(&text, &file_name);
-                                if r.transactions.iter().any(|t| !t.is_opening_balance) { Some(r) } else { None }
-                            } else {
-                                parser::ocr_extractor::extract_via_tesseract(path)
-                                    .and_then(|t| {
-                                        let r = parser::ocr_parser::parse_ocr_text(&t, &file_name);
-                                        if r.transactions.iter().any(|t| !t.is_opening_balance) { Some(r) } else { None }
-                                    })
-                            }
-                        }
-                    } else if parser::ocr_extractor::IMAGE_EXTS.contains(&ext.as_str()) {
-                        parser::ocr_extractor::extract_image_via_tesseract(path)
-                            .and_then(|t| {
-                                let r = parser::ocr_parser::parse_ocr_text(&t, &file_name);
-                                if r.transactions.iter().any(|t| !t.is_opening_balance) { Some(r) } else { None }
-                            })
-                    } else { None };
-
-                    match result {
-                        Some(r) if !r.transactions.is_empty() => {
-                            let r_bank    = r.bank_name.clone();
-                            let r_account = r.account_no.clone();
-                            let r_ob      = r.opening_balance;
-                            let r_txns    = r.transactions.clone();
-                            let r_cnt     = r_txns.iter().filter(|t| !t.is_opening_balance).count();
-                            // Derive statement period from first/last transaction dates
-                            let non_ob: Vec<&parser::Transaction> = r_txns.iter().filter(|t| !t.is_opening_balance).collect();
-                            let first_d = non_ob.first().map(|t| t.date.as_str()).unwrap_or("").to_string();
-                            let last_d  = non_ob.last().map(|t| t.date.as_str()).unwrap_or("").to_string();
-                            let period  = if first_d.is_empty() { "—".to_string() }
-                                          else if first_d == last_d { first_d.clone() }
-                                          else { format!("{} - {}", first_d, last_d) };
-                            batch_results.push(ui::BatchFileResult {
-                                file:    file_name.chars().take(35).collect::<String>(),
-                                bank:    r_bank.clone(),
-                                account: r_account.clone(),
-                                period,
-                                txns:    r_cnt,
-                                ok:      true,
-                                err_msg: String::new(),
-                            });
-                            let mut existing_hashes: std::collections::HashSet<String> =
-                                all_txns.iter().map(|t| t.hash()).collect();
-                            existing_hashes.extend(persisted_hashes.iter().cloned());
-                            let new_txns: Vec<parser::Transaction> = r.transactions.into_iter()
-                                .filter(|t| t.is_opening_balance || !existing_hashes.contains(&t.hash()))
-                                .collect();
-                            let kept_cnt = new_txns.iter().filter(|t| !t.is_opening_balance).count();
-                            skipped += r_cnt.saturating_sub(kept_cnt);
-                            all_txns.extend(new_txns.clone());
-                            loaded += 1;
-                            if first_bank.is_empty() { first_bank = r_bank.clone(); }
-                            if first_ob.is_none() { first_ob = r_ob; }
-                            let db = db_ref.lock().unwrap();
-                            if let Some(conn) = db.as_ref() {
-                                let client_id = { state_ref.lock().unwrap().client_id.unwrap_or(0) };
-                                if client_id > 0 {
-                                    match db::save_import(conn, client_id, &file_name, &r_bank, &r_account, r_cnt) {
-                                        Ok(iid) => {
-                                            if let Err(e) = db::upsert_transactions(conn, client_id, Some(iid), &new_txns) {
-                                                log::error!("[Batch] failed to persist transactions for {:?}: {}", path, e);
-                                                // This file's batch_results entry was just pushed as ok:true
-                                                // (parsing succeeded) — correct it now that we know the save
-                                                // didn't, so the batch monitor table doesn't claim success.
-                                                if let Some(last) = batch_results.last_mut() {
-                                                    last.ok = false;
-                                                    last.err_msg = format!("Parsed but save failed: {}", e);
-                                                }
-                                            } else {
-                                                new_import_ids.push(iid);
-                                            }
-                                        }
-                                        Err(e) => log::error!("[Batch] failed to record import history for {:?}: {}", path, e),
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            errors += 1;
-                            log::warn!("[Batch] failed to parse: {:?}", path);
-                            batch_results.push(ui::BatchFileResult {
-                                file:    file_name.chars().take(35).collect::<String>(),
-                                bank:    String::new(),
-                                account: String::new(),
-                                period:  String::new(),
-                                txns:    0,
-                                ok:      false,
-                                err_msg: "Parse failed".to_string(),
-                            });
-                        }
-                    }
-                }
-
-                if all_txns.is_empty() { return; }
-
-                if let Some(cid) = batch_client_id {
-                    let new_hashes: Vec<String> = all_txns.iter()
-                        .filter(|t| !t.is_opening_balance)
-                        .map(|t| t.hash())
-                        .collect();
-                    let db = db_ref.lock().unwrap();
-                    if let Some(conn) = db.as_ref() {
-                        if let Err(e) = db::add_dedupe_hashes(conn, cid, &new_hashes) {
-                            log::error!("[Batch] failed to persist dedupe hashes: {}", e);
-                        }
-                    }
-                }
-
-                // Classify and build model
-                let (bank_ledger, client_id2) = {
-                    let st = state_ref.lock().unwrap();
-                    (st.tally_ledger.clone(), st.client_id.unwrap_or(0))
-                };
-                let rules = {
-                    let db = db_ref.lock().unwrap();
-                    if let Some(conn) = db.as_ref() {
-                        db::get_rules(conn, client_id2).unwrap_or_default()
-                    } else { vec![] }
-                };
-                let dedup_on = h.get_dedup_enabled();
-                classifier::classify_all(&mut all_txns, &bank_ledger, &rules, dedup_on);
-                parser::party_master::normalize_vendors(&mut all_txns);
-
-                let real: Vec<&parser::Transaction> = all_txns.iter().filter(|t| !t.is_opening_balance).collect();
-                let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
-                let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
-                let row_models = build_txn_rows(&real);
-                let mut bank_set: std::collections::BTreeSet<String> = real.iter().map(|t| t.bank_name.clone()).collect();
-                let bank_names: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
-                    .chain(bank_set.iter().map(|b| SharedString::from(b.as_str())))
-                    .collect();
-
-                h.set_transaction_rows(slint::ModelRc::new(slint::VecModel::from(row_models)));
-                h.set_bank_names(slint::ModelRc::new(slint::VecModel::from(bank_names)));
-                h.set_dash_credits(SharedString::from(ui::AppState::fmt_amount(Some(total_cr)).as_str()));
-                h.set_dash_debits(SharedString::from(ui::AppState::fmt_amount(Some(total_dr)).as_str()));
-                h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
-                h.set_status_bank(SharedString::from(first_bank.as_str()));
-                h.set_status_file(SharedString::from(format!("{} file(s)", loaded).as_str()));
-                h.set_fc_all(SharedString::from(real.len().to_string().as_str()));
 
                 {
                     let mut st = state_ref.lock().unwrap();
-                    st.transactions    = all_txns.clone();
-                    st.opening_balance = first_ob;
-                    st.closing_balance = None;
-                    st.total_debits    = total_dr;
-                    st.total_credits   = total_cr;
-                    st.txn_count       = real.len();
-                    st.active_filter   = "all".to_string();
-                    st.filter_statuses.clear();
-                    st.date_from       = String::new();
-                    st.date_to         = String::new();
-                    st.bank_filter     = String::new();
-                    st.vendor_filter   = String::new();
-                    st.head_filter     = String::new();
-                    st.import_ids.extend(new_import_ids.iter());
-                    st.batch_file_results = batch_results;
+                    st.batch_progress = Some(ui::BatchProgress {
+                        remaining: paths.into_iter().collect(),
+                        all_txns,
+                        loaded: 0,
+                        skipped: 0,
+                        errors: 0,
+                        first_bank: String::new(),
+                        first_ob: None,
+                        new_import_ids: vec![],
+                        batch_results: vec![],
+                        persisted_hashes,
+                        client_id: batch_client_id,
+                    });
                 }
-
-                push_dashboard(&h, &all_txns, first_ob);
-                push_summary_extras(&h, &all_txns);
-                let batch_event = format!("[{}] Import — {} file(s), {} transactions loaded", audit_now(), loaded, real.len());
-                {
-                    let mut st = state_ref.lock().unwrap();
-                    st.audit_events.push(batch_event.clone());
-                }
-                if client_id2 > 0 {
-                    let db = db_ref.lock().unwrap();
-                    if let Some(conn) = db.as_ref() {
-                        if let Err(e) = db::push_audit_event(conn, client_id2, &batch_event) {
-                            log::error!("[Batch] failed to persist audit event: {}", e);
-                        }
-                    }
-                }
-                log::info!("[Batch] loaded={} skipped={} errors={} total_txns={}", loaded, skipped, errors, real.len());
+                continue_batch(&h, &state_ref, &db_ref);
             });
         }
         // ── New Client ────────────────────────────────────────────────────────
@@ -1612,14 +1817,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
             let db_ref    = db_conn.clone();
-            app.on_do_new_client(move || {
-                let h = match handle.upgrade() { Some(h) => h, None => return };
-                // Read the fields that were synced via the in-out properties
+            // Returns true on success (Slint only clears/closes the modal then) — matches
+            // old app's _saveClient(), which keeps modalNewClient open and toasts on any
+            // validation failure (app.js:359-368) instead of silently discarding input.
+            app.on_do_new_client(move || -> bool {
+                let h = match handle.upgrade() { Some(h) => h, None => return false };
                 let name   = h.get_new_client_name().to_string();
                 let ledger = h.get_new_client_ledger().to_string();
                 if name.trim().is_empty() {
-                    log::warn!("[NewClient] name is empty — skipping");
-                    return;
+                    h.set_toast_msg(SharedString::from("Enter client name"));
+                    h.set_toast_kind(2);
+                    return false;
+                }
+                if ledger.trim().is_empty() {
+                    h.set_toast_msg(SharedString::from("Enter Tally bank ledger name"));
+                    h.set_toast_kind(2);
+                    return false;
+                }
+                {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        if let Ok(clients) = db::get_clients(conn) {
+                            if clients.iter().any(|c| c.name.eq_ignore_ascii_case(name.trim())) {
+                                drop(db);
+                                h.set_toast_msg(SharedString::from("Client already exists"));
+                                h.set_toast_kind(2);
+                                return false;
+                            }
+                        }
+                    }
                 }
                 // Write to DB
                 let new_id = {
@@ -1631,16 +1857,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     } else { None }
                 };
+                let Some(id) = new_id else {
+                    h.set_toast_msg(SharedString::from("Failed to create client"));
+                    h.set_toast_kind(2);
+                    return false;
+                };
                 // Update AppState and sync dashboard properties so Edit Client modal pre-fills
-                if let Some(id) = new_id {
+                {
                     let mut st = state_ref.lock().unwrap();
                     st.client_id     = Some(id);
                     st.client_name   = name.trim().to_string();
                     st.tally_ledger  = ledger.trim().to_string();
-                    drop(st);
-                    h.set_dash_client_name(SharedString::from(name.trim()));
-                    h.set_dash_client_ledger(SharedString::from(ledger.trim()));
                 }
+                h.set_dash_client_name(SharedString::from(name.trim()));
+                h.set_dash_client_ledger(SharedString::from(ledger.trim()));
                 // Refresh client dropdown
                 {
                     let db = db_ref.lock().unwrap();
@@ -1654,6 +1884,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                h.set_toast_msg(SharedString::from(format!("Client \"{}\" created", name.trim())));
+                h.set_toast_kind(1);
+                true
             });
         }
 
@@ -1713,6 +1946,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let scope        = ai_classifier::AiScope::from_idx(h.get_ai_scope_idx());
                     let handle2      = h.as_weak();
                     let state_ref2   = state_ref.clone();
+                    // Reset (and grab a clone of) the shared cancel flag before this run
+                    // starts — on_do_ai_cancel sets it from the UI thread; the spawned
+                    // thread below checks it between AI batches.
+                    let cancel_flag = {
+                        let st = state_ref.lock().unwrap();
+                        st.ai_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                        st.ai_cancel.clone()
+                    };
                     h.set_ai_overlay_visible(true);
                     h.set_ai_msg("Classifying with AI…".into());
                     h.set_ai_pct(0);
@@ -1723,6 +1964,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             provider,
                             &api_key,
                             scope,
+                            &cancel_flag,
                             |done, total| {
                                 let pct = if total > 0 { (done * 100 / total) as i32 } else { 0 };
                                 let msg = format!("AI: {}/{}", done, total);
@@ -1735,10 +1977,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             },
                         );
-                        match result {
-                            Ok(n) => log::info!("[AIClassify] classified {} transactions", n),
-                            Err(e) => log::error!("[AIClassify] error: {}", e),
-                        }
+                        // Old app always toasts the outcome of an AI-classify run
+                        // (app.js:3721-3729: success/cancelled/error) — mirror that
+                        // here instead of leaving failures visible only in the log.
+                        let was_cancelled = cancel_flag.load(std::sync::atomic::Ordering::Relaxed);
+                        let (toast_msg, toast_kind) = match &result {
+                            Ok(n) if was_cancelled => {
+                                log::info!("[AIClassify] cancelled — {} transactions classified before stopping", n);
+                                ("AI classification cancelled".to_string(), 3)
+                            }
+                            Ok(n) => {
+                                log::info!("[AIClassify] classified {} transactions", n);
+                                (format!("AI classified {} transaction(s)", n), 1)
+                            }
+                            Err(e) => {
+                                log::error!("[AIClassify] error: {}", e);
+                                (format!("AI error: {}", e), 2)
+                            }
+                        };
                         let handle3 = handle2.clone();
                         let state_ref3 = state_ref2.clone();
                         let txns_done = txns;
@@ -1751,6 +2007,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 rebuild_rows(&h2, &st);
                                 push_dashboard(&h2, &st.transactions, st.opening_balance);
                                 push_summary_extras(&h2, &st.transactions);
+                                h2.set_toast_msg(SharedString::from(toast_msg.as_str()));
+                                h2.set_toast_kind(toast_kind);
                             }
                         });
                     });
@@ -2179,10 +2437,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let st = state_ref.lock().unwrap();
                 if st.transactions.is_empty() {
                     log::warn!("[ExportTally] No transactions to export");
+                    h.set_toast_msg(SharedString::from("No transactions to export"));
+                    h.set_toast_kind(2);
                     return;
                 }
                 let company = h.get_wiz_company().to_string();
                 let client_name = if company.is_empty() { st.client_name.clone() } else { company };
+                if client_name.trim().is_empty() {
+                    log::warn!("[ExportTally] company name is empty");
+                    h.set_toast_msg(SharedString::from("Enter Tally company name"));
+                    h.set_toast_kind(2);
+                    return;
+                }
                 let gstin   = h.get_wiz_gstin().to_string();
                 let from    = h.get_wiz_date_from().to_string();
                 let to      = h.get_wiz_date_to().to_string();
@@ -2211,8 +2477,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None    => return,
                 };
                 match std::fs::write(&path, xml.as_bytes()) {
-                    Ok(_) => log::info!("[ExportTally] wrote {:?}", path),
-                    Err(e) => log::error!("[ExportTally] write failed: {}", e),
+                    Ok(_) => {
+                        log::info!("[ExportTally] wrote {:?}", path);
+                        h.set_toast_msg(SharedString::from("Tally XML exported"));
+                        h.set_toast_kind(1);
+                    }
+                    Err(e) => {
+                        log::error!("[ExportTally] write failed: {}", e);
+                        h.set_toast_msg(SharedString::from(format!("Export error: {}", e)));
+                        h.set_toast_kind(2);
+                    }
                 }
             });
         }
@@ -3046,8 +3320,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => "INFO",
                     }.to_string();
                     match cfg.save(conn) {
-                        Ok(_)  => log::info!("[SettingsSaveAll] saved recon_days={} recon_pct={}", cfg.recon_days, cfg.recon_pct),
-                        Err(e) => log::error!("[SettingsSaveAll] error: {}", e),
+                        Ok(_) => {
+                            log::info!("[SettingsSaveAll] saved recon_days={} recon_pct={}", cfg.recon_days, cfg.recon_pct);
+                            h.set_toast_msg(SharedString::from("Settings saved"));
+                            h.set_toast_kind(1);
+                        }
+                        Err(e) => {
+                            log::error!("[SettingsSaveAll] error: {}", e);
+                            h.set_toast_msg(SharedString::from(format!("Failed to save settings: {}", e)));
+                            h.set_toast_kind(2);
+                        }
                     }
                 }
             });
@@ -3538,7 +3820,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                     }
                     t.status     = parser::TransactionStatus::Classified;
-                    t.confidence = 1.0;
+                    // Old app's _saveTxn(learn) sets confidence 1.0 only for Save & Learn;
+                    // a plain Save (no rule persisted) gets 0.75 — a real trust signal
+                    // that Rust previously collapsed to 1.0 for both (app.js:2273-2334).
+                    t.confidence = if learn { 1.0 } else { 0.75 };
                     t.classification_source = "user".to_string();
 
                     // Save & Learn: derive a narration pattern and persist as a rule
@@ -3639,6 +3924,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
 
+            // Port of old app's differentiated confirm() message (app.js:2498-2500):
+            // manually-added rows get a soft prompt, auto-imported rows get a stronger warning.
+            app.on_do_request_delete_txn_confirm(move |idx| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let st = state_ref.lock().unwrap();
+                let is_manual = visible_to_abs(&st, idx as usize)
+                    .map(|abs| matches!(st.transactions[abs].status, parser::TransactionStatus::Manual))
+                    .unwrap_or(false);
+                drop(st);
+                let message = if is_manual {
+                    "Delete this manually added transaction?"
+                } else {
+                    "\u{26A0} You are deleting an auto-imported transaction. This cannot be undone.\n\nAre you sure?"
+                };
+                h.set_confirm_title(SharedString::from("Delete Transaction"));
+                h.set_confirm_message(SharedString::from(message));
+                h.set_confirm_action(SharedString::from("delete-txn"));
+                h.set_confirm_payload(idx);
+                h.set_modal_state(SharedString::from("confirm"));
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+
             app.on_do_mark_suspense(move |idx| {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 let mut st = state_ref.lock().unwrap();
@@ -3728,15 +4038,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             app.on_do_pdf_pwd_confirm(move |pwd: SharedString| {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
-                h.set_pdf_pwd_visible(false);
 
-                let (pending_path, pending_name) = {
-                    let mut st = state_ref.lock().unwrap();
-                    (st.pending_pdf_path.take(), std::mem::take(&mut st.pending_pdf_name))
+                // Peek (don't take yet) — a wrong password re-shows this same
+                // modal in place for another attempt, matching old app's
+                // unlimited in-place retry (parser.js:1830-1832) instead of
+                // requiring the user to re-pick the file from the OS dialog.
+                let (pending_path, pending_name, is_batch) = {
+                    let st = state_ref.lock().unwrap();
+                    (st.pending_pdf_path.clone(), st.pending_pdf_name.clone(), st.batch_progress.is_some())
                 };
 
                 let Some(path) = pending_path else {
                     log::warn!("[PdfPwd] confirm fired but no pending path");
+                    h.set_pdf_pwd_visible(false);
                     return;
                 };
 
@@ -3757,66 +4071,125 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(_) => None,
                     Err(e) => {
                         let emsg = e.to_string();
-                        let msg = if emsg.to_lowercase().contains("incorrect") {
-                            "Incorrect PDF password \u{2014} please try again".to_string()
+                        if emsg.to_lowercase().contains("incorrect") {
+                            // Leave pending_pdf_path/name set — the modal stays open
+                            // (Slint side keeps pdf-pwd-visible true) for a retry.
+                            h.set_pdf_pwd_input(SharedString::from(""));
+                            h.set_pdf_pwd_prompt(SharedString::from(
+                                format!("Incorrect password for '{}' \u{2014} please try again:", file_name).as_str(),
+                            ));
+                            h.set_status_bank(SharedString::from("Incorrect PDF password \u{2014} please try again"));
+                            return;
+                        }
+                        h.set_pdf_pwd_visible(false);
+                        {
+                            let mut st = state_ref.lock().unwrap();
+                            st.pending_pdf_path = None;
+                            st.pending_pdf_name = String::new();
+                        }
+                        let msg = format!("PDF unlock failed: {}", emsg);
+                        if is_batch {
+                            {
+                                let mut st = state_ref.lock().unwrap();
+                                if let Some(bp) = st.batch_progress.as_mut() {
+                                    record_batch_failure(bp, &file_name, &msg);
+                                }
+                            }
+                            continue_batch(&h, &state_ref, &db_ref);
                         } else {
-                            format!("PDF unlock failed: {}", emsg)
-                        };
-                        h.set_status_bank(SharedString::from(msg.as_str()));
+                            h.set_status_bank(SharedString::from(msg.as_str()));
+                        }
                         return;
                     }
                 };
 
-                let parse_result = if stage1.is_some() {
-                    stage1
-                } else {
-                    let full_text = parser::text_extractor::extract_full_text_with_password(&path, &pwd_bytes);
-                    if full_text.trim().is_empty() {
-                        h.set_status_bank(SharedString::from("PDF unlocked but no text found"));
-                        return;
-                    }
-                    let ocr = parser::ocr_parser::parse_ocr_text(&full_text, &file_name);
-                    let real_count = ocr.transactions.iter().filter(|t| !t.is_opening_balance).count();
-                    if real_count > 0 {
-                        Some(ocr)
-                    } else {
-                        let preprocessed = parser::ocr_parser::preprocess_multiline(&full_text);
-                        if !preprocessed.trim().is_empty() {
-                            let ml = parser::ocr_parser::parse_ocr_text(&preprocessed, &file_name);
-                            let ml_count = ml.transactions.iter().filter(|t| !t.is_opening_balance).count();
-                            if ml_count > 0 { Some(ml) } else { None }
-                        } else { None }
-                    }
-                };
-
-                let result = match parse_result {
-                    Some(r) => r,
-                    None => {
-                        h.set_status_bank(SharedString::from("No transactions found after unlock"));
-                        return;
-                    }
-                };
-
-                apply_parse_result(&h, &state_ref, &db_ref, result, &file_name);
-            });
-        }
-        {
-            let handle    = app.as_weak();
-            let state_ref = app_state.clone();
-
-            app.on_do_pdf_pwd_cancel(move || {
-                let h = match handle.upgrade() { Some(h) => h, None => return };
+                // From here on the password was accepted — close the modal and
+                // clear the pending-path state before proceeding.
                 h.set_pdf_pwd_visible(false);
                 {
                     let mut st = state_ref.lock().unwrap();
                     st.pending_pdf_path = None;
                     st.pending_pdf_name = String::new();
                 }
-                h.set_status_bank(SharedString::from("PDF unlock cancelled"));
+
+                let parse_result = if stage1.is_some() {
+                    stage1
+                } else {
+                    let full_text = parser::text_extractor::extract_full_text_with_password(&path, &pwd_bytes);
+                    if full_text.trim().is_empty() {
+                        None
+                    } else {
+                        let ocr = parser::ocr_parser::parse_ocr_text(&full_text, &file_name);
+                        let real_count = ocr.transactions.iter().filter(|t| !t.is_opening_balance).count();
+                        if real_count > 0 {
+                            Some(ocr)
+                        } else {
+                            let preprocessed = parser::ocr_parser::preprocess_multiline(&full_text);
+                            if !preprocessed.trim().is_empty() {
+                                let ml = parser::ocr_parser::parse_ocr_text(&preprocessed, &file_name);
+                                let ml_count = ml.transactions.iter().filter(|t| !t.is_opening_balance).count();
+                                if ml_count > 0 { Some(ml) } else { None }
+                            } else { None }
+                        }
+                    }
+                };
+
+                if is_batch {
+                    {
+                        let mut st = state_ref.lock().unwrap();
+                        if let Some(bp) = st.batch_progress.as_mut() {
+                            match parse_result {
+                                Some(r) => record_batch_success(bp, &db_ref, &path, &file_name, r),
+                                None => record_batch_failure(bp, &file_name, "No transactions found after unlock"),
+                            }
+                        }
+                    }
+                    continue_batch(&h, &state_ref, &db_ref);
+                } else {
+                    match parse_result {
+                        Some(r) => apply_parse_result(&h, &state_ref, &db_ref, r, &file_name),
+                        None => h.set_status_bank(SharedString::from("No transactions found after unlock")),
+                    }
+                }
             });
         }
         {
-            app.on_do_ai_cancel(|| {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+
+            app.on_do_pdf_pwd_cancel(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                h.set_pdf_pwd_visible(false);
+
+                let (pending_name, is_batch) = {
+                    let mut st = state_ref.lock().unwrap();
+                    let name = std::mem::take(&mut st.pending_pdf_name);
+                    st.pending_pdf_path = None;
+                    (name, st.batch_progress.is_some())
+                };
+
+                if is_batch {
+                    // A cancelled password prompt fails just this one file —
+                    // matches old app's per-file try/catch isolation in batch
+                    // mode (other files still complete).
+                    {
+                        let mut st = state_ref.lock().unwrap();
+                        if let Some(bp) = st.batch_progress.as_mut() {
+                            record_batch_failure(bp, &pending_name, "Password required \u{2014} cancelled");
+                        }
+                    }
+                    continue_batch(&h, &state_ref, &db_ref);
+                } else {
+                    h.set_status_bank(SharedString::from("PDF unlock cancelled"));
+                }
+            });
+        }
+        {
+            let state_ref = app_state.clone();
+            app.on_do_ai_cancel(move || {
+                let st = state_ref.lock().unwrap();
+                st.ai_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 log::info!("[AICancel] user cancelled AI classification");
             });
         }

@@ -53,11 +53,16 @@ impl AiScope {
 
 /// Classify a batch of transactions using AI.
 /// `progress_cb` is called with (done, total) after each batch completes.
+/// `cancel_flag` is checked before each batch — matching old app's functional
+/// Cancel button (app.js:3696-3713), which aborts the loop rather than merely
+/// hiding the overlay. Already-classified transactions from completed batches
+/// are kept; only remaining batches are skipped.
 pub fn classify_with_ai<F>(
     txns: &mut Vec<Transaction>,
     provider: AiProvider,
     api_key: &str,
     scope: AiScope,
+    cancel_flag: &std::sync::atomic::AtomicBool,
     mut progress_cb: F,
 ) -> Result<usize>
 where
@@ -97,6 +102,10 @@ where
     let mut classified = 0usize;
 
     for chunk in indices.chunks(BATCH_SIZE) {
+        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            log::info!("[AI] cancelled by user after {} of {} classified", classified, total);
+            break;
+        }
         let batch: Vec<(usize, &str)> = chunk.iter()
             .map(|&i| (i, txns[i].narration.as_str()))
             .collect();

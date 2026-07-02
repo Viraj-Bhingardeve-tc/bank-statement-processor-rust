@@ -156,6 +156,11 @@ pub struct DashSummary {
     pub top_expense_head: String,
     pub top_expense_amt: f64,
     pub suspense_count:     usize,
+    /// Sum of debit-or-credit amount across suspense-status transactions —
+    /// port of old app's `susTot` (app.js:2009-2010): `t.debit || t.credit || 0`
+    /// summed, not a row count. The Suspense summary card shows this ₹ figure,
+    /// not `suspense_count`.
+    pub suspense_amount:    f64,
     pub needs_review_count: usize,
     pub duplicate_count:    usize,
     pub gst_count:          usize,
@@ -260,6 +265,10 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
     let top_exp = exp_vec.first().cloned().unwrap_or(("—", 0.0));
 
     let suspense_count     = real.iter().filter(|t| matches!(t.status, TransactionStatus::Suspense)).count();
+    let suspense_amount: f64 = real.iter()
+        .filter(|t| matches!(t.status, TransactionStatus::Suspense))
+        .map(|t| t.debit.or(t.credit).unwrap_or(0.0))
+        .sum();
     let needs_review_count = real.iter().filter(|t| effective_needs_review(t)).count();
     let duplicate_count    = real.iter().filter(|t| t.dup_flag).count();
     let gst_count          = real.iter().filter(|t| t.tags.iter().any(|g| g == "GST" || g == "TAX")).count();
@@ -275,6 +284,7 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
         top_expense_head: top_exp.0.to_string(),
         top_expense_amt:  top_exp.1,
         suspense_count,
+        suspense_amount,
         needs_review_count,
         duplicate_count,
         gst_count,

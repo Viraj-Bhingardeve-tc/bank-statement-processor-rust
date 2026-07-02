@@ -15,6 +15,7 @@ export component AppWindow inherits Window {
     in-out property <bool>   logged-in:        false;
     in-out property <string> login-error:      "";
     in-out property <bool>   login-loading:    false;
+    in-out property <bool>   login-closing:    false;
     in-out property <bool>   start-dashboard:  false;
 
     // ── File / bank status (set by Rust after parse) ──────────────────────────
@@ -42,6 +43,7 @@ export component AppWindow inherits Window {
     in property <string> dash-debit-count:   "—";
     in property <string> dash-unreviewed:    "0";
     in property <string> dash-suspense:      "0";
+    in property <bool>   dash-has-suspense:  false;
     in property <string> dash-needs-review:  "0";
     in property <string> dash-duplicates:    "0";
     in property <string> dash-gst-count:     "0";
@@ -180,12 +182,21 @@ export component AppWindow inherits Window {
     in property <int>    ai-pct:             0;
     in property <bool>   pdf-pwd-visible:    false;
     in property <string> pdf-pwd-prompt:     "";
+    in-out property <string> pdf-pwd-input:  "";
+
+    // ── Generic confirmation modal (Rust needs to drive modal-state + these) ──
+    in-out property <string> modal-state:     "";
+    in-out property <string> confirm-title:   "";
+    in-out property <string> confirm-message: "";
+    in-out property <string> confirm-action:  "";
+    in-out property <int>    confirm-payload: -1;
+    callback do-request-delete-txn-confirm(int);
 
     // ── Callbacks implemented in Rust ─────────────────────────────────────────
     callback do-login(string, string);
     callback do-load-file();
     callback do-batch-folder();
-    callback do-new-client();
+    callback do-new-client() -> bool;
     callback do-auto-classify();
     callback do-ai-classify();
     callback do-view-rules();
@@ -254,6 +265,7 @@ export component AppWindow inherits Window {
         width: root.width; height: root.height;
         error-message: root.login-error;
         is-loading:    root.login-loading;
+        is-closing:    root.login-closing;
         attempt-login(email, password) => { root.do-login(email, password); }
     }
 
@@ -301,6 +313,7 @@ export component AppWindow inherits Window {
         dash-debit-count:  root.dash-debit-count;
         dash-unreviewed:   root.dash-unreviewed;
         dash-suspense:     root.dash-suspense;
+        dash-has-suspense: root.dash-has-suspense;
         dash-needs-review: root.dash-needs-review;
         dash-duplicates:   root.dash-duplicates;
         dash-gst-count:    root.dash-gst-count;
@@ -394,11 +407,19 @@ export component AppWindow inherits Window {
         ai-pct:             root.ai-pct;
         pdf-pwd-visible:    root.pdf-pwd-visible;
         pdf-pwd-prompt:     root.pdf-pwd-prompt;
+        pdf-pwd-input   <=> root.pdf-pwd-input;
+
+        modal-state     <=> root.modal-state;
+        confirm-title   <=> root.confirm-title;
+        confirm-message <=> root.confirm-message;
+        confirm-action  <=> root.confirm-action;
+        confirm-payload <=> root.confirm-payload;
+        request-delete-txn-confirm(i) => { root.do-request-delete-txn-confirm(i); }
 
         logout              => { root.logged-in = false; root.login-error = ""; }
         load-file           => { root.do-load-file();           }
         batch-folder        => { root.do-batch-folder();        }
-        new-client          => { root.do-new-client();          }
+        new-client          => { return root.do-new-client();   }
         auto-classify       => { root.do-auto-classify();       }
         ai-classify         => { root.do-ai-classify();         }
         view-rules          => { root.do-view-rules();          }

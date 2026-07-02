@@ -604,7 +604,7 @@ export component MainScreen inherits Rectangle {
     callback logout();
     callback load-file();
     callback batch-folder();
-    callback new-client();
+    callback new-client() -> bool;
     callback auto-classify();
     callback ai-classify();
     callback view-rules();
@@ -683,6 +683,7 @@ export component MainScreen inherits Rectangle {
     in property <string> dash-debit-count:  "\u{2014}";
     in property <string> dash-unreviewed:   "0";
     in property <string> dash-suspense:     "0";
+    in property <bool>   dash-has-suspense: false;
     in property <string> dash-needs-review: "0";
     in property <string> dash-duplicates:   "0";
     in property <string> dash-gst-count:    "0";
@@ -744,6 +745,10 @@ export component MainScreen inherits Rectangle {
     // ── Toast / overlays ─────────────────────────────────────────────────────
     in property <string> toast-msg:           "";
     in property <int>    toast-kind:          0;  // 0=info, 1=success, 2=error, 3=warning
+    // Auto-dismiss mirror of toast-msg — matches old app's ~3.2s setTimeout auto-hide.
+    // toast-msg itself is a one-way `in` property driven by Rust, so we can't clear it
+    // directly; toast-display is local UI state the timer below is allowed to clear.
+    property <string> toast-display: "";
     in property <bool>   ocr-visible:         false;
     in property <string> ocr-msg:             "Initialising…";
     in property <int>    ocr-pct:             0;
@@ -788,6 +793,13 @@ export component MainScreen inherits Rectangle {
     in-out property <string> date-to:        "";
     in-out property <string> active-preset:  "";
     in-out property <string> modal-state:    "";
+    // Generic confirmation modal — set confirm-title/confirm-message/confirm-action(/confirm-payload)
+    // then set modal-state = "confirm"; the Yes button dispatches by confirm-action.
+    in-out property <string> confirm-title:   "Please Confirm";
+    in-out property <string> confirm-message: "";
+    in-out property <string> confirm-action:  "";
+    in-out property <int>    confirm-payload: -1;
+    callback request-delete-txn-confirm(int);
     // Edit transaction editable fields
     in-out property <string> etxn-vendor: "";
     in-out property <string> etxn-head:   "";
@@ -1480,7 +1492,7 @@ export component MainScreen inherits Rectangle {
                                 SDivider { title: "REVIEW STATUS"; }
                                 SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "unreviewed";   root.drill-filter("unreviewed"); } }
                                 SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: #E65100; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "needs_review"; root.drill-filter("needs_review"); } }
-                                SR { lbl: "Suspense";     val: root.dash-suspense;     vcol: #7B1FA2; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense";     root.drill-filter("suspense"); } }
+                                if root.dash-has-suspense : SR { lbl: "Suspense"; val: root.dash-suspense; vcol: #7B1FA2; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense"; root.drill-filter("suspense"); } }
 
                                 SDivider { title: "OTHER"; }
                                 SR { lbl: "Duplicates"; val: root.dash-duplicates; vcol: #C2185B; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "duplicates"; root.drill-filter("duplicates"); } }
@@ -1695,7 +1707,13 @@ export component MainScreen inherits Rectangle {
                 FootBtn { text: "\u{21D3} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.modal-state = "export-wizard"; } }
                 FootBtn { text: "Quick Tally XML";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "tally-export"; } }
                 FootBtn { text: "Re-import Excel";        enabled: root.transaction-rows.length > 0; clicked => { root.reimport-excel(); } }
-                FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => { root.reset-dedupe(); } }
+                FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => {
+                    root.confirm-title = "Reset Dedupe History";
+                    root.confirm-message = "Clear all dedupe history for this client?";
+                    root.confirm-action = "reset-dedupe";
+                    root.confirm-payload = -1;
+                    root.modal-state = "confirm";
+                } }
 
                 Rectangle { width: 1px; height: 28px; background: #90CAF9; }
 
@@ -1712,6 +1730,20 @@ export component MainScreen inherits Rectangle {
     // ═══════════════════════════════════════════════════════════════════════════
     // MODAL OVERLAYS
     // ═══════════════════════════════════════════════════════════════════════════
+    // Wrapped in a FocusScope so Escape closes whichever modal is open, matching
+    // the old app's global `document.keydown` handler (app.js:302-306). Given
+    // focus whenever modal-state transitions away from "" (see `changed
+    // modal-state` below); unhandled Escape from a focused LineEdit inside any
+    // modal bubbles up to this ancestor scope automatically.
+    modal-esc-scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape && root.modal-state != "") {
+                root.modal-state = "";
+                accept
+            } else {
+                reject
+            }
+        }
 
     if root.modal-state == "new-client" : Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
@@ -1743,12 +1775,50 @@ export component MainScreen inherits Rectangle {
                 }
                 MFtr {
                     MBtn { text: "Save Client"; bg: #1565C0; clicked => {
-                        root.new-client();
-                        root.modal-state = "";
-                        root.new-client-name = "";
-                        root.new-client-ledger = "";
+                        if (root.new-client()) {
+                            root.modal-state = "";
+                            root.new-client-name = "";
+                            root.new-client-ledger = "";
+                        }
                     } }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // Generic confirmation modal — matches the old app's native confirm() dialogs.
+    if root.modal-state == "confirm" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        Rectangle {
+            x: (parent.width - 420px) / 2; y: (parent.height - 200px) / 2;
+            width: 420px; height: 200px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #C62828; }
+                MHdr { title: root.confirm-title; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                    Text {
+                        text: root.confirm-message; font-size: 13px; color: #263238;
+                        wrap: word-wrap; vertical-alignment: center;
+                    }
+                }
+                MFtr {
+                    MBtn {
+                        text: "Yes, Continue"; bg: #C62828; clicked => {
+                            if (root.confirm-action == "reset-dedupe") { root.reset-dedupe(); }
+                            else if (root.confirm-action == "clear-logs") { root.clear-logs(); }
+                            else if (root.confirm-action == "delete-txn") { root.delete-txn(root.confirm-payload); }
+                            else if (root.confirm-action == "delete-rule") { root.delete-rule(root.confirm-payload); }
+                            else if (root.confirm-action == "delete-import") { root.delete-import(root.confirm-payload); }
+                            else if (root.confirm-action == "reload-import") { root.reload-import(root.confirm-payload); }
+                            root.confirm-action = "";
+                            root.modal-state = "";
+                        }
+                    }
+                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.confirm-action = ""; root.modal-state = ""; } }
                 }
             }
         }
@@ -1947,7 +2017,13 @@ export component MainScreen inherits Rectangle {
                             background: #C62828; border-radius: 4px;
                             accessible-role: button;
                             accessible-label: "Clear All Logs";
-                            TouchArea { clicked => { root.clear-logs(); } }
+                            TouchArea { clicked => {
+                                root.confirm-title = "Clear All Logs";
+                                root.confirm-message = "Clear all logs?";
+                                root.confirm-action = "clear-logs";
+                                root.confirm-payload = -1;
+                                root.modal-state = "confirm";
+                            } }
                             Text { text: "Clear All Logs"; font-size: 11px; color: white;
                                    horizontal-alignment: center; vertical-alignment: center; }
                         }
@@ -1997,7 +2073,18 @@ export component MainScreen inherits Rectangle {
                                 height: 26px; background: #FFFFFF;
                                 Rectangle { y: 25px; height: 1px; background: #E3F2FD; }
                                 TouchArea {
-                                    clicked => { root.modal-state = ""; root.reload-import(i); }
+                                    clicked => {
+                                        if (root.transaction-rows.length > 0) {
+                                            root.confirm-title = "Replace Loaded Transactions";
+                                            root.confirm-message = "Loading this import will replace all currently loaded transactions. Continue?";
+                                            root.confirm-action = "reload-import";
+                                            root.confirm-payload = i;
+                                            root.modal-state = "confirm";
+                                        } else {
+                                            root.modal-state = "";
+                                            root.reload-import(i);
+                                        }
+                                    }
                                     mouse-cursor: pointer;
                                 }
                                 HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 8px;
@@ -2014,7 +2101,13 @@ export component MainScreen inherits Rectangle {
                                         Text { text: "Remove"; font-size: 9px; color: #C62828; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                                         TouchArea {
                                             mouse-cursor: pointer;
-                                            clicked => { root.delete-import(i); }
+                                            clicked => {
+                                                root.confirm-title = "Remove Import History Entry";
+                                                root.confirm-message = "Remove this entry from import history? (The original file is not affected.)";
+                                                root.confirm-action = "delete-import";
+                                                root.confirm-payload = i;
+                                                root.modal-state = "confirm";
+                                            }
                                         }
                                     }
                                 }
@@ -2074,7 +2167,13 @@ export component MainScreen inherits Rectangle {
                                 Text { text: "Delete"; font-size: 9px; color: #C62828; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.delete-rule(i); }
+                                    clicked => {
+                                        root.confirm-title = "Delete Rule";
+                                        root.confirm-message = "Delete this rule?";
+                                        root.confirm-action = "delete-rule";
+                                        root.confirm-payload = i;
+                                        root.modal-state = "confirm";
+                                    }
                                 }
                             }
                         }
@@ -2295,7 +2394,7 @@ export component MainScreen inherits Rectangle {
                     }
                     MBtn {
                         text: "Delete"; bg: #C62828; fg: white;
-                        clicked => { root.delete-txn(root.edit-txn-idx); root.modal-state = ""; }
+                        clicked => { root.request-delete-txn-confirm(root.edit-txn-idx); }
                     }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
@@ -2892,9 +2991,29 @@ export component MainScreen inherits Rectangle {
             }
         }
     }
+    } // end modal-esc-scope
+    changed modal-state => {
+        if (root.modal-state != "") {
+            modal-esc-scope.focus();
+        }
+    }
 
     // ── Toast notification ─────────────────────────────────────────────────────
-    if root.toast-msg != "" : Rectangle {
+    toast-dismiss-timer := Timer {
+        interval: 3200ms;
+        running: false;
+        triggered => { root.toast-display = ""; }
+    }
+    changed toast-msg => {
+        root.toast-display = root.toast-msg;
+        if (root.toast-msg != "") {
+            toast-dismiss-timer.running = true;
+            toast-dismiss-timer.restart();
+        } else {
+            toast-dismiss-timer.running = false;
+        }
+    }
+    if root.toast-display != "" : Rectangle {
         x: (root.width - 280px) / 2;
         y: root.height - 80px;
         width: 280px; height: 36px;
@@ -2906,7 +3025,7 @@ export component MainScreen inherits Rectangle {
         border-radius: 5px;
         drop-shadow-blur: 12px; drop-shadow-color: #00000030; drop-shadow-offset-y: 4px;
         Text {
-            text: root.toast-msg;
+            text: root.toast-display;
             font-size: 12px; font-weight: 600; color: white;
             horizontal-alignment: center; vertical-alignment: center;
         }

@@ -15,6 +15,7 @@ pub mod column_detector;
 pub mod date_parser;
 pub mod excel_parser;
 pub mod noise_filter;
+pub mod ocr_correction;
 pub mod ocr_extractor;
 pub mod ocr_parser;
 pub mod party_master;
@@ -175,12 +176,20 @@ impl Transaction {
     /// matching JS `Math.imul` + `| 0` + `>>> 0` exactly.
     /// `charCodeAt` in JS returns UTF-16 code units; for ASCII (all bank statement
     /// fields) this equals the char code, so `char as i32` gives identical results.
+    ///
+    /// JS builds the hashed string via template-literal interpolation —
+    /// `` `${txn.date}|${txn.narration}|${txn.debit}|${txn.credit}` `` — and a
+    /// JS `null` interpolates as the literal text `"null"`, not an empty
+    /// string. Since almost every real transaction has exactly one of
+    /// debit/credit absent, an empty-string fallback here would produce a
+    /// different hash than the old app for virtually every row, making
+    /// cross-session dedupe hashes non-interoperable between the two apps.
     pub fn hash(&self) -> String {
         let s = format!(
             "{}|{}|{}|{}",
             self.date, self.narration,
-            self.debit .map_or(String::new(), |v| format!("{}", v)),
-            self.credit.map_or(String::new(), |v| format!("{}", v)),
+            self.debit .map_or("null".to_string(), |v| format!("{}", v)),
+            self.credit.map_or("null".to_string(), |v| format!("{}", v)),
         );
         let mut h: i32 = 0;
         for c in s.chars() {
@@ -311,14 +320,26 @@ mod tests {
     #[test]
     fn hash_empty_fields_stable() {
         // date="", narration="", debit=None, credit=None →
-        // key string = "|||" (three pipe separators, no other content).
-        // Hash is deterministic and non-empty (not the zero string from truly empty input).
+        // key string = "||null|null", matching JS template-literal interpolation
+        // of two `null` values (not empty strings — see Transaction::hash docs).
         let t = txn("", "", None, None);
         let h = t.hash();
         assert!(!h.is_empty(), "hash must never be empty");
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "must be hex: {}", h);
         // Same input always gives same hash
         assert_eq!(t.hash(), h, "hash must be deterministic");
+    }
+
+    #[test]
+    fn hash_matches_js_reference_values() {
+        // Cross-checked against the old app's Parser.hash() (parser.js:2882-2889)
+        // by running the equivalent JS algorithm on the same inputs.
+        let t1 = txn("01/01/2024", "SALARY CREDIT", None, Some(50000.0));
+        assert_eq!(t1.hash(), "75f7d949");
+        let t2 = txn("", "", None, None);
+        assert_eq!(t2.hash(), "b21e1f5c");
+        let t3 = txn("01/01/2024", "ATM WDL", Some(5000.0), None);
+        assert_eq!(t3.hash(), "cc231c89");
     }
 
     // Verify against JS reference: the hash algorithm must match Math.imul behavior.

@@ -10,6 +10,9 @@ import { VerticalBox } from "std-widgets.slint";
 export component LoginScreen inherits Rectangle {
     in property <string>  error-message: "";
     in property <bool>    is-loading:    false;
+    // True during the ~1.5s countdown before the app auto-quits after the 3rd
+    // failed attempt — matches old app's lockout UX (login.html:196-201).
+    in property <bool>    is-closing:    false;
     callback attempt-login(string, string);
 
     // Internal state to hold typed values
@@ -74,7 +77,7 @@ export component LoginScreen inherits Rectangle {
                     x: 12px; width: parent.width - 24px; height: parent.height;
                     font-size: 13px; color: #0A1929;
                     vertical-alignment: center;
-                    enabled: !root.is-loading;
+                    enabled: !root.is-loading && !root.is-closing;
                     text <=> root.email-val;
                     accessible-label: "Work email";
                     accepted => { pwd-ti.focus(); }
@@ -103,11 +106,11 @@ export component LoginScreen inherits Rectangle {
                     font-size: 13px; color: #0A1929;
                     vertical-alignment: center;
                     input-type: password;
-                    enabled: !root.is-loading;
+                    enabled: !root.is-loading && !root.is-closing;
                     text <=> root.pwd-val;
                     accessible-label: "This month's password";
                     accepted => {
-                        if root.email-val != "" && root.pwd-val != "" {
+                        if root.email-val != "" && root.pwd-val != "" && !root.is-closing {
                             root.attempt-login(root.email-val, root.pwd-val);
                         }
                     }
@@ -119,18 +122,18 @@ export component LoginScreen inherits Rectangle {
             // Original: padding:10px both sides + font-size:14px ≈ 40px height
             Rectangle {
                 height:        40px;
-                background:    root.is-loading ? #90CAF9 : #1565C0;
+                background:    (root.is-loading || root.is-closing) ? #90CAF9 : #1565C0;
                 border-radius: 5px;
                 accessible-role: button;
-                accessible-label: root.is-loading ? "Verifying" : "Sign In";
-                accessible-enabled: !root.is-loading;
+                accessible-label: root.is-closing ? "Closing" : (root.is-loading ? "Verifying" : "Sign In");
+                accessible-enabled: !root.is-loading && !root.is-closing;
                 TouchArea {
-                    enabled: !root.is-loading;
+                    enabled: !root.is-loading && !root.is-closing;
                     mouse-cursor: pointer;
                     clicked => { root.attempt-login(root.email-val, root.pwd-val); }
                 }
                 Text {
-                    text: root.is-loading ? "Verifying…" : "Sign In";
+                    text: root.is-closing ? "Closing…" : (root.is-loading ? "Verifying…" : "Sign In");
                     font-size: 14px; font-weight: 600; color: #FFFFFF;
                     horizontal-alignment: center; vertical-alignment: center;
                 }
