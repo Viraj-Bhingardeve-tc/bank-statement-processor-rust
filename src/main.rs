@@ -2946,7 +2946,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        if let Err(e) = db::update_dup_flags(conn, &txns_snap) {
+                        if let Err(e) = db::update_dup_flags(conn, cid, &txns_snap) {
                             log::error!("[Dedup] failed to persist dup flags: {}", e);
                         }
                         if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
@@ -3495,18 +3495,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        if let Err(e) = db::upsert_transaction_classification(
-                            conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, t_conf, &t_source,
-                        ) {
-                            log::error!("[Undo] failed to persist restored classification: {}", e);
-                            h.set_toast_msg(SharedString::from(
-                                format!("Undo shown but not saved: {}", e).as_str()));
-                            h.set_toast_kind(2);
-                        }
                         if let Some(cid) = client_id {
+                            if let Err(e) = db::upsert_transaction_classification(
+                                conn, cid, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, t_conf, &t_source,
+                            ) {
+                                log::error!("[Undo] failed to persist restored classification: {}", e);
+                                h.set_toast_msg(SharedString::from(
+                                    format!("Undo shown but not saved: {}", e).as_str()));
+                                h.set_toast_kind(2);
+                            }
                             if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
                                 log::error!("[Undo] failed to persist audit event: {}", e);
                             }
+                        } else {
+                            log::warn!("[Undo] no active client — restored classification shown but not persisted");
                         }
                     }
                 } else {
@@ -4222,7 +4224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
                         if let Err(e) = db::upsert_transaction_classification(
-                            conn, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, 1.0, &t_source,
+                            conn, client_id, &t_id, &t_vendor, &t_head, &t_type_str, &t_status, 1.0, &t_source,
                         ) {
                             log::error!("[SaveTxn] failed to persist classification: {}", e);
                             h.set_toast_msg(SharedString::from(
@@ -4275,7 +4277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // UI rebuilt above (optimistic update) — if the DB delete
                         // fails, the row will reappear on next reload from the DB,
                         // so the user needs to know now rather than be silently misled.
-                        if let Err(e) = db::delete_transaction(conn, &txn_id) {
+                        if let Err(e) = db::delete_transaction(conn, cid, &txn_id) {
                             log::error!("[DeleteTxn] failed to delete txn id={}: {}", txn_id, e);
                             h.set_toast_msg(SharedString::from(
                                 format!("Delete failed — row will reappear on reload: {}", e).as_str()));

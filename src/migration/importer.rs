@@ -361,7 +361,7 @@ fn import_history_and_transactions(
             .collect();
 
         let ids: Vec<&str> = txns.iter().map(|t| t.id.as_str()).collect();
-        let already_present = count_existing_transaction_ids(conn, &ids)?;
+        let already_present = count_existing_transaction_ids(conn, client_id, &ids)?;
 
         db::upsert_transactions(conn, client_id, Some(import_id), &txns)
             .context("upsert_transactions")?;
@@ -373,16 +373,28 @@ fn import_history_and_transactions(
     Ok(())
 }
 
-fn count_existing_transaction_ids(conn: &Connection, ids: &[&str]) -> Result<usize> {
+/// `client_id`-scoped: `id` alone is no longer globally unique (see
+/// migration 5 in `db/mod.rs` — `transactions`' primary key is now
+/// `(client_id, id)`), so counting by `id` alone would incorrectly count a
+/// *different* client's transaction that happens to share an id as "already
+/// present" for this client, under-reporting `imported` and mis-attributing
+/// a genuinely-new row as a duplicate.
+fn count_existing_transaction_ids(
+    conn: &Connection,
+    client_id: i64,
+    ids: &[&str],
+) -> Result<usize> {
     if ids.is_empty() {
         return Ok(0);
     }
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!("SELECT COUNT(*) FROM transactions WHERE id IN ({placeholders})");
+    let sql =
+        format!("SELECT COUNT(*) FROM transactions WHERE client_id = ? AND id IN ({placeholders})");
     let mut stmt = conn
         .prepare(&sql)
         .context("count_existing_transaction_ids prepare")?;
-    let params: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&client_id];
+    params.extend(ids.iter().map(|s| s as &dyn rusqlite::ToSql));
     let count: i64 = stmt
         .query_row(params.as_slice(), |r| r.get(0))
         .context("count_existing_transaction_ids query")?;

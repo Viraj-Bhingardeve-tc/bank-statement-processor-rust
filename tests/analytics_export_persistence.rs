@@ -133,27 +133,20 @@ fn re_importing_the_same_real_statement_does_not_duplicate_rows() {
 /// retrievable, and deleting one client's transactions should not affect
 /// the other's.
 ///
-/// **This currently fails, and it's a real, severe, previously-undiscovered
-/// bug — not fixed here** (out of scope for an integration-test-only
-/// change; would need a real schema change, its own separate feature).
-///
-/// `transactions.id` is the table's *sole* primary key (`db/mod.rs:763`,
-/// `id TEXT PRIMARY KEY` — not composite with `client_id`). Transaction ids
-/// are generated purely from in-file position — `format!("t_{}_{}", i,
-/// txns.len())` (`excel_parser.rs:735`) — with no client-specific or
-/// file-specific salt at all. This test's setup (the identical parsed `txns`
-/// written for two different clients) is the simplest way to demonstrate
-/// it, but it is not a test artifact: any two clients whose imported
-/// statements happen to produce the same `(row_index, total_row_count)`
-/// pairs — trivially guaranteed for the *same* file imported for two
-/// clients, and plausible for two *different* files with the same row
-/// count — will silently overwrite and reassign each other's transactions
-/// via `upsert_transactions`'s `INSERT OR REPLACE`. This is a genuine
-/// cross-tenant data-corruption risk in a multi-client accounting tool, not
-/// merely a missing feature — flagged as the highest-severity finding in
-/// the final report.
+/// **Formerly a real, severe bug — fixed in migration 5** (see
+/// `CROSS_CLIENT_TRANSACTION_ID_FIX_REPORT.md`). `transactions.id` used to
+/// be the table's *sole* primary key, global across every client, while ids
+/// are generated purely from in-file position with no client-specific salt
+/// at all (guaranteed to collide for the synthetic opening-balance row,
+/// plausible for any two files with matching row counts) — two clients
+/// whose imports produced the same id silently overwrote and reassigned
+/// each other's transactions via `upsert_transactions`'s `INSERT OR
+/// REPLACE`. Migration 5 rebuilds the table with a composite `PRIMARY KEY
+/// (client_id, id)`, so the *same* literal id now coexists correctly across
+/// different clients at the schema level — this test was previously
+/// `#[ignore]`d documenting the bug; it now runs for real as a permanent
+/// regression test.
 #[test]
-#[ignore = "KNOWN BUG (not fixed here, out of scope for this feature, needs a real schema change): transactions.id is a global (not per-client) primary key generated from bare in-file row position with no client/file salt — two clients whose imports produce matching ids silently overwrite and reassign each other's data — see doc comment"]
 fn multi_client_transaction_data_is_fully_isolated() {
     let conn = db::open(":memory:").expect("open in-memory db");
     let client_a = db::add_client(&conn, "Client A", "Ledger A").unwrap();
@@ -168,7 +161,7 @@ fn multi_client_transaction_data_is_fully_isolated() {
     assert_eq!(
         db::get_transactions(&conn, client_a).unwrap().len(),
         txns.len(),
-        "client A's rows were overwritten/reassigned by client B's insert — see doc comment"
+        "client A's rows must not be overwritten/reassigned by client B's insert of colliding ids"
     );
     assert_eq!(
         db::get_transactions(&conn, client_b).unwrap().len(),

@@ -303,8 +303,13 @@ pub fn delete_transactions_for_client(conn: &Connection, client_id: i64) -> Resu
     Ok(())
 }
 
+/// `client_id` is required (not optional/inferred) so this can never touch
+/// a different client's row that happens to share the same `id` — `id`
+/// alone is no longer unique across the whole table (see migration 5),
+/// only within a `client_id`, so every write/delete by id must include it.
 pub fn upsert_transaction_classification(
     conn: &Connection,
+    client_id: i64,
     txn_id: &str,
     vendor: &str,
     account_head: &str,
@@ -315,26 +320,32 @@ pub fn upsert_transaction_classification(
 ) -> Result<()> {
     conn.execute(
         "UPDATE transactions SET vendor=?1, account_head=?2, txn_type=?3, status=?4, confidence=?5, classified_by=?6
-         WHERE id=?7",
-        rusqlite::params![vendor, account_head, txn_type, status, confidence, classification_source, txn_id],
+         WHERE client_id=?7 AND id=?8",
+        rusqlite::params![vendor, account_head, txn_type, status, confidence, classification_source, client_id, txn_id],
     ).context("upsert_transaction_classification")?;
     Ok(())
 }
 
-pub fn update_dup_flags(conn: &Connection, txns: &[Transaction]) -> Result<()> {
+/// `client_id` scopes every row's `WHERE` clause — see
+/// `upsert_transaction_classification`'s doc comment for why this is
+/// required, not optional, now that `id` alone isn't globally unique.
+pub fn update_dup_flags(conn: &Connection, client_id: i64, txns: &[Transaction]) -> Result<()> {
     for t in txns {
         conn.execute(
-            "UPDATE transactions SET dup_flag = ?1 WHERE id = ?2",
-            rusqlite::params![if t.dup_flag { 1i64 } else { 0i64 }, t.id],
+            "UPDATE transactions SET dup_flag = ?1 WHERE client_id = ?2 AND id = ?3",
+            rusqlite::params![if t.dup_flag { 1i64 } else { 0i64 }, client_id, t.id],
         ).context("update_dup_flag")?;
     }
     Ok(())
 }
 
-pub fn delete_transaction(conn: &Connection, txn_id: &str) -> Result<()> {
+/// `client_id` scopes the `WHERE` clause — see
+/// `upsert_transaction_classification`'s doc comment for why this is
+/// required, not optional, now that `id` alone isn't globally unique.
+pub fn delete_transaction(conn: &Connection, client_id: i64, txn_id: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM transactions WHERE id = ?1",
-        rusqlite::params![txn_id],
+        "DELETE FROM transactions WHERE client_id = ?1 AND id = ?2",
+        rusqlite::params![client_id, txn_id],
     ).context("delete_transaction")?;
     Ok(())
 }
@@ -677,6 +688,89 @@ const MIGRATIONS: &[(i64, &str)] = &[
           );
          CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_rules_unique
              ON classification_rules(client_id, pattern COLLATE NOCASE);"),
+    // `transactions.id` was the table's *sole* primary key — globally unique
+    // across every client, not scoped per client. Ids are generated purely
+    // from in-file row position (e.g. `t_{row_index}_{total_rows}`) with no
+    // client or file salt, and the synthetic opening-balance row's id was
+    // *unconditionally* the literal string "opening_balance" for every
+    // single import, on every pipeline (Excel/PDF/OCR). Since
+    // `upsert_transactions` writes via `INSERT OR REPLACE`, any two clients
+    // whose imports produced the same id — guaranteed for the
+    // opening-balance row, plausible for any two files with matching row
+    // counts — silently overwrote and reassigned each other's transactions.
+    // See CROSS_CLIENT_TRANSACTION_ID_FIX_REPORT.md for the full writeup.
+    //
+    // SQLite can't ALTER a PRIMARY KEY in place, so this rebuilds the table
+    // with a composite `PRIMARY KEY (client_id, id)` — the schema itself now
+    // enforces per-client scoping regardless of how ids are generated,
+    // rather than relying on generation-time uniqueness as the only
+    // safeguard. Explicit BEGIN/COMMIT (no other migration here needs one —
+    // a single ALTER/CREATE is already atomic at the SQLite level, but a
+    // multi-statement table rebuild is not) makes this all-or-nothing: a
+    // failure partway must not leave the database with a half-built
+    // replacement table and no working `transactions` table at all.
+    //
+    // This migration only stops *future* collisions. Data already lost to a
+    // collision before a database is upgraded (a row silently reassigned to
+    // the wrong client, e.g. every prior client's opening-balance row bar
+    // the last one to write it) cannot be recovered — there is nothing left
+    // in the old table to migrate back; by the time this runs, only the
+    // most recent writer's version of that row still exists anywhere.
+    // Column list matches `upsert_transactions`'s INSERT list exactly, plus
+    // `created_at`, which is never written explicitly and always defaults.
+    (5, "BEGIN TRANSACTION;
+         CREATE TABLE transactions_new (
+             id              TEXT    NOT NULL,
+             client_id       INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+             import_id       INTEGER REFERENCES import_history(id),
+             bank_name       TEXT,
+             account_no      TEXT,
+             date            TEXT,
+             date_ts         INTEGER,
+             narration       TEXT,
+             reference       TEXT,
+             debit           REAL,
+             credit          REAL,
+             balance         REAL,
+             prev_balance    REAL,
+             vendor          TEXT,
+             account_head    TEXT,
+             txn_type        TEXT,
+             status          TEXT    NOT NULL DEFAULT 'unreviewed',
+             confidence      REAL             DEFAULT 0,
+             classified_by   TEXT,
+             tags            TEXT,
+             balance_ok      INTEGER          DEFAULT 1,
+             is_opening_bal  INTEGER          DEFAULT 0,
+             dup_flag        INTEGER NOT NULL DEFAULT 0,
+             gst_rate        REAL,
+             gst_amount      REAL,
+             gst_type        TEXT,
+             created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+             PRIMARY KEY (client_id, id)
+         );
+         INSERT INTO transactions_new (
+             id, client_id, import_id, bank_name, account_no, date, date_ts,
+             narration, reference, debit, credit, balance, prev_balance,
+             vendor, account_head, txn_type, status, confidence, classified_by,
+             tags, balance_ok, is_opening_bal, dup_flag, gst_rate, gst_amount,
+             gst_type, created_at
+         )
+         SELECT
+             id, client_id, import_id, bank_name, account_no, date, date_ts,
+             narration, reference, debit, credit, balance, prev_balance,
+             vendor, account_head, txn_type, status, confidence, classified_by,
+             tags, balance_ok, is_opening_bal, dup_flag, gst_rate, gst_amount,
+             gst_type, created_at
+         FROM transactions;
+         DROP TABLE transactions;
+         ALTER TABLE transactions_new RENAME TO transactions;
+         CREATE INDEX IF NOT EXISTS idx_txn_client  ON transactions(client_id);
+         CREATE INDEX IF NOT EXISTS idx_txn_date_ts ON transactions(date_ts);
+         CREATE INDEX IF NOT EXISTS idx_txn_status  ON transactions(status);
+         CREATE INDEX IF NOT EXISTS idx_txn_vendor  ON transactions(vendor);
+         CREATE INDEX IF NOT EXISTS idx_txn_import  ON transactions(import_id);
+         COMMIT;"),
 ];
 
 /// The highest migration version every database created by a pre-migration-
@@ -983,7 +1077,14 @@ mod tests {
         // this data.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
-        conn.pragma_update(None, "user_version", 3i64).unwrap();
+        // Actually run migrations 1-3 (not just fake the version number) so
+        // this fixture has the real column shape a genuine user_version=3
+        // database would have — e.g. migration 1's `transactions.dup_flag` —
+        // rather than diverging from reality in a way that only happens to
+        // be harmless for whichever migration this test was originally
+        // written to exercise.
+        apply_migrations(&conn, &MIGRATIONS[..3], 0).unwrap();
+        assert_eq!(user_version(&conn), 3, "test setup: must land exactly on version 3");
         let client_id  = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
         let other_client = add_client(&conn, "Beta Co", "Beta Ledger").expect("add_client 2");
 
@@ -1025,6 +1126,185 @@ mod tests {
             rusqlite::params![client_id],
         );
         assert!(raw_insert.is_err(), "unique index must reject a plain duplicate INSERT after migration 4");
+    }
+
+    // ── Migration 5: transactions.id scoped per-client ──────────────────────────
+    // See CROSS_CLIENT_TRANSACTION_ID_FIX_REPORT.md for the full root-cause
+    // writeup. Summary: `transactions.id` used to be the table's sole
+    // (globally-unique) primary key, but ids are generated purely from
+    // in-file row position with no client-specific salt — two clients whose
+    // imports produced the same id silently overwrote and reassigned each
+    // other's transactions via `INSERT OR REPLACE`. Migration 5 rebuilds the
+    // table with `PRIMARY KEY (client_id, id)`.
+
+    /// Brings a fresh in-memory database to exactly the pre-migration-5
+    /// schema shape (migrations 1-4 applied for real, not simulated) so
+    /// these tests exercise migration 5 upgrading genuine old-shape data,
+    /// not a hand-rolled approximation of it.
+    fn db_at_pre_migration_5(conn: &Connection) {
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_migrations(conn, &MIGRATIONS[..4], 0).unwrap();
+        assert_eq!(user_version(conn), 4, "test setup: must land exactly on version 4, before migration 5");
+    }
+
+    #[test]
+    fn migration_5_preserves_all_existing_single_client_transactions() {
+        let conn = Connection::open_in_memory().unwrap();
+        db_at_pre_migration_5(&conn);
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").unwrap();
+
+        // Insert directly against the pre-migration-5 (globally-unique-id)
+        // schema, mirroring what a real pre-fix install's data looks like.
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO transactions (id, client_id, date, narration, debit, credit)
+                 VALUES (?1, ?2, '01/01/2024', ?3, 100.0, NULL)",
+                rusqlite::params![format!("t_{i}_5"), client_id, format!("Txn {i}")],
+            ).unwrap();
+        }
+        let count_before: i64 = conn.query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0)).unwrap();
+        assert_eq!(count_before, 5);
+
+        apply_migrations(&conn, MIGRATIONS, 4).expect("migration 5 must upgrade existing data cleanly");
+        assert_eq!(user_version(&conn), latest_migration_version());
+
+        let txns = get_transactions(&conn, client_id).unwrap();
+        assert_eq!(txns.len(), 5, "every pre-existing transaction must survive the rebuild");
+        for i in 0..5 {
+            assert!(txns.iter().any(|t| t.id == format!("t_{i}_5") && t.narration == format!("Txn {i}")));
+        }
+    }
+
+    #[test]
+    fn migration_5_allows_the_same_literal_id_for_two_different_clients() {
+        let conn = Connection::open_in_memory().unwrap();
+        db_at_pre_migration_5(&conn);
+        let client_a = add_client(&conn, "Client A", "Ledger A").unwrap();
+
+        // Under the pre-migration-5 schema, id is the *sole* primary key —
+        // only one row can exist with a given id at a time, so client B's
+        // row (added after migration, once creating it no longer collides)
+        // is what proves the fix; inserting it *before* migration 5 here
+        // would just silently overwrite client A's row via INSERT OR
+        // REPLACE, which is the bug itself, not a useful test setup.
+        conn.execute(
+            "INSERT INTO transactions (id, client_id, date, narration, is_opening_bal)
+             VALUES ('opening_balance', ?1, '', 'Opening Balance', 1)",
+            rusqlite::params![client_a],
+        ).unwrap();
+
+        apply_migrations(&conn, MIGRATIONS, 4).expect("migration 5 must succeed");
+
+        let client_b = add_client(&conn, "Client B", "Ledger B").unwrap();
+        // The exact scenario that used to silently corrupt data: a second
+        // client writing a transaction with the literal same id as an
+        // existing one (the opening-balance row's id is *always* this exact
+        // literal, for every client, on every import).
+        let inserted = conn.execute(
+            "INSERT INTO transactions (id, client_id, date, narration, is_opening_bal)
+             VALUES ('opening_balance', ?1, '', 'Opening Balance', 1)",
+            rusqlite::params![client_b],
+        );
+        assert!(inserted.is_ok(), "the same id must be insertable for a different client after migration 5");
+
+        assert_eq!(get_transactions(&conn, client_a).unwrap().len(), 1, "client A's opening-balance row must still exist");
+        assert_eq!(get_transactions(&conn, client_b).unwrap().len(), 1, "client B's opening-balance row must also exist");
+    }
+
+    #[test]
+    fn migration_5_rejects_the_same_id_twice_for_the_same_client() {
+        // The composite key is (client_id, id) — a genuine duplicate insert
+        // (not INSERT OR REPLACE) for the *same* client and *same* id must
+        // still be rejected, exactly as the old single-column id PK did.
+        // This proves migration 5 didn't over-correct into no uniqueness
+        // constraint at all.
+        let conn = Connection::open_in_memory().unwrap();
+        db_at_pre_migration_5(&conn);
+        apply_migrations(&conn, MIGRATIONS, 4).unwrap();
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").unwrap();
+
+        conn.execute(
+            "INSERT INTO transactions (id, client_id, date, narration) VALUES ('t1', ?1, '01/01/2024', 'First')",
+            rusqlite::params![client_id],
+        ).unwrap();
+        let dup = conn.execute(
+            "INSERT INTO transactions (id, client_id, date, narration) VALUES ('t1', ?1, '01/01/2024', 'Second')",
+            rusqlite::params![client_id],
+        );
+        assert!(dup.is_err(), "a genuine duplicate INSERT for the same (client_id, id) must still be rejected");
+    }
+
+    #[test]
+    fn migration_5_is_idempotent_when_run_twice() {
+        let conn = Connection::open_in_memory().unwrap();
+        db_at_pre_migration_5(&conn);
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").unwrap();
+        conn.execute(
+            "INSERT INTO transactions (id, client_id, date, narration) VALUES ('t1', ?1, '01/01/2024', 'X')",
+            rusqlite::params![client_id],
+        ).unwrap();
+
+        apply_migrations(&conn, MIGRATIONS, 4).expect("first run");
+        let count_1 = get_transactions(&conn, client_id).unwrap().len();
+        // A second call is a no-op (every migration's version is already
+        // <= the recorded user_version), matching how `db::open` behaves on
+        // every subsequent app launch — must not error or duplicate data.
+        apply_migrations(&conn, MIGRATIONS, 4).expect("second run must be a no-op, not an error");
+        let count_2 = get_transactions(&conn, client_id).unwrap().len();
+        assert_eq!(count_1, count_2, "re-running migrations must not duplicate or lose data");
+    }
+
+    #[test]
+    fn upsert_transaction_classification_does_not_touch_a_different_clients_row_with_the_same_id() {
+        let conn = open(":memory:").expect("open");
+        let client_a = add_client(&conn, "Client A", "Ledger A").unwrap();
+        let client_b = add_client(&conn, "Client B", "Ledger B").unwrap();
+        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+
+        upsert_transactions(&conn, client_a, None, std::slice::from_ref(&txn)).unwrap();
+        upsert_transactions(&conn, client_b, None, std::slice::from_ref(&txn)).unwrap();
+
+        upsert_transaction_classification(&conn, client_a, "t1", "Vendor A", "Head A", "Payment", "classified", 0.9, "manual").unwrap();
+
+        let a = get_transactions(&conn, client_a).unwrap();
+        let b = get_transactions(&conn, client_b).unwrap();
+        assert_eq!(a[0].vendor, "Vendor A", "client A's row must be updated");
+        assert_eq!(b[0].vendor, "", "client B's same-id row must be untouched by client A's classification update");
+    }
+
+    #[test]
+    fn delete_transaction_does_not_touch_a_different_clients_row_with_the_same_id() {
+        let conn = open(":memory:").expect("open");
+        let client_a = add_client(&conn, "Client A", "Ledger A").unwrap();
+        let client_b = add_client(&conn, "Client B", "Ledger B").unwrap();
+        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+
+        upsert_transactions(&conn, client_a, None, std::slice::from_ref(&txn)).unwrap();
+        upsert_transactions(&conn, client_b, None, std::slice::from_ref(&txn)).unwrap();
+
+        delete_transaction(&conn, client_a, "t1").unwrap();
+
+        assert_eq!(get_transactions(&conn, client_a).unwrap().len(), 0, "client A's row must be deleted");
+        assert_eq!(get_transactions(&conn, client_b).unwrap().len(), 1, "client B's same-id row must survive client A's delete");
+    }
+
+    #[test]
+    fn update_dup_flags_does_not_touch_a_different_clients_row_with_the_same_id() {
+        let conn = open(":memory:").expect("open");
+        let client_a = add_client(&conn, "Client A", "Ledger A").unwrap();
+        let client_b = add_client(&conn, "Client B", "Ledger B").unwrap();
+        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+
+        upsert_transactions(&conn, client_a, None, std::slice::from_ref(&txn)).unwrap();
+        upsert_transactions(&conn, client_b, None, std::slice::from_ref(&txn)).unwrap();
+
+        let flagged = Transaction { dup_flag: true, ..txn.clone() };
+        update_dup_flags(&conn, client_a, &[flagged]).unwrap();
+
+        let a = get_transactions(&conn, client_a).unwrap();
+        let b = get_transactions(&conn, client_b).unwrap();
+        assert!(a[0].dup_flag, "client A's row must be flagged");
+        assert!(!b[0].dup_flag, "client B's same-id row must be untouched by client A's dup-flag update");
     }
 
     #[test]
