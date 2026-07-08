@@ -498,8 +498,19 @@ pub fn prepend_opening_balance_row(
 
     let Some(ob) = ob_val else { return; };
 
+    // Deterministic per-period id, not a bare literal: re-importing the
+    // identical statement re-derives the identical hash from its first
+    // transaction's content (date/narration/debit/credit — see
+    // Transaction::hash()'s doc comment), so INSERT OR REPLACE still
+    // updates the same row in place (idempotent re-import, unchanged
+    // behavior). A *different* statement's first transaction differs, so
+    // its opening-balance row gets a different id and coexists as its own
+    // row instead of silently overwriting a previous import's — see
+    // SAME_CLIENT_OPENING_BALANCE_COLLISION_DESIGN.md.
+    let ob_id = format!("opening_balance_{}", first.hash());
+
     let ob_row = Transaction {
-        id:               "opening_balance".to_owned(),
+        id:               ob_id,
         import_id:        None,
         date:             String::new(),
         date_ts:          0,
@@ -1385,6 +1396,93 @@ mod tests {
         let mut txns: Vec<Transaction> = Vec::new();
         prepend_opening_balance_row(&mut txns, Some(5000.0), "B", "A");
         assert!(txns.is_empty(), "no OB row added to empty list");
+    }
+
+    // ── Same-client opening-balance id collision fix (Option B) ─────────────────
+    // See SAME_CLIENT_OPENING_BALANCE_COLLISION_DESIGN.md and
+    // CROSS_CLIENT_TRANSACTION_ID_FIX_REPORT.md for the full history: the OB
+    // row's id used to be the bare literal "opening_balance" for every
+    // import, which — after transactions.id became scoped per-client
+    // (client_id, id) — still collided across a *single* client's own
+    // multiple imports. It's now derived from the first real transaction's
+    // content hash instead.
+
+    fn sample_first_txn(date: &str, narration: &str, debit: Option<f64>) -> Transaction {
+        Transaction {
+            date: date.to_string(),
+            narration: narration.to_string(),
+            debit,
+            balance: Some(125000.0),
+            ..Transaction::new("t1")
+        }
+    }
+
+    #[test]
+    fn prepend_ob_id_is_no_longer_the_bare_literal() {
+        let mut txns = vec![sample_first_txn("01/04/2024", "NEFT SALARY", Some(10000.0))];
+        prepend_opening_balance_row(&mut txns, None, "TestBank", "ACC001");
+        assert_ne!(
+            txns[0].id, "opening_balance",
+            "id must no longer be the bare literal — that's the exact defect being fixed"
+        );
+        assert!(
+            txns[0].id.starts_with("opening_balance_"),
+            "id should still be recognizably an opening-balance id, got: {}",
+            txns[0].id
+        );
+    }
+
+    /// Importing the same statement twice must generate the same
+    /// opening-balance id — the core idempotency guarantee this fix must
+    /// preserve (re-import must still update the same row in place, not
+    /// create a duplicate).
+    #[test]
+    fn prepend_ob_id_is_identical_across_repeated_imports_of_the_same_statement() {
+        let mut txns_first_import =
+            vec![sample_first_txn("01/04/2024", "NEFT SALARY CREDIT", Some(10000.0))];
+        let mut txns_second_import =
+            vec![sample_first_txn("01/04/2024", "NEFT SALARY CREDIT", Some(10000.0))];
+
+        prepend_opening_balance_row(&mut txns_first_import, None, "TestBank", "ACC001");
+        prepend_opening_balance_row(&mut txns_second_import, None, "TestBank", "ACC001");
+
+        assert_eq!(
+            txns_first_import[0].id, txns_second_import[0].id,
+            "re-parsing the identical statement must derive the identical opening-balance id"
+        );
+    }
+
+    /// Importing two different statements for the same client must generate
+    /// different opening-balance ids — the fix itself: this is what makes
+    /// the two rows coexist under the (client_id, id) composite key instead
+    /// of one INSERT OR REPLACE-ing the other away.
+    #[test]
+    fn prepend_ob_id_differs_for_two_different_statements() {
+        let mut january = vec![sample_first_txn("01/01/2024", "NEFT SALARY", Some(10000.0))];
+        let mut february = vec![sample_first_txn("01/02/2024", "ATM WDL", Some(5000.0))];
+
+        prepend_opening_balance_row(&mut january, None, "TestBank", "ACC001");
+        prepend_opening_balance_row(&mut february, None, "TestBank", "ACC001");
+
+        assert_ne!(
+            january[0].id, february[0].id,
+            "different statements' first transactions must derive different opening-balance ids"
+        );
+    }
+
+    /// The id-derivation change must not touch how any *regular* transaction
+    /// gets its id — `prepend_opening_balance_row` only inserts a new row at
+    /// index 0, it must never rewrite `txns[0]`'s (now at index 1) own id.
+    #[test]
+    fn prepend_ob_does_not_change_existing_transaction_ids() {
+        let mut txns = vec![
+            Transaction { id: "t_0_2".to_string(), debit: Some(10000.0), balance: Some(125000.0), ..Transaction::new("t_0_2") },
+            Transaction { id: "t_1_2".to_string(), credit: Some(2000.0), balance: Some(127000.0), ..Transaction::new("t_1_2") },
+        ];
+        prepend_opening_balance_row(&mut txns, None, "TestBank", "ACC001");
+        assert_eq!(txns.len(), 3, "OB row prepended in front of the 2 real rows");
+        assert_eq!(txns[1].id, "t_0_2", "first real transaction's id must be untouched");
+        assert_eq!(txns[2].id, "t_1_2", "second real transaction's id must be untouched");
     }
 
     // ── _detectColsFromContent ────────────────────────────────────────────────

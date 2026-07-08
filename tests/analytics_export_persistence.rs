@@ -181,6 +181,103 @@ fn multi_client_transaction_data_is_fully_isolated() {
     );
 }
 
+/// Parses a real fixture through the same two-stage pipeline as
+/// `real_sbi_transactions`, but keeps the synthetic opening-balance row
+/// (not filtered out) — needed to test opening-balance persistence itself.
+fn real_full_parse(name: &str) -> Vec<Transaction> {
+    let path = fixture(name);
+    let rows = text_extractor::extract_pages(&path).expect("extract_pages failed");
+    let result = pdf_parser::parse_pdf_rows(rows, name).unwrap_or_else(|| {
+        let full_text = text_extractor::extract_full_text(&path);
+        let preprocessed = parser::ocr_parser::preprocess_multiline(&full_text);
+        parser::ocr_parser::parse_ocr_text(&preprocessed, name)
+    });
+    assert!(
+        result.transactions.iter().any(|t| t.is_opening_balance),
+        "{name}: test setup expects an opening-balance row"
+    );
+    result.transactions
+}
+
+/// Regression test for the same-client opening-balance id collision
+/// (SAME_CLIENT_OPENING_BALANCE_COLLISION_DESIGN.md, Option B): a client
+/// importing a *second*, different real statement must not silently
+/// overwrite the first statement's opening-balance row — "Reload Import"
+/// for the older import must still find its own opening balance.
+///
+/// Uses two different real fixtures (SBI.pdf, Kotak Bank.pdf — both
+/// confirmed-working by `tests/import_pipeline.rs`) rather than synthetic
+/// data, so this proves the fix against genuinely different real first
+/// transactions, not a hand-picked non-colliding pair.
+#[test]
+fn reloading_an_older_import_still_restores_its_own_opening_balance() {
+    let conn = db::open(":memory:").expect("open in-memory db");
+    let client_id = db::add_client(&conn, "Reload Test Client", "Test Ledger").unwrap();
+
+    let january_txns = real_full_parse("SBI.pdf");
+    let february_txns = real_full_parse("Kotak Bank.pdf");
+
+    let january_ob_balance = january_txns
+        .iter()
+        .find(|t| t.is_opening_balance)
+        .and_then(|t| t.balance)
+        .expect("January fixture must have an opening balance");
+    let february_ob_balance = february_txns
+        .iter()
+        .find(|t| t.is_opening_balance)
+        .and_then(|t| t.balance)
+        .expect("February fixture must have an opening balance");
+
+    let import_january =
+        db::save_import(&conn, client_id, "SBI.pdf", "SBI", "", january_txns.len()).unwrap();
+    db::upsert_transactions(&conn, client_id, Some(import_january), &january_txns).unwrap();
+
+    let import_february = db::save_import(
+        &conn,
+        client_id,
+        "Kotak Bank.pdf",
+        "Kotak",
+        "",
+        february_txns.len(),
+    )
+    .unwrap();
+    db::upsert_transactions(&conn, client_id, Some(import_february), &february_txns).unwrap();
+
+    // The exact "Reload Import" scenario (main.rs's on_do_reload_import):
+    // fetch the OLDER (January) import specifically, after a newer
+    // (February) import has since happened for the same client.
+    let reloaded_january = db::get_transactions_for_import(&conn, import_january).unwrap();
+    let january_ob = reloaded_january
+        .iter()
+        .find(|t| t.is_opening_balance)
+        .and_then(|t| t.balance);
+    assert_eq!(
+        january_ob,
+        Some(january_ob_balance),
+        "reloading the OLDER import must still find its own opening-balance row, not a blank/missing one"
+    );
+
+    // February's own reload must likewise show its own (different) balance,
+    // not accidentally show January's.
+    let reloaded_february = db::get_transactions_for_import(&conn, import_february).unwrap();
+    let february_ob = reloaded_february
+        .iter()
+        .find(|t| t.is_opening_balance)
+        .and_then(|t| t.balance);
+    assert_eq!(
+        reloaded_february
+            .iter()
+            .filter(|t| t.is_opening_balance)
+            .count(),
+        1
+    );
+    assert_eq!(february_ob, Some(february_ob_balance));
+    assert_ne!(
+        january_ob, february_ob,
+        "sanity: the two statements' opening balances must genuinely differ for this test to be meaningful"
+    );
+}
+
 // ── Export: Excel, CSV, Tally XML ───────────────────────────────────────────
 
 #[test]
