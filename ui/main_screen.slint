@@ -625,6 +625,7 @@ export component MainScreen inherits Rectangle {
     callback reimport-excel();
     callback reset-dedupe();
     callback reconcile();
+    callback run-reconciliation();
     callback open-batch-monitor();
     callback open-audit-trail(int, int);
     callback open-settings();
@@ -845,12 +846,17 @@ export component MainScreen inherits Rectangle {
     in property <string>          export-preview-text: "";
     // Export wizard step 4 live validation (set by Rust via do-export-preview callback)
     in property <bool>            wiz-can-export: true;
-    // Reconcile counters set by Rust after reconcile()
-    in property <string>     recon-matched:    "0";
-    in property <string>     recon-likely:     "0";
-    in property <string>     recon-unmatched:  "0";
-    in property <string>     recon-bank-only:  "0";
-    in property <string>     recon-status:     "";
+    // Reconcile counters set by Rust after run-reconciliation()
+    in property <string>     recon-matched:      "0";
+    in property <string>     recon-likely:       "0";
+    in property <string>     recon-possible:     "0";
+    in property <string>     recon-unmatched:    "0";
+    in property <string>     recon-bank-only:    "0";
+    in property <string>     recon-status:       "";
+    // Set by Rust after reconcile() (the Tally-import step)
+    in property <string>     recon-file-label:   "";
+    in property <bool>       recon-has-vouchers: false;
+    in property <bool>       recon-has-report:   false;
     // Audit trail records (set by Rust in do-audit-trail)
     in property <[string]>   audit-records: [];
     in property <bool>       can-undo:      false;
@@ -867,6 +873,7 @@ export component MainScreen inherits Rectangle {
     in-out property <string> settings-recon-days:      "3";
     in-out property <string> settings-recon-pct:       "0.5";
     in-out property <int>    settings-log-level:       0;  // 0=INFO 1=DEBUG 2=WARN 3=ERROR
+    in-out property <int>    settings-state-idx:       0;  // index into the same 9-entry state list as wiz-state-idx
     callback settings-save-all();
     callback clear-logs();
 
@@ -953,7 +960,7 @@ export component MainScreen inherits Rectangle {
                     enabled: root.transaction-rows.length > 0;
                     clicked => { root.modal-state = "import-history"; }
                 }
-                TBtn { text: "Import Ledgers"; enabled: false; clicked => { root.import-ledgers(); } }
+                TBtn { text: "Import Ledgers"; enabled: true; clicked => { root.import-ledgers(); } }
 
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
@@ -1704,7 +1711,7 @@ export component MainScreen inherits Rectangle {
                 // Green buttons
                 FootBtn { text: "Export to Excel";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "excel-export"; } }
                 // &#8659; = ⇓ (U+21D3 DOWNWARDS DOUBLE ARROW) from original HTML
-                FootBtn { text: "\u{21D3} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.modal-state = "export-wizard"; } }
+                FootBtn { text: "\u{21D3} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.wiz-state-idx = root.settings-state-idx; root.modal-state = "export-wizard"; } }
                 FootBtn { text: "Quick Tally XML";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "tally-export"; } }
                 FootBtn { text: "Re-import Excel";        enabled: root.transaction-rows.length > 0; clicked => { root.reimport-excel(); } }
                 FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => {
@@ -1992,7 +1999,7 @@ export component MainScreen inherits Rectangle {
                         CheckBox { text: "Auto-suggest GST ledgers"; checked <=> root.settings-gst-auto-ledgers; }
                         HorizontalBox { padding: 0px; spacing: 8px;
                             Text { text: "Default State"; font-size: 11px; color: #546E7A; vertical-alignment: center; }
-                            ComboBox { model: ["Maharashtra (MH)", "Gujarat (GJ)", "Delhi (DL)", "Karnataka (KA)", "Tamil Nadu (TN)", "Telangana (TG)", "Rajasthan (RJ)", "UP (UP)", "West Bengal (WB)"]; min-width: 200px; }
+                            ComboBox { model: ["Maharashtra (MH)", "Gujarat (GJ)", "Delhi (DL)", "Karnataka (KA)", "Tamil Nadu (TN)", "Telangana (TG)", "Rajasthan (RJ)", "UP (UP)", "West Bengal (WB)"]; min-width: 200px; current-index <=> root.settings-state-idx; }
                         }
                         Rectangle { height: 1px; background: #E3F2FD; }
                         Text { text: "RECONCILIATION"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
@@ -2495,14 +2502,17 @@ export component MainScreen inherits Rectangle {
                     // Toolbar
                     HorizontalBox { padding: 0px; spacing: 8px; height: 36px;
                         MBtn { text: "Import Tally Export (Excel)"; bg: #F5F5F5; fg: #37474F; enabled: true; clicked => { root.reconcile(); } }
-                        Text { text: "No Tally file loaded"; font-size: 12px; color: #888888; vertical-alignment: center; horizontal-stretch: 1; }
-                        MBtn { text: "Run Reconciliation"; bg: #1565C0; enabled: false; }
-                        MBtn { text: "Export CSV"; bg: #2E7D32; fg: white; enabled: root.recon-status != ""; clicked => { root.export-recon-csv(); } }
+                        Text {
+                            text: root.recon-file-label == "" ? "No Tally file loaded" : root.recon-file-label;
+                            font-size: 12px; color: #888888; vertical-alignment: center; horizontal-stretch: 1;
+                        }
+                        MBtn { text: "Run Reconciliation"; bg: #1565C0; enabled: root.recon-has-vouchers; clicked => { root.run-reconciliation(); } }
+                        MBtn { text: "Export CSV"; bg: #2E7D32; fg: white; enabled: root.recon-has-report; clicked => { root.export-recon-csv(); } }
                     }
                     // Summary bar — bound to Rust recon properties
                     Rectangle {
                         height: 50px; background: #E3F2FD; border-radius: 6px;
-                        HorizontalBox { padding: 10px; spacing: 16px;
+                        HorizontalBox { padding: 10px; spacing: 14px;
                             VerticalBox { padding: 0px; spacing: 2px; alignment: center;
                                 Text { text: root.recon-matched; font-size: 20px; font-weight: 700; color: #2E7D32; horizontal-alignment: center; }
                                 Text { text: "Matched"; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
@@ -2510,6 +2520,10 @@ export component MainScreen inherits Rectangle {
                             VerticalBox { padding: 0px; spacing: 2px; alignment: center;
                                 Text { text: root.recon-likely; font-size: 20px; font-weight: 700; color: #F57F17; horizontal-alignment: center; }
                                 Text { text: "Likely"; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
+                            }
+                            VerticalBox { padding: 0px; spacing: 2px; alignment: center;
+                                Text { text: root.recon-possible; font-size: 20px; font-weight: 700; color: #8D6E63; horizontal-alignment: center; }
+                                Text { text: "Possible"; font-size: 10px; color: #64B5F6; horizontal-alignment: center; }
                             }
                             VerticalBox { padding: 0px; spacing: 2px; alignment: center;
                                 Text { text: root.recon-unmatched; font-size: 20px; font-weight: 700; color: #C62828; horizontal-alignment: center; }
@@ -2526,8 +2540,9 @@ export component MainScreen inherits Rectangle {
                         vertical-stretch: 1; background: #F5F5F5;
                         border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
                         if root.recon-status == "" : Text {
-                            text: "Load a Tally daybook export to begin matching.";
+                            text: "Import a Tally daybook export, then click \"Run Reconciliation\" to match it against the loaded bank transactions.";
                             font-size: 13px; color: #888888; horizontal-alignment: center; vertical-alignment: center;
+                            wrap: word-wrap; x: 20px; width: parent.width - 40px;
                         }
                         if root.recon-status != "" : Text {
                             text: root.recon-status;

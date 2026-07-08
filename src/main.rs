@@ -9,19 +9,27 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod auth;
-mod analytics;
-mod classifier;
-mod db;
-mod export;
-mod narration_cleaner;
-mod tally_group_engine;
-mod gst_engine;
-mod parser;
-mod settings;
-mod ui;
+// Every module below lives in the library crate (`lib.rs`), not as a separate
+// bin-only copy — `use` instead of `mod` so it's compiled exactly once. Two
+// separate `mod` declarations pointing at the same source files (one here,
+// one in lib.rs) used to compile every one of these modules — and their
+// `#[cfg(test)]` blocks — into *both* the lib test binary and the bin test
+// binary. `cargo test` runs both binaries as separate OS processes, and nothing
+// in those tests' cross-process guards (e.g. `db`'s keyring-touching tests use
+// an in-process `Mutex` to serialize against each other) protects against two
+// *different processes* hitting the same real file path or OS keyring entry
+// at the same time — which is exactly what caused an intermittent
+// "Cannot open encrypted database ... unreadable with the stored key" failure
+// in `db::tests::real_file_database_opens_idempotently_across_repeated_opens`
+// under a plain `cargo test`. Depending on the lib crate's single compiled
+// copy instead removes the duplicate test binary entirely, closing the race
+// at its root instead of trying to widen the lock's reach across processes.
+use bank_statement_processor::{
+    auth, analytics, classifier, db, export, narration_cleaner,
+    tally_group_engine, parser, reconciliation, settings, ui,
+};
 #[cfg(feature = "ai")]
-mod ai_classifier;
+use bank_statement_processor::ai_classifier;
 
 use std::sync::{Arc, Mutex};
 
@@ -78,11 +86,15 @@ fn audit_now() -> String {
 }
 
 // ── Reconcile helpers ─────────────────────────────────────────────────────────
+//
+// The actual matching engine (scoring, greedy bipartite assignment, Tally
+// grid parsing, CSV report) lives in `reconciliation.rs` as pure, unit-tested
+// logic. What's left here is just the calamine file I/O glue: open the
+// workbook, read its first sheet into a plain string grid, and hand that to
+// `reconciliation::parse_tally_grid`.
 
-/// Parse a Tally daybook Excel export into (date_str DD/MM/YYYY, amount) pairs.
-/// Looks for the first header row containing "Date" and any Debit/Credit column.
 #[cfg(feature = "slint-ui")]
-fn reconcile_parse_tally(mut wb: calamine::Sheets<std::io::BufReader<std::fs::File>>) -> Vec<(String, f64)> {
+fn read_workbook_grid(mut wb: calamine::Sheets<std::io::BufReader<std::fs::File>>) -> Vec<Vec<String>> {
     use calamine::Reader;
     let sheet_name = match wb.sheet_names().first() {
         Some(n) => n.to_string(),
@@ -92,154 +104,9 @@ fn reconcile_parse_tally(mut wb: calamine::Sheets<std::io::BufReader<std::fs::Fi
         Ok(r)  => r,
         Err(_) => return vec![],
     };
-    let rows: Vec<Vec<calamine::Data>> = range.rows()
-        .map(|r| r.to_vec())
-        .collect();
-
-    // Find header row: must contain "date" (case-insensitive)
-    let mut date_col:   Option<usize> = None;
-    let mut debit_col:  Option<usize> = None;
-    let mut credit_col: Option<usize> = None;
-    let mut header_row = 0usize;
-
-    'outer: for (ri, row) in rows.iter().enumerate() {
-        for (ci, cell) in row.iter().enumerate() {
-            let s = cell.to_string().to_lowercase();
-            if s.contains("date") { date_col = Some(ci); }
-            if s.contains("debit")  { debit_col  = Some(ci); }
-            if s.contains("credit") { credit_col = Some(ci); }
-        }
-        if date_col.is_some() && (debit_col.is_some() || credit_col.is_some()) {
-            header_row = ri;
-            break 'outer;
-        }
-        // reset if row didn't satisfy
-        date_col = None; debit_col = None; credit_col = None;
-    }
-
-    let dc = match date_col { Some(c) => c, None => return vec![] };
-
-    let mut entries: Vec<(String, f64)> = vec![];
-    for row in rows.iter().skip(header_row + 1) {
-        if row.len() <= dc { continue; }
-        let raw_date = row[dc].to_string();
-        if raw_date.trim().is_empty() { continue; }
-
-        // Normalise date: accept DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
-        let date_str = normalise_tally_date(&raw_date);
-        if date_str.is_empty() { continue; }
-
-        // Amount: prefer debit column, fall back to credit, then sum both
-        let amount = match (debit_col, credit_col) {
-            (Some(di), Some(ci)) => {
-                let empty = calamine::Data::Empty;
-                let d = parse_cell_amount(row.get(di).unwrap_or(&empty));
-                let c = parse_cell_amount(row.get(ci).unwrap_or(&empty));
-                if d > 0.0 { d } else { c }
-            }
-            (Some(di), None) => { let empty = calamine::Data::Empty; parse_cell_amount(row.get(di).unwrap_or(&empty)) }
-            (None, Some(ci)) => { let empty = calamine::Data::Empty; parse_cell_amount(row.get(ci).unwrap_or(&empty)) }
-            (None, None)     => 0.0,
-        };
-        if amount <= 0.0 { continue; }
-        entries.push((date_str, amount));
-    }
-    entries
-}
-
-fn normalise_tally_date(s: &str) -> String {
-    let s = s.trim();
-    // DD/MM/YYYY or DD-MM-YYYY
-    if s.len() == 10 {
-        let sep = if s.contains('/') { '/' } else { '-' };
-        let parts: Vec<&str> = s.splitn(3, sep).collect();
-        if parts.len() == 3 {
-            // Detect YYYY-MM-DD
-            if parts[0].len() == 4 {
-                return format!("{}/{}/{}", parts[2], parts[1], parts[0]);
-            }
-            return format!("{}/{}/{}", parts[0], parts[1], parts[2]);
-        }
-    }
-    String::new()
-}
-
-fn parse_cell_amount(cell: &calamine::Data) -> f64 {
-    match cell {
-        calamine::Data::Float(f) => f.abs(),
-        calamine::Data::Int(i)   => (*i as f64).abs(),
-        calamine::Data::String(s) => s.replace(',', "").trim().parse::<f64>().unwrap_or(0.0).abs(),
-        _                         => 0.0,
-    }
-}
-
-/// Match Tally entries against bank entries.
-/// Returns (exact_matched, likely_matched, _) counts.
-/// Exact = same date + same amount (±0.01).
-/// Likely = amount matches but date differs by ≤7 days.
-#[cfg(feature = "slint-ui")]
-// Returns (exact, likely, unmatched_tally, tally_status["Matched"|"Likely"|"Unmatched"], bank_used)
-fn reconcile_match(
-    tally:      &[(String, f64)],
-    bank:       &[(String, f64)],
-    days_window: i64,
-    amt_tol:     f64,
-) -> (usize, usize, usize, Vec<&'static str>, Vec<bool>) {
-    let mut bank_used   = vec![false; bank.len()];
-    let mut tally_used  = vec![false; tally.len()];
-    let mut tally_exact = vec![false; tally.len()];
-    let mut exact  = 0usize;
-    let mut likely = 0usize;
-    let amt_tolerance = |a: f64, b: f64| -> bool {
-        if a == 0.0 { return (b - a).abs() <= 0.01; }
-        (a - b).abs() <= 0.01 || (a - b).abs() / a * 100.0 <= amt_tol
-    };
-
-    // Exact pass: same date + same amount (within tolerance)
-    for (ti, (td, ta)) in tally.iter().enumerate() {
-        for (bi, (bd, ba)) in bank.iter().enumerate() {
-            if bank_used[bi] { continue; }
-            if amt_tolerance(*ta, *ba) && td == bd {
-                bank_used[bi]   = true;
-                tally_used[ti]  = true;
-                tally_exact[ti] = true;
-                exact += 1;
-                break;
-            }
-        }
-    }
-    // Likely pass: same amount (within tolerance), date within days_window
-    for (ti, (td, ta)) in tally.iter().enumerate() {
-        if tally_used[ti] { continue; }
-        for (bi, (bd, ba)) in bank.iter().enumerate() {
-            if bank_used[bi] { continue; }
-            if amt_tolerance(*ta, *ba) {
-                if let (Some(td_ymd), Some(bd_ymd)) = (parse_date_for_recon(td), parse_date_for_recon(bd)) {
-                    if (td_ymd as i64 - bd_ymd as i64).abs() <= days_window {
-                        bank_used[bi]  = true;
-                        tally_used[ti] = true;
-                        likely += 1;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    let tally_status: Vec<&'static str> = (0..tally.len()).map(|i| {
-        if tally_exact[i]      { "Matched" }
-        else if tally_used[i]  { "Likely"  }
-        else                   { "Unmatched" }
-    }).collect();
-    (exact, likely, tally.len().saturating_sub(exact + likely), tally_status, bank_used)
-}
-
-fn parse_date_for_recon(s: &str) -> Option<u32> {
-    let parts: Vec<&str> = s.split('/').collect();
-    if parts.len() != 3 { return None; }
-    let dd = parts[0].parse::<u32>().ok()?;
-    let mm = parts[1].parse::<u32>().ok()?;
-    let yy = parts[2].parse::<u32>().ok()?;
-    Some(yy * 10000 + mm * 100 + dd)
+    range.rows()
+        .map(|row| row.iter().map(|c| c.to_string()).collect())
+        .collect()
 }
 
 // ── Parse DD/MM/YYYY → (yyyy, mm, dd) for ordering comparisons ────────────────
@@ -583,13 +450,13 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
     h.set_dash_chart_vendors(slint::ModelRc::new(slint::VecModel::from(vbars)));
 
     // Filter dropdown options
-    let mut banks_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
+    let banks_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Banks"))
         .chain(unique_banks(txns).into_iter().map(|s| SharedString::from(s.as_str())))
         .collect();
-    let mut vendor_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Vendors"))
+    let vendor_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Vendors"))
         .chain(unique_vendors(txns).into_iter().map(|s| SharedString::from(s.as_str())))
         .collect();
-    let mut head_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Expense Heads"))
+    let head_opts: Vec<SharedString> = std::iter::once(SharedString::from("All Expense Heads"))
         .chain(unique_heads(txns).into_iter().map(|s| SharedString::from(s.as_str())))
         .collect();
     let _ = (banks_opts.len(), vendor_opts.len(), head_opts.len());
@@ -888,6 +755,11 @@ fn apply_parse_result(
     // party collapse into one ledger name before any counts/breakdowns are built.
     parser::party_master::normalize_vendors(&mut result.transactions);
 
+    let cfg = {
+        let db = db_ref.lock().unwrap();
+        db.as_ref().map(|conn| settings::Settings::load(conn)).unwrap_or_default()
+    };
+
     let real: Vec<&parser::Transaction> = result
         .transactions
         .iter()
@@ -938,9 +810,23 @@ fn apply_parse_result(
         result.opening_balance, result.closing_balance
     );
 
-    // Run narration cleaner on all transactions.
+    // Run narration cleaner on all transactions — gated by the Settings
+    // screen's "Enable narration cleaning" toggle. When disabled, build a
+    // neutral (zero-confidence, empty-party, cleaned==original) meta per
+    // transaction instead of skipping the vector: every downstream site below
+    // already falls back to the raw transaction whenever confidence is below
+    // its 0.4 threshold or party is blank, so this single conditional is
+    // enough to make narr_enabled=false a true no-op end to end, matching the
+    // old Electron app's `cleanBatch()` early-return when disabled.
     let narration_strs: Vec<String> = real.iter().map(|t| t.narration.clone()).collect();
-    let cleaned_narrations = narration_cleaner::clean_batch(&narration_strs);
+    let cleaned_narrations: Vec<narration_cleaner::NarrationMeta> = if cfg.narr_enabled {
+        narration_cleaner::clean_batch_with(&narration_strs, cfg.narr_title_case)
+    } else {
+        narration_strs.iter().map(|n| narration_cleaner::NarrationMeta {
+            original: n.clone(), cleaned: n.clone(), txn_type: "OTHER".to_string(),
+            party: String::new(), payment_ref: String::new(), confidence: 0.0,
+        }).collect()
+    };
 
     // Compute Tally group for each transaction.
     let tally_inputs: Vec<(String, String, bool, f64)> = real.iter().enumerate().map(|(idx, t)| {
@@ -961,7 +847,12 @@ fn apply_parse_result(
         .map(|(idx, t)| {
             bank_set.insert(t.bank_name.clone());
             let meta = &cleaned_narrations[idx];
-            let narr: String = if meta.confidence >= 0.4 && !meta.cleaned.is_empty() {
+            // "Preserve original narration" (narr_preserve) keeps the table's
+            // Narration column showing the bank's raw text verbatim even when
+            // the cleaner is confident — it only affects this display column;
+            // vendor suggestion and Tally-group classification below still
+            // benefit from the cleaned/party-extracted text either way.
+            let narr: String = if !cfg.narr_preserve && meta.confidence >= 0.4 && !meta.cleaned.is_empty() {
                 meta.cleaned.chars().take(80).collect()
             } else {
                 t.narration.chars().take(80).collect()
@@ -1339,12 +1230,15 @@ fn finish_batch(
         let st = state_ref.lock().unwrap();
         (st.tally_ledger.clone(), st.client_id.unwrap_or(0))
     };
-    let rules = {
+    let (rules, cfg) = {
         let db = db_ref.lock().unwrap();
-        if let Some(conn) = db.as_ref() { db::get_rules(conn, client_id2).unwrap_or_default() } else { vec![] }
+        match db.as_ref() {
+            Some(conn) => (db::get_rules(conn, client_id2).unwrap_or_default(), settings::Settings::load(conn)),
+            None       => (vec![], settings::Settings::default()),
+        }
     };
     let dedup_on = h.get_dedup_enabled();
-    classifier::classify_all(&mut all_txns, &bank_ledger, &rules, dedup_on);
+    classifier::classify_all(&mut all_txns, &bank_ledger, &rules, dedup_on, cfg.gst_enabled, cfg.gst_auto_ledgers);
     parser::party_master::normalize_vendors(&mut all_txns);
 
     let real: Vec<&parser::Transaction> = all_txns.iter().filter(|t| !t.is_opening_balance).collect();
@@ -1461,11 +1355,30 @@ fn continue_batch(
     }
 }
 
+/// Maps the Settings screen's "Log Level" choice to a `log` crate filter.
+fn log_level_filter(level: &str) -> log::LevelFilter {
+    match level {
+        "DEBUG" => log::LevelFilter::Debug,
+        "WARN"  => log::LevelFilter::Warn,
+        "ERROR" => log::LevelFilter::Error,
+        _       => log::LevelFilter::Info,
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // env_logger's own internal filter is fixed for the life of the process
+    // once `.init()` runs, so it's built permissive ("debug") here — actual
+    // verbosity is controlled entirely afterwards via `log::set_max_level`,
+    // which the `log` crate's macros check as a hard ceiling on every call and
+    // which can be (and is, below and in on_do_settings_save_all) changed at
+    // any time. That's what lets the Settings screen's "Log Level" actually
+    // take effect immediately, in both directions, without a restart. An
+    // explicit `RUST_LOG` env var still overrides this, same as before.
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
+        env_logger::Env::default().default_filter_or("debug"),
     )
     .init();
+    log::set_max_level(log::LevelFilter::Info); // matches the previous fixed default until Settings load below
 
     log::info!("Bank Statement Processor starting…");
 
@@ -1542,6 +1455,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.set_settings_log_level(match cfg.log_level.as_str() {
                     "DEBUG" => 1, "WARN" => 2, "ERROR" => 3, _ => 0,
                 });
+                app.set_settings_state_idx(cfg.default_state_idx);
+                log::set_max_level(log_level_filter(&cfg.log_level));
                 {
                     let mut st = app_state.lock().unwrap();
                     st.ai_provider = cfg.ai_provider;
@@ -1904,15 +1819,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let bank_ledger = st.tally_ledger.clone();
                 let client_id   = st.client_id.unwrap_or(0);
-                // Load stored rules from DB
-                let rules = {
+                // Load stored rules + settings from DB
+                let (rules, cfg) = {
                     let db = db_ref.lock().unwrap();
-                    if let Some(conn) = db.as_ref() {
-                        db::get_rules(conn, client_id).unwrap_or_default()
-                    } else { vec![] }
+                    match db.as_ref() {
+                        Some(conn) => (db::get_rules(conn, client_id).unwrap_or_default(), settings::Settings::load(conn)),
+                        None       => (vec![], settings::Settings::default()),
+                    }
                 };
                 let dedup_on2 = h.get_dedup_enabled();
-                let changed = classifier::classify_all(&mut st.transactions, &bank_ledger, &rules, dedup_on2);
+                let changed = classifier::classify_all(&mut st.transactions, &bank_ledger, &rules, dedup_on2, cfg.gst_enabled, cfg.gst_auto_ledgers);
                 parser::party_master::normalize_vendors(&mut st.transactions);
                 log::info!("[AutoClassify] classified {} transactions (rules={})", changed, rules.len());
                 rebuild_rows(&h, &st);
@@ -2278,15 +2194,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let db = db_ref.lock().unwrap();
-                let added = match db.as_ref() {
-                    Some(conn) => db::import_ledgers(conn, cid, &entries).unwrap_or(0),
-                    None => 0,
-                };
-                let total = entries.len();
-                let msg = format!("Imported {} new ledgers ({} already existed)", added, total - added);
-                log::info!("[ImportLedgers] {}", msg);
-                h.set_toast_msg(SharedString::from(msg.as_str()));
-                h.set_toast_kind(1);
+                if let Some(conn) = db.as_ref() {
+                    match db::import_ledgers(conn, cid, &entries) {
+                        Ok(added) => {
+                            let total = entries.len();
+                            let msg = format!("Imported {} new ledgers ({} already existed)", added, total - added);
+                            log::info!("[ImportLedgers] {}", msg);
+                            h.set_toast_msg(SharedString::from(msg.as_str()));
+                            h.set_toast_kind(1);
+                        }
+                        Err(e) => {
+                            log::error!("[ImportLedgers] DB insert failed: {}", e);
+                            h.set_toast_msg(SharedString::from("Failed to save ledgers to database"));
+                            h.set_toast_kind(2);
+                        }
+                    }
+                }
             });
         }
         {
@@ -2872,14 +2795,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        // ── Reconcile ─────────────────────────────────────────────────────────
+        // ── Reconcile: step 1 — Import Tally Export ────────────────────────────
+        // Parses the picked Tally daybook Excel export into vouchers and stores
+        // them in AppState. Does not run any matching yet — that's a separate,
+        // explicit "Run Reconciliation" step (mirrors the old Electron app's
+        // `_openReconcile()` / `_runReconciliation()` split), which lets a user
+        // re-run matching (e.g. after adjusting the recon tolerance in
+        // Settings) without re-picking the file every time.
         {
             let handle    = app.as_weak();
             let state_ref = app_state.clone();
-            let db_ref    = db_conn.clone();
             app.on_do_reconcile(move || {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
-                // Pick a Tally daybook export (Excel)
                 let path = match rfd::FileDialog::new()
                     .set_title("Open Tally Daybook Export (Excel)")
                     .add_filter("Excel", &["xlsx", "xls", "xlsm"])
@@ -2887,28 +2814,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 { Some(p) => p, None => return };
 
                 let wb = match calamine::open_workbook_auto(&path) {
-                    Ok(w) => w, Err(e) => {
+                    Ok(w) => w,
+                    Err(e) => {
                         log::error!("[Reconcile] cannot open file: {}", e);
-                        h.set_status_bank(SharedString::from("Reconcile: failed to open Excel file"));
+                        h.set_toast_msg(SharedString::from("Could not open the Tally export file"));
+                        h.set_toast_kind(2);
                         return;
                     }
                 };
 
-                // Parse Tally rows: extract (date_str, amount) pairs
-                let tally_entries: Vec<(String, f64)> = reconcile_parse_tally(wb);
-                if tally_entries.is_empty() {
-                    h.set_recon_status(SharedString::from("No valid entries found in the Tally export. Ensure the file has Date and Debit/Credit columns."));
+                let grid = read_workbook_grid(wb);
+                let vouchers = reconciliation::parse_tally_grid(&grid);
+                if vouchers.is_empty() {
+                    h.set_toast_msg(SharedString::from(
+                        "No valid entries found. The file needs a Date column and a Particulars/Narration/Description column."));
+                    h.set_toast_kind(2);
                     return;
                 }
 
-                // Compare against bank transactions
-                let st = state_ref.lock().unwrap();
-                let bank: Vec<(String, f64)> = st.transactions.iter()
-                    .filter(|t| !t.is_opening_balance)
-                    .map(|t| (t.date.clone(), t.debit.or(t.credit).unwrap_or(0.0)))
-                    .collect();
+                let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("Tally export").to_string();
+                let label = format!("Loaded {} entries from {}", vouchers.len(), file_name);
+                log::info!("[Reconcile] imported {} Tally vouchers from {:?}", vouchers.len(), path);
 
-                // Load recon tolerance from settings
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.recon_vouchers   = vouchers;
+                    st.recon_file_label = label.clone();
+                    st.recon_csv        = String::new();
+                }
+                h.set_recon_file_label(SharedString::from(label.as_str()));
+                h.set_recon_has_vouchers(true);
+                h.set_recon_has_report(false);
+                h.set_recon_status(SharedString::from("Ready to reconcile \u{2014} click \"Run Reconciliation\"."));
+                h.set_recon_matched(SharedString::from("0"));
+                h.set_recon_likely(SharedString::from("0"));
+                h.set_recon_possible(SharedString::from("0"));
+                h.set_recon_unmatched(SharedString::from("0"));
+                h.set_recon_bank_only(SharedString::from("0"));
+                h.set_toast_msg(SharedString::from(label.as_str()));
+                h.set_toast_kind(1);
+            });
+        }
+
+        // ── Reconcile: step 2 — Run Reconciliation ─────────────────────────────
+        // Matches the currently-loaded bank transactions against the vouchers
+        // imported in step 1, using the full tiered-confidence greedy
+        // bipartite matcher in `reconciliation.rs` (port of the old app's
+        // `ReconciliationEngine.reconcile()` — exact/fuzzy amount+date,
+        // narration similarity, reference-number bonus, 4 status tiers).
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_run_reconciliation(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+
+                let (vouchers, bank) = {
+                    let st = state_ref.lock().unwrap();
+                    if st.recon_vouchers.is_empty() {
+                        drop(st);
+                        h.set_toast_msg(SharedString::from("Import a Tally export first"));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                    let bank: Vec<reconciliation::BankEntry> = st.transactions.iter()
+                        .filter(|t| !t.is_opening_balance)
+                        .map(|t| reconciliation::BankEntry {
+                            date:      t.date.clone(),
+                            amount:    t.debit.or(t.credit).unwrap_or(0.0),
+                            narration: t.narration.clone(),
+                            reference: t.reference.clone(),
+                        })
+                        .collect();
+                    (st.recon_vouchers.clone(), bank)
+                };
+
+                if bank.is_empty() {
+                    h.set_toast_msg(SharedString::from("No bank transactions loaded to reconcile against"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+
                 let (recon_days, recon_pct) = {
                     let dbc = db_ref.lock().unwrap();
                     if let Some(c) = dbc.as_ref() {
@@ -2916,40 +2902,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (cfg.recon_days as i64, cfg.recon_pct)
                     } else { (3, 0.5) }
                 };
+                let cfg    = reconciliation::ReconConfig::new(recon_days, recon_pct);
+                let report = reconciliation::reconcile(&bank, &vouchers, &cfg);
 
-                let (matched, likely, unmatched_tally, tally_status, bank_used) =
-                    reconcile_match(&tally_entries, &bank, recon_days, recon_pct);
-                let bank_only = bank.len().saturating_sub(matched + likely);
+                let matched            = report.matched_count();
+                let likely             = report.likely_count();
+                let possible           = report.possible_count();
+                let unmatched_vouchers = report.unmatched_vouchers.len();
+                let bank_only          = report.unmatched_bank.len();
+
                 let status = format!(
-                    "Tally: {} entries | Bank: {} transactions\n\u{2022} Exact matches: {}\n\u{2022} Likely matches (\u{00B1}{} days): {}\n\u{2022} Tally entries unmatched: {}\n\u{2022} Bank-only entries (no Tally): {}",
-                    tally_entries.len(), bank.len(), matched, recon_days, likely, unmatched_tally, bank_only
+                    "Bank: {} transactions | Tally: {} entries\n\u{2022} Matched: {}\n\u{2022} Likely (\u{00B1}{} days): {}\n\u{2022} Possible: {}\n\u{2022} Tally entries unmatched: {}\n\u{2022} Bank-only entries (no Tally): {}",
+                    bank.len(), vouchers.len(), matched, recon_days, likely, possible, unmatched_vouchers, bank_only
                 );
+                let csv = reconciliation::report_to_csv(&bank, &vouchers, &report);
 
-                // Build CSV for later export
-                let mut csv = String::from("Source,Date,Amount,Status\n");
-                for (i, (td, ta)) in tally_entries.iter().enumerate() {
-                    csv.push_str(&format!("Tally,{},{:.2},{}\n", td, ta, tally_status[i]));
-                }
-                for (i, (bd, ba)) in bank.iter().enumerate() {
-                    let s = if bank_used[i] { "Matched" } else { "Bank-only" };
-                    csv.push_str(&format!("Bank,{},{:.2},{}\n", bd, ba, s));
-                }
-
-                drop(st);
                 h.set_recon_matched(SharedString::from(matched.to_string().as_str()));
                 h.set_recon_likely(SharedString::from(likely.to_string().as_str()));
-                h.set_recon_unmatched(SharedString::from(unmatched_tally.to_string().as_str()));
+                h.set_recon_possible(SharedString::from(possible.to_string().as_str()));
+                h.set_recon_unmatched(SharedString::from(unmatched_vouchers.to_string().as_str()));
                 h.set_recon_bank_only(SharedString::from(bank_only.to_string().as_str()));
                 h.set_recon_status(SharedString::from(status.as_str()));
+                h.set_recon_has_report(true);
 
-                let event_str = format!("[{}] Reconcile — {} matched, {} likely, {} unmatched", audit_now(), matched, likely, unmatched_tally);
+                let event_str = format!(
+                    "[{}] Reconcile \u{2014} {} matched, {} likely, {} possible, {} unmatched",
+                    audit_now(), matched, likely, possible, unmatched_vouchers
+                );
+                log::info!("[Reconcile] matched={} likely={} possible={} unmatched_vouchers={} bank_only={}",
+                    matched, likely, possible, unmatched_vouchers, bank_only);
+
                 let client_id = {
                     let mut st2 = state_ref.lock().unwrap();
                     st2.audit_events.push(event_str.clone());
                     st2.recon_csv = csv;
                     st2.client_id
                 };
-                log::info!("[Reconcile] matched={} likely={} unmatched={} bank_only={}", matched, likely, unmatched_tally, bank_only);
+                h.set_toast_msg(SharedString::from(format!(
+                    "Reconciliation complete: {} matched, {} likely, {} possible, {} unmatched",
+                    matched, likely, possible, unmatched_vouchers
+                ).as_str()));
+                h.set_toast_kind(1);
+
                 if let Some(cid) = client_id {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
@@ -3319,9 +3313,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         3 => "ERROR",
                         _ => "INFO",
                     }.to_string();
+                    cfg.default_state_idx = h.get_settings_state_idx();
                     match cfg.save(conn) {
                         Ok(_) => {
-                            log::info!("[SettingsSaveAll] saved recon_days={} recon_pct={}", cfg.recon_days, cfg.recon_pct);
+                            log::set_max_level(log_level_filter(&cfg.log_level));
+                            log::info!("[SettingsSaveAll] saved recon_days={} recon_pct={} log_level={}", cfg.recon_days, cfg.recon_pct, cfg.log_level);
                             h.set_toast_msg(SharedString::from("Settings saved"));
                             h.set_toast_kind(1);
                         }
@@ -3518,6 +3514,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // audit_events from DB are already newest-first; store them reversed so
                     // in-memory order matches the push-then-rev pattern used elsewhere
                     st.audit_events  = audit_events.into_iter().rev().collect();
+                    // Reconciliation state is per-session and client-specific — a
+                    // previously-imported Tally file or match results from another
+                    // client must not silently carry over onto this one.
+                    st.recon_vouchers   = Vec::new();
+                    st.recon_file_label = String::new();
+                    st.recon_csv        = String::new();
                 }
 
                 // Sync AI settings to UI
@@ -3525,6 +3527,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "claude" => 1, "gemini" => 2, _ => 0,
                 });
                 h.set_ai_api_key(SharedString::from(cfg.ai_api_key.as_str()));
+
+                // Reset reconciliation UI back to its pre-import state
+                h.set_recon_file_label(SharedString::from(""));
+                h.set_recon_has_vouchers(false);
+                h.set_recon_has_report(false);
+                h.set_recon_status(SharedString::from(""));
+                h.set_recon_matched(SharedString::from("0"));
+                h.set_recon_likely(SharedString::from("0"));
+                h.set_recon_possible(SharedString::from("0"));
+                h.set_recon_unmatched(SharedString::from("0"));
+                h.set_recon_bank_only(SharedString::from("0"));
 
                 // Load import history
                 let imports = {
@@ -3838,8 +3851,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let db = db_ref.lock().unwrap();
                             if let Some(conn) = db.as_ref() {
                                 match db::add_rule(conn, client_id, &pattern, &vendor, &head, &typ) {
-                                    Ok(_)  => log::info!("[SaveLearn] rule saved: pattern='{}' head='{}' vendor='{}'", pattern, head, vendor),
-                                    Err(e) => log::error!("[SaveLearn] DB error: {}", e),
+                                    Ok(true)  => log::info!("[SaveLearn] rule saved: pattern='{}' head='{}' vendor='{}'", pattern, head, vendor),
+                                    Ok(false) => log::info!("[SaveLearn] rule already exists, skipped: pattern='{}'", pattern),
+                                    Err(e)    => log::error!("[SaveLearn] DB error: {}", e),
                                 }
                             }
                         }

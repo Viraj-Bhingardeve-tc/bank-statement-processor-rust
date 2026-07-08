@@ -161,11 +161,15 @@ export component AppWindow inherits Window {
     in property <string>          export-preview-text: "";
     in property <bool>            wiz-can-export: true;
     // ── Reconcile counters ────────────────────────────────────────────────────
-    in property <string>     recon-matched:    "0";
-    in property <string>     recon-likely:     "0";
-    in property <string>     recon-unmatched:  "0";
-    in property <string>     recon-bank-only:  "0";
-    in property <string>     recon-status:     "";
+    in property <string>     recon-matched:      "0";
+    in property <string>     recon-likely:       "0";
+    in property <string>     recon-possible:     "0";
+    in property <string>     recon-unmatched:    "0";
+    in property <string>     recon-bank-only:    "0";
+    in property <string>     recon-status:       "";
+    in property <string>     recon-file-label:   "";
+    in property <bool>       recon-has-vouchers: false;
+    in property <bool>       recon-has-report:   false;
     // ── Audit trail ───────────────────────────────────────────────────────────
     in property <[string]>   audit-records: [];
     in property <bool>       can-undo:      false;
@@ -216,6 +220,7 @@ export component AppWindow inherits Window {
     callback do-reimport-excel();
     callback do-reset-dedupe();
     callback do-reconcile();
+    callback do-run-reconciliation();
     callback do-batch-monitor();
     callback do-audit-trail(int, int);
     callback do-settings();
@@ -259,6 +264,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings-recon-days:      "3";
     in-out property <string> settings-recon-pct:       "0.5";
     in-out property <int>    settings-log-level:       0;
+    in-out property <int>    settings-state-idx:       0;
 
     // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
@@ -390,9 +396,13 @@ export component AppWindow inherits Window {
         wiz-can-export:        root.wiz-can-export;
         recon-matched:         root.recon-matched;
         recon-likely:          root.recon-likely;
+        recon-possible:        root.recon-possible;
         recon-unmatched:       root.recon-unmatched;
         recon-bank-only:       root.recon-bank-only;
         recon-status:          root.recon-status;
+        recon-file-label:      root.recon-file-label;
+        recon-has-vouchers:    root.recon-has-vouchers;
+        recon-has-report:      root.recon-has-report;
         audit-records:         root.audit-records;
         can-undo:              root.can-undo;
         undo-last-edit         => { root.do-undo-last-edit(); }
@@ -440,6 +450,7 @@ export component AppWindow inherits Window {
         reimport-excel      => { root.do-reimport-excel();      }
         reset-dedupe        => { root.do-reset-dedupe();        }
         reconcile           => { root.do-reconcile();           }
+        run-reconciliation  => { root.do-run-reconciliation();  }
         open-batch-monitor  => { root.do-batch-monitor();       }
         open-audit-trail(a, t) => { root.do-audit-trail(a, t);  }
         open-settings       => { root.do-settings();            }
@@ -475,5 +486,6 @@ export component AppWindow inherits Window {
         settings-recon-days      <=> root.settings-recon-days;
         settings-recon-pct       <=> root.settings-recon-pct;
         settings-log-level       <=> root.settings-log-level;
+        settings-state-idx       <=> root.settings-state-idx;
     }
 }

@@ -28,6 +28,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::amount_parser::{parse_amount, parse_amount_str, CellValue};
+use super::bank_detection::{detect, DetectOptions};
 use super::column_detector::detect_excel_cols;
 use super::date_parser::{normalize_excel_date, normalize_transaction_date};
 use super::noise_filter::is_noise_row;
@@ -820,6 +821,47 @@ pub fn extract_sheet_from_grid(
 
 // ── Top-level file entry point ────────────────────────────────────────────────
 
+/// Backfills `result.bank_name`/`result.account_no` (and the same fields on
+/// every transaction that doesn't already carry one) via `bank_detection::detect`.
+///
+/// `extract_sheet_from_grid` deliberately leaves these blank — see its
+/// `bank_name: String::new()` comment — because bank detection needs the raw
+/// sheet text plus the source file name, which only the caller has. This
+/// mirrors `pdf_parser::parse_pdf_rows`'s equivalent post-extraction step
+/// (header/full text + narrations fed into the same `detect()` call), which
+/// is why the PDF import path already gets a populated `bank_name` and the
+/// Excel path previously didn't.
+fn apply_bank_detection(result: &mut ParseResult, grid: &[Vec<GridCell>], filename: &str) {
+    let header_text: String = if result.header_row_idx > 0 {
+        grid[..result.header_row_idx].iter()
+            .map(|r| r.iter().map(|c| c.raw_str()).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>().join("\n")
+    } else {
+        String::new()
+    };
+    let full_text: String = grid.iter()
+        .map(|r| r.iter().map(|c| c.raw_str()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>().join("\n");
+    let narrations: Vec<&str> = result.transactions.iter()
+        .filter(|t| !t.is_opening_balance)
+        .map(|t| t.narration.as_str())
+        .collect();
+
+    let detected = detect(DetectOptions {
+        text: &full_text,
+        header_text: &header_text,
+        filename,
+        narrations: &narrations,
+    });
+
+    result.bank_name  = detected.bank_name.clone();
+    result.account_no = detected.account_no.clone();
+    for t in &mut result.transactions {
+        if t.bank_name.is_empty()  { t.bank_name  = detected.bank_name.clone(); }
+        if t.account_no.is_empty() { t.account_no = detected.account_no.clone(); }
+    }
+}
+
 /// Parse an Excel workbook (.xlsx / .xls / .xlsm).
 ///
 /// Iterates sheets in order and returns the first sheet that yields at least
@@ -834,6 +876,8 @@ pub fn parse_excel_file(path: &Path) -> Result<ParseResult> {
         anyhow::bail!("Excel file has no sheets: {}", path.display());
     }
 
+    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+
     for name in &names {
         let range = match workbook.worksheet_range(name) {
             Ok(r)  => r,
@@ -841,12 +885,13 @@ pub fn parse_excel_file(path: &Path) -> Result<ParseResult> {
         };
 
         let grid = grid_from_range(&range);
-        if let Some(result) = extract_sheet_from_grid(&grid, name) {
+        if let Some(mut result) = extract_sheet_from_grid(&grid, name) {
             // Count real transactions (exclude synthetic OB row)
             let real_count = result.transactions.iter()
                 .filter(|t| !t.is_opening_balance)
                 .count();
             if real_count > 0 {
+                apply_bank_detection(&mut result, &grid, filename);
                 return Ok(result);
             }
         }
@@ -1039,6 +1084,57 @@ mod tests {
         let ob = result.transactions.first().expect("at least one row");
         assert!(ob.is_opening_balance, "first row is synthetic OB row");
         assert_eq!(ob.narration, "Opening Balance");
+    }
+
+    // ── Bank detection wiring (Excel path) ────────────────────────────────────
+    //
+    // `extract_sheet_from_grid` alone leaves `bank_name`/`account_no` blank by
+    // design (see its doc comment) — `apply_bank_detection` is what the
+    // top-level `parse_excel_file` runs afterwards to backfill them, mirroring
+    // what `pdf_parser::parse_pdf_rows` already does inline. These tests drive
+    // that helper directly (no real .xlsx file needed) to confirm the wiring
+    // that `parse_excel_file` performs actually detects the bank and stamps
+    // every transaction, including the synthetic opening-balance row.
+
+    #[test]
+    fn excel_path_detects_bank_and_account() {
+        let g = hdfc_grid();
+        let mut result = extract_sheet_from_grid(&g, "Sheet1").expect("should parse");
+        apply_bank_detection(&mut result, &g, "statement.xlsx");
+
+        assert_eq!(result.bank_name, "HDFC Bank");
+        assert!(result.account_no.ends_with("6789"), "account_no = {:?}", result.account_no);
+        assert!(result.account_no.contains('X'), "account number should be masked");
+    }
+
+    #[test]
+    fn excel_path_stamps_bank_name_on_every_transaction() {
+        let g = hdfc_grid();
+        let mut result = extract_sheet_from_grid(&g, "Sheet1").expect("should parse");
+        apply_bank_detection(&mut result, &g, "statement.xlsx");
+
+        assert!(!result.transactions.is_empty());
+        for t in &result.transactions {
+            assert_eq!(t.bank_name, "HDFC Bank", "txn {:?} missing bank_name", t.id);
+        }
+        // Including the synthetic opening-balance row, which `prepend_opening_balance_row`
+        // creates with a blank bank_name before detection runs.
+        assert!(result.transactions[0].is_opening_balance);
+        assert_eq!(result.transactions[0].bank_name, "HDFC Bank");
+    }
+
+    #[test]
+    fn excel_path_falls_back_to_filename_when_no_text_match() {
+        // A sheet with no bank-identifying header text at all should still
+        // pick up a bank name from the file name (lowest-confidence signal).
+        let g = vec![
+            row(&[g_text("Date"), g_text("Narration"), g_text("Debit"), g_text("Credit"), g_text("Balance")]),
+            row(&[g_date(1, 1, 2024), g_text("MISC PAYMENT"), g_num(100.0), g_empty(), g_num(900.0)]),
+        ];
+        let mut result = extract_sheet_from_grid(&g, "Sheet1").expect("should parse");
+        apply_bank_detection(&mut result, &g, "ICICI_Bank_Statement.xlsx");
+
+        assert_eq!(result.bank_name, "ICICI Bank");
     }
 
     // ── Opening / closing balance tests ───────────────────────────────────────

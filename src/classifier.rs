@@ -10,8 +10,24 @@ use crate::db::ClassificationRule;
 /// Run full auto-classification pipeline on all transactions in place.
 /// Applies stored `rules` first, then falls back to keyword heuristics.
 /// `run_dedup`: when false, duplicate detection is skipped.
+/// `gst_enabled`: mirrors `Settings.gst_enabled` ("Enable GST detection" in the
+/// Settings screen) — when false, the richer `gst_engine::analyse()` pass is
+/// skipped entirely (the separate, simpler keyword-based GST/TAX tag from
+/// `detect_gst()` is unaffected, matching the old app's own `_detectGST()`
+/// behavior, which was never gated by the GST engine's own on/off switch).
+/// `gst_auto_ledgers`: mirrors `Settings.gst_auto_ledgers` ("Auto-suggest GST
+/// ledgers") — when false, GST rate/amount/type/tag are still computed and
+/// surfaced (if `gst_enabled`), but a blank `account_head` is not auto-filled
+/// from the GST engine's suggested expense ledger.
 /// Returns the number of transactions whose status changed.
-pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str, rules: &[ClassificationRule], run_dedup: bool) -> usize {
+pub fn classify_all(
+    txns: &mut Vec<Transaction>,
+    bank_ledger: &str,
+    rules: &[ClassificationRule],
+    run_dedup: bool,
+    gst_enabled: bool,
+    gst_auto_ledgers: bool,
+) -> usize {
     let mut changed = 0;
     for t in txns.iter_mut() {
         if t.is_opening_balance { continue; }
@@ -25,7 +41,7 @@ pub fn classify_all(txns: &mut Vec<Transaction>, bank_ledger: &str, rules: &[Cla
         if matches!(t.status, TransactionStatus::Suspense) { continue; }
 
         let before_status = t.status.clone();
-        classify_one(t, bank_ledger, rules);
+        classify_one(t, bank_ledger, rules, gst_enabled, gst_auto_ledgers);
         if t.status != before_status { changed += 1; }
     }
     if run_dedup { detect_duplicates(txns); }
@@ -38,7 +54,13 @@ fn apply_rules<'a>(upper: &str, rules: &'a [ClassificationRule]) -> Option<&'a C
 }
 
 /// Classify a single transaction: stored rules → keyword heuristics.
-fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationRule]) {
+fn classify_one(
+    t: &mut Transaction,
+    bank_ledger: &str,
+    rules: &[ClassificationRule],
+    gst_enabled: bool,
+    gst_auto_ledgers: bool,
+) {
     let upper = t.narration.to_uppercase();
 
     // 1. Stored user rules (highest priority)
@@ -92,22 +114,29 @@ fn classify_one(t: &mut Transaction, bank_ledger: &str, rules: &[ClassificationR
     // 5. Richer GST analysis (rate/vendor-map aware — port of GSTEngine.processBatch),
     // catching GST-applicable vendors by name alone even without an explicit
     // GST/IGST/CGST/SGST keyword, and auto-suggesting an expense ledger when blank.
-    if let Some(gst) = crate::gst_engine::analyse(&t.narration, &t.reference, &t.vendor, t.debit, t.credit) {
-        if !t.tags.contains(&"GST".to_string()) {
-            t.tags.push("GST".to_string());
-        }
-        if t.account_head.is_empty() {
-            if let Some(ledger) = gst.expense_ledger {
-                t.account_head = ledger;
+    // Gated by the Settings screen's "Enable GST detection" toggle.
+    if gst_enabled {
+        if let Some(gst) = crate::gst_engine::analyse(&t.narration, &t.reference, &t.vendor, t.debit, t.credit) {
+            if !t.tags.contains(&"GST".to_string()) {
+                t.tags.push("GST".to_string());
             }
+            // "Auto-suggest GST ledgers" toggle — only the ledger auto-fill is
+            // gated; rate/amount/type are still surfaced whenever GST detection
+            // itself is enabled, since those two settings answer different
+            // questions ("detect GST at all?" vs "let it pick my ledger?").
+            if gst_auto_ledgers && t.account_head.is_empty() {
+                if let Some(ledger) = gst.expense_ledger {
+                    t.account_head = ledger;
+                }
+            }
+            // Surface the rest of the analysis instead of discarding it — these
+            // used to be computed and immediately dropped (see
+            // PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 3). Now
+            // persisted on the transaction and consumed by export/accounting.rs.
+            t.gst_rate   = gst.gst_rate;
+            t.gst_amount = gst.gst_amount;
+            t.gst_type   = gst.gst_type;
         }
-        // Surface the rest of the analysis instead of discarding it — these
-        // used to be computed and immediately dropped (see
-        // PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 3). Now
-        // persisted on the transaction and consumed by export/accounting.rs.
-        t.gst_rate   = gst.gst_rate;
-        t.gst_amount = gst.gst_amount;
-        t.gst_type   = gst.gst_type;
     }
 }
 
@@ -553,7 +582,7 @@ mod tests {
         let mut t = crate::parser::Transaction::new("test");
         t.narration = "AIRTEL POSTPAID BILL".to_string();
         t.debit = Some(999.0);
-        classify_one(&mut t, "Bank Ledger", &[]);
+        classify_one(&mut t, "Bank Ledger", &[], true, true);
         assert_eq!(t.gst_rate, Some(18.0));
         assert!(t.gst_amount.is_some());
         assert!(t.gst_type.is_some());
@@ -565,9 +594,54 @@ mod tests {
         let mut t = crate::parser::Transaction::new("test");
         t.narration = "SALARY CREDIT".to_string();
         t.credit = Some(50000.0);
-        classify_one(&mut t, "Bank Ledger", &[]);
+        classify_one(&mut t, "Bank Ledger", &[], true, true);
         assert_eq!(t.gst_rate, None);
         assert_eq!(t.gst_amount, None);
         assert_eq!(t.gst_type, None);
+    }
+
+    // ── Settings wiring: gst_enabled / gst_auto_ledgers ───────────────────────
+    //
+    // "EXCITEL BILL PAYMENT" is deliberately used here instead of "AIRTEL..."
+    // (used above): AIRTEL is *also* one of `kw_match`'s own telecom keywords
+    // (line ~203), so it sets a non-empty `account_head` on its own, before the
+    // GST block even runs — that would make the ledger-autofill assertions
+    // below meaningless. EXCITEL is only in `gst_engine`'s vendor map, not in
+    // `kw_match`, so `account_head` genuinely starts blank going into the GST
+    // block, isolating what these tests are actually checking.
+
+    #[test]
+    fn gst_disabled_suppresses_engine_analysis_entirely() {
+        let mut t = crate::parser::Transaction::new("test");
+        t.narration = "EXCITEL BILL PAYMENT".to_string();
+        t.debit = Some(999.0);
+        classify_one(&mut t, "Bank Ledger", &[], false, true);
+        assert_eq!(t.gst_rate, None, "GST engine must not run when gst_enabled=false");
+        assert_eq!(t.gst_amount, None);
+        assert_eq!(t.gst_type, None);
+        assert!(!t.tags.contains(&"GST".to_string()));
+        assert!(t.account_head.is_empty(), "no ledger auto-fill from a disabled engine");
+    }
+
+    #[test]
+    fn gst_auto_ledgers_false_still_surfaces_gst_fields_but_skips_ledger_autofill() {
+        let mut t = crate::parser::Transaction::new("test");
+        t.narration = "EXCITEL BILL PAYMENT".to_string();
+        t.debit = Some(999.0);
+        classify_one(&mut t, "Bank Ledger", &[], true, false);
+        assert_eq!(t.gst_rate, Some(18.0), "rate/amount/type still surface when gst_enabled=true");
+        assert!(t.gst_amount.is_some());
+        assert!(t.gst_type.is_some());
+        assert!(t.tags.contains(&"GST".to_string()));
+        assert!(t.account_head.is_empty(), "ledger must not be auto-filled when gst_auto_ledgers=false");
+    }
+
+    #[test]
+    fn gst_auto_ledgers_true_fills_blank_account_head_from_engine_suggestion() {
+        let mut t = crate::parser::Transaction::new("test");
+        t.narration = "EXCITEL BILL PAYMENT".to_string();
+        t.debit = Some(999.0);
+        classify_one(&mut t, "Bank Ledger", &[], true, true);
+        assert_eq!(t.account_head, "Internet Charges");
     }
 }

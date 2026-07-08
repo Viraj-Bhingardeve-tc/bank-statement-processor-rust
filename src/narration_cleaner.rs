@@ -445,7 +445,21 @@ fn score(original: &str, cleaned: &str, party: &str, ptype: &PaymentType) -> f64
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Clean a single narration string.
+///
+/// Equivalent to `clean_with(raw, true)` — kept as the default entry point so
+/// existing callers (and tests) that don't care about the Settings screen's
+/// "Convert to Title Case" toggle keep their exact prior behavior.
 pub fn clean(raw: &str) -> NarrationMeta {
+    clean_with(raw, true)
+}
+
+/// Clean a single narration string, honoring the "Convert to Title Case"
+/// setting (`Settings.narr_title_case`). Mirrors the old Electron engine's
+/// `useTitle` flag: `_toTitleCase()` is skipped on the extracted party and
+/// stripped text when `title_case` is false, but the low-confidence fallback
+/// (which title-cases a truncated slice of the raw original) still applies
+/// regardless — that asymmetry matches the original engine exactly.
+pub fn clean_with(raw: &str, title_case: bool) -> NarrationMeta {
     let original = raw.trim().to_string();
     if original.is_empty() {
         return NarrationMeta {
@@ -458,8 +472,9 @@ pub fn clean(raw: &str) -> NarrationMeta {
     let payment_ref = extract_ref(&original);
     let stripped    = strip_noise(&original);
     let party_raw   = extract_party(&stripped);
-    let party       = to_title_case(&party_raw);
-    let cleaned_str = build_cleaned(&party, &ptype, &to_title_case(&stripped));
+    let party       = if title_case { to_title_case(&party_raw) } else { party_raw };
+    let stripped_display = if title_case { to_title_case(&stripped) } else { stripped.clone() };
+    let cleaned_str = build_cleaned(&party, &ptype, &stripped_display);
     let confidence  = score(&original, &cleaned_str, &party, &ptype).min(0.99);
 
     let txn_type = format!("{:?}", ptype)
@@ -478,7 +493,12 @@ pub fn clean(raw: &str) -> NarrationMeta {
 /// Clean a batch of transactions, returning cleaned narration strings.
 /// Returns `(cleaned_narration, party_suggestion)` for each input.
 pub fn clean_batch(narrations: &[String]) -> Vec<NarrationMeta> {
-    narrations.iter().map(|n| clean(n)).collect()
+    clean_batch_with(narrations, true)
+}
+
+/// Batch form of [`clean_with`] — see its docs for what `title_case` controls.
+pub fn clean_batch_with(narrations: &[String], title_case: bool) -> Vec<NarrationMeta> {
+    narrations.iter().map(|n| clean_with(n, title_case)).collect()
 }
 
 #[cfg(test)]
@@ -520,5 +540,43 @@ mod tests {
     fn to_title_case_basic() {
         assert_eq!(to_title_case("AIRTEL INDIA"), "Airtel India");
         assert_eq!(to_title_case("HDFC BANK"), "HDFC BANK");
+    }
+
+    // ── Settings wiring: narr_title_case ──────────────────────────────────────
+
+    // "RAMESH KUMAR" is deliberately not in VENDOR_DICT (unlike e.g. "TATA" or
+    // "AMAZON", which short-circuit extract_party() to a fixed canonical
+    // string regardless of title_case) — its word-scoring path returns the
+    // raw uppercase words verbatim, so to_title_case() actually has something
+    // to do, making it a real test of the title_case flag rather than a no-op.
+
+    #[test]
+    fn clean_with_title_case_true_matches_default_clean() {
+        let narr = "UPI/CR/234567890123/RAMESH KUMAR";
+        assert_eq!(clean_with(narr, true).cleaned, clean(narr).cleaned);
+        assert_eq!(clean_with(narr, true).party, clean(narr).party);
+    }
+
+    #[test]
+    fn clean_with_title_case_false_keeps_upper_case_party() {
+        let narr = "UPI/CR/234567890123/RAMESH KUMAR";
+        let titled   = clean_with(narr, true);
+        let untitled = clean_with(narr, false);
+        assert_eq!(titled.party, "Ramesh Kumar");
+        assert_eq!(untitled.party, "RAMESH KUMAR", "title_case=false must skip to_title_case on the party");
+        assert_ne!(titled.cleaned, untitled.cleaned);
+    }
+
+    #[test]
+    fn clean_batch_with_threads_title_case_through_every_entry() {
+        let batch = vec![
+            "UPI/CR/234567890123/RAMESH KUMAR".to_string(),
+            "UPI/DR/2394823/AMAZON SELLER PAYMEN/AxisB".to_string(),
+        ];
+        let untitled = clean_batch_with(&batch, false);
+        assert_eq!(untitled[0].party, "RAMESH KUMAR");
+        // Amazon comes from the vendor dict's canonical spelling, not from
+        // to_title_case(), so it's unaffected by the flag either way.
+        assert!(untitled[1].party.to_uppercase().contains("AMAZON"));
     }
 }

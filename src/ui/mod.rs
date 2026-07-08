@@ -103,7 +103,12 @@ pub struct AppState {
     // Undo stack — most recent edit at the end (pop from end = undo last)
     pub undo_stack: Vec<UndoEntry>,
 
-    // Reconcile — CSV text built after the last run; empty until first reconcile
+    // Reconcile — vouchers parsed from the last "Import Tally Export" click,
+    // kept around so "Run Reconciliation" can (re-)match against them without
+    // re-picking the file (e.g. after tweaking the recon tolerance settings).
+    pub recon_vouchers:   Vec<crate::reconciliation::Voucher>,
+    pub recon_file_label: String,
+    // CSV text built after the last successful reconciliation run; empty until then.
     pub recon_csv: String,
 
     // PDF password — path waiting for a password prompt

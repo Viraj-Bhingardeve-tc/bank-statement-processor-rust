@@ -2,6 +2,18 @@
 
 mod encryption;
 pub use encryption::diagnostics;
+// Test-only: every test anywhere in the crate that opens a real (non
+// `:memory:`) database file touches the same OS-keyring-backed encryption
+// key, so all such tests must serialize on this one lock or they race each
+// other (a concurrently-running test regenerating/rotating the shared
+// keyring entry mid-encrypt/decrypt in another test — this is exactly what
+// caused an intermittent "unreadable with the stored key" failure in
+// `migration`'s tests once they started running alongside the rest of the
+// suite instead of in isolation). Re-exported `pub(crate)` since the lock
+// itself lives in the private `encryption` submodule, which isn't reachable
+// from sibling modules like `migration` otherwise.
+#[cfg(test)]
+pub(crate) use encryption::ENCRYPTION_KEYRING_TEST_LOCK;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -369,16 +381,20 @@ pub fn delete_import(conn: &Connection, import_id: i64) -> Result<()> {
 
 // ── Dedup hash CRUD ───────────────────────────────────────────────────────────
 
+/// Insert a classification rule, silently skipping it if a rule with the same
+/// `(client_id, pattern)` already exists (case-insensitively — enforced by
+/// `idx_classification_rules_unique`, migration 4). Returns `true` if a new
+/// row was actually inserted, `false` if it was a duplicate and got ignored.
 pub fn add_rule(
     conn: &Connection, client_id: i64,
     pattern: &str, vendor: &str, account_head: &str, txn_type: &str,
-) -> Result<()> {
-    conn.execute(
+) -> Result<bool> {
+    let rows = conn.execute(
         "INSERT OR IGNORE INTO classification_rules (client_id, pattern, vendor, account_head, txn_type)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![client_id, pattern, vendor, account_head, txn_type],
     ).context("add_rule")?;
-    Ok(())
+    Ok(rows > 0)
 }
 
 pub fn get_rules(conn: &Connection, client_id: i64) -> Result<Vec<ClassificationRule>> {
@@ -445,12 +461,18 @@ pub fn import_rules_json(conn: &Connection, client_id: i64, json: &str) -> Resul
         let head     = cap.get(3).map_or("", |m| m.as_str());
         let typ      = cap.get(4).map_or("", |m| m.as_str());
         if pattern.is_empty() { continue; }
-        conn.execute(
-            "INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type, priority)
+        // OR IGNORE: a backup file can itself contain two entries for the same
+        // (client_id, pattern) — e.g. re-exported after migration 4 landed, or
+        // hand-edited — and restoring it must not abort the whole import over
+        // one duplicate row (the client's own rules were just wiped above by
+        // the DELETE, so there's no pre-existing-row collision to worry about,
+        // only intra-file duplicates).
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO classification_rules (client_id, pattern, vendor, account_head, txn_type, priority)
              VALUES (?1, ?2, ?3, ?4, ?5, 1)",
             rusqlite::params![client_id, pattern, vendor, head, typ],
         ).context("import_rules_json insert")?;
-        count += 1;
+        count += inserted;
     }
     Ok(count)
 }
@@ -635,6 +657,26 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, "ALTER TABLE transactions ADD COLUMN gst_rate REAL;
          ALTER TABLE transactions ADD COLUMN gst_amount REAL;
          ALTER TABLE transactions ADD COLUMN gst_type TEXT;"),
+    // `classification_rules` never had a UNIQUE constraint, so `add_rule`'s
+    // `INSERT OR IGNORE` was a silent no-op and duplicate rules (same
+    // client_id + pattern, differing only by case) could accumulate without
+    // limit — see PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 18.
+    // The DELETE runs first so a database that already accumulated
+    // duplicates before this fix can still have the index created afterwards
+    // (SQLite would otherwise refuse to build a UNIQUE index over existing
+    // conflicting rows) — it keeps the lowest `id` per (client_id, pattern)
+    // group, i.e. the first rule ever learned for that pattern, matching
+    // `add_rule`'s original "first one wins" INSERT OR IGNORE intent.
+    // COLLATE NOCASE mirrors `apply_rules`'s own case-insensitive matching
+    // (`upper.contains(&r.pattern.to_uppercase())`) so "Amazon" and "AMAZON"
+    // count as the same rule, not two.
+    (4, "DELETE FROM classification_rules
+          WHERE id NOT IN (
+              SELECT MIN(id) FROM classification_rules
+              GROUP BY client_id, pattern COLLATE NOCASE
+          );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_rules_unique
+             ON classification_rules(client_id, pattern COLLATE NOCASE);"),
 ];
 
 /// The highest migration version every database created by a pre-migration-
@@ -927,6 +969,176 @@ mod tests {
         ];
         apply_migrations(&conn, synthetic, 2).expect("must not replay 1/2 against a legacy DB");
         assert_eq!(user_version(&conn), 2, "user_version must settle, not stay 0 forever");
+    }
+
+    #[test]
+    fn migration_4_dedupes_pre_existing_duplicate_rules_before_indexing() {
+        // Reproduces the real-world bug: a database created before migration 4
+        // existed could already have accumulated duplicate (client_id, pattern)
+        // rows, because `add_rule`'s "INSERT OR IGNORE" had no constraint to
+        // bounce against. Simulate that state directly (bypassing add_rule),
+        // then confirm the migration both cleans up the existing duplicates
+        // AND successfully builds the unique index afterwards — if the DELETE
+        // step didn't run first, `CREATE UNIQUE INDEX` would fail outright on
+        // this data.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        conn.pragma_update(None, "user_version", 3i64).unwrap();
+        let client_id  = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+        let other_client = add_client(&conn, "Beta Co", "Beta Ledger").expect("add_client 2");
+
+        // Three duplicate rows for the same (client_id, pattern) — including a
+        // case-variant — plus one genuinely distinct rule and one belonging to
+        // a different client that happens to share the same pattern text.
+        conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'AMAZON', 'Amazon', 'Office Expense', 'Payment')", rusqlite::params![client_id]).unwrap();
+        let dup_id_2: i64 = { conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'Amazon', 'Amazon Retail', 'Shopping', 'Payment')", rusqlite::params![client_id]).unwrap(); conn.last_insert_rowid() };
+        let dup_id_3: i64 = { conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'amazon', 'Amazon Pay', 'Software Expense', 'Payment')", rusqlite::params![client_id]).unwrap(); conn.last_insert_rowid() };
+        conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'SWIGGY', 'Swiggy', 'Food Expense', 'Payment')", rusqlite::params![client_id]).unwrap();
+        conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'AMAZON', 'Amazon (other client)', 'Office Expense', 'Payment')", rusqlite::params![other_client]).unwrap();
+
+        let count_before: i64 = conn.query_row("SELECT COUNT(*) FROM classification_rules", [], |r| r.get(0)).unwrap();
+        assert_eq!(count_before, 5);
+
+        apply_migrations(&conn, MIGRATIONS, 3).expect("migration 4 must dedupe and index cleanly");
+        assert_eq!(user_version(&conn), latest_migration_version());
+
+        let count_after: i64 = conn.query_row("SELECT COUNT(*) FROM classification_rules", [], |r| r.get(0)).unwrap();
+        assert_eq!(count_after, 3, "3 AMAZON duplicates for client_id must collapse to 1, leaving AMAZON(client) + SWIGGY(client) + AMAZON(other client)");
+
+        // The lowest id (first-ever-learned) among the 3 duplicates must be the survivor.
+        let surviving_id: i64 = conn.query_row(
+            "SELECT id FROM classification_rules WHERE client_id = ?1 AND pattern = 'AMAZON' COLLATE NOCASE",
+            rusqlite::params![client_id], |r| r.get(0),
+        ).unwrap();
+        assert!(surviving_id < dup_id_2 && surviving_id < dup_id_3);
+
+        // The other client's row with the same pattern text must have survived untouched.
+        let other_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1",
+            rusqlite::params![other_client], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(other_count, 1, "same pattern under a different client_id is not a duplicate");
+
+        // The unique index must now genuinely reject a fresh duplicate insert attempt.
+        let raw_insert = conn.execute(
+            "INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'AMAZON', 'x', 'y', 'z')",
+            rusqlite::params![client_id],
+        );
+        assert!(raw_insert.is_err(), "unique index must reject a plain duplicate INSERT after migration 4");
+    }
+
+    #[test]
+    fn add_rule_returns_true_on_first_insert_false_on_duplicate() {
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+
+        let first = add_rule(&conn, client_id, "AMAZON", "Amazon", "Office Expense", "Payment").expect("first add_rule");
+        assert!(first, "first insert of a new pattern must report true");
+
+        let second = add_rule(&conn, client_id, "AMAZON", "Different Vendor", "Different Head", "Receipt").expect("second add_rule");
+        assert!(!second, "re-adding the same (client_id, pattern) must report false, not duplicate the row");
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1 AND pattern = 'AMAZON'",
+            rusqlite::params![client_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "exactly one row must exist despite two add_rule calls");
+    }
+
+    #[test]
+    fn add_rule_duplicate_detection_is_case_insensitive() {
+        // Mirrors `apply_rules`'s own case-insensitive matching
+        // (`upper.contains(&r.pattern.to_uppercase())`) — "Amazon" and "AMAZON"
+        // are the same rule from the classifier's point of view, so they must
+        // be the same row in the database too.
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+
+        assert!(add_rule(&conn, client_id, "Amazon", "Amazon", "Office Expense", "Payment").expect("first"));
+        assert!(!add_rule(&conn, client_id, "AMAZON", "x", "y", "z").expect("second"), "case-variant pattern must be treated as a duplicate");
+        assert!(!add_rule(&conn, client_id, "amazon", "x", "y", "z").expect("third"), "lowercase variant must also be treated as a duplicate");
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1",
+            rusqlite::params![client_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn add_rule_same_pattern_different_client_is_not_a_duplicate() {
+        let conn = open(":memory:").expect("open");
+        let client_a = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client a");
+        let client_b = add_client(&conn, "Beta Co", "Beta Ledger").expect("add_client b");
+
+        assert!(add_rule(&conn, client_a, "AMAZON", "Amazon", "Office Expense", "Payment").expect("client a"));
+        assert!(add_rule(&conn, client_b, "AMAZON", "Amazon", "Office Expense", "Payment").expect("client b"),
+            "the same pattern for a different client_id is a distinct rule, not a duplicate");
+    }
+
+    #[test]
+    fn import_rules_json_skips_duplicate_patterns_within_the_same_backup() {
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+
+        let json = r#"{"version":1,"rules":[
+            {"pattern":"AMAZON","vendor":"Amazon","account_head":"Office Expense","txn_type":"Payment"},
+            {"pattern":"AMAZON","vendor":"Amazon Dup","account_head":"Shopping","txn_type":"Payment"},
+            {"pattern":"SWIGGY","vendor":"Swiggy","account_head":"Food Expense","txn_type":"Payment"}
+        ]}"#;
+
+        // Must not error out over the duplicate AMAZON entry — restoring a
+        // backup that happens to contain a repeated pattern degrades
+        // gracefully (keeps the first occurrence) instead of aborting.
+        let count = import_rules_json(&conn, client_id, json).expect("import_rules_json must tolerate intra-file duplicates");
+        assert_eq!(count, 2, "only the 2 genuinely distinct patterns should be counted as inserted");
+
+        let rules = get_rules(&conn, client_id).expect("get_rules");
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn import_ledgers_inserts_new_entries_and_reports_count() {
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+
+        let entries = vec![
+            ("Cash".to_string(), "Cash-in-Hand".to_string()),
+            ("HDFC Bank".to_string(), "Bank Accounts".to_string()),
+        ];
+        let added = import_ledgers(&conn, client_id, &entries).expect("import_ledgers");
+        assert_eq!(added, 2, "both new ledger rows should be counted as added");
+    }
+
+    #[test]
+    fn import_ledgers_skips_duplicates_across_calls() {
+        let conn = open(":memory:").expect("open");
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+
+        let first_batch = vec![("Cash".to_string(), "Cash-in-Hand".to_string())];
+        let added_first = import_ledgers(&conn, client_id, &first_batch).expect("first import");
+        assert_eq!(added_first, 1);
+
+        // Re-importing the same name (e.g. re-running the same file) must not
+        // duplicate the row or count it as newly added.
+        let second_batch = vec![
+            ("Cash".to_string(), "Cash-in-Hand".to_string()),
+            ("Sales Account".to_string(), "Sales Accounts".to_string()),
+        ];
+        let added_second = import_ledgers(&conn, client_id, &second_batch).expect("second import");
+        assert_eq!(added_second, 1, "only the genuinely new 'Sales Account' row should count");
+    }
+
+    #[test]
+    fn import_ledgers_scopes_uniqueness_per_client() {
+        let conn = open(":memory:").expect("open");
+        let client_a = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client a");
+        let client_b = add_client(&conn, "Beta Co", "Beta Ledger").expect("add_client b");
+
+        let entries = vec![("Cash".to_string(), "Cash-in-Hand".to_string())];
+        import_ledgers(&conn, client_a, &entries).expect("import for client a");
+        let added_b = import_ledgers(&conn, client_b, &entries).expect("import for client b");
+        assert_eq!(added_b, 1, "same ledger name for a different client is not a duplicate");
     }
 
     #[test]

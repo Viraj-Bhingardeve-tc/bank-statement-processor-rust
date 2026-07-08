@@ -7,3 +7,9 @@ pub mod db;
 pub mod narration_cleaner;
 pub mod tally_group_engine;
 pub mod gst_engine;
+pub mod settings;
+pub mod reconciliation;
+pub mod auth;
+pub mod ui;
+#[cfg(feature = "ai")]
+pub mod ai_classifier;
