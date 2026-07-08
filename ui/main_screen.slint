@@ -857,6 +857,19 @@ export component MainScreen inherits Rectangle {
     in property <string>     recon-file-label:   "";
     in property <bool>       recon-has-vouchers: false;
     in property <bool>       recon-has-report:   false;
+    // ── Legacy data migration ──────────────────────────────────────────────
+    in property <string>     migration-file-label:   "";
+    in property <string>     migration-preview-text: "";
+    in property <bool>       migration-has-preview:  false;
+    in property <bool>       migration-running:      false;
+    in property <string>     migration-status:       "";
+    in property <float>      migration-pct:          0;
+    in property <bool>       migration-has-report:   false;
+    in property <string>     migration-report-text:  "";
+    in property <bool>       migration-success:      false;
+    callback migration-pick-file();
+    callback migration-run();
+    callback migration-save-report();
     // Audit trail records (set by Rust in do-audit-trail)
     in property <[string]>   audit-records: [];
     in property <bool>       can-undo:      false;
@@ -2034,6 +2047,21 @@ export component MainScreen inherits Rectangle {
                             Text { text: "Clear All Logs"; font-size: 11px; color: white;
                                    horizontal-alignment: center; vertical-alignment: center; }
                         }
+                        Rectangle { height: 1px; background: #E3F2FD; }
+                        Text { text: "DATA MIGRATION"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
+                        Text {
+                            text: "Moving from the old desktop app? Import your clients, rules, ledgers, transaction history, and settings in one step.";
+                            font-size: 11px; color: #546E7A; wrap: word-wrap; width: 640px;
+                        }
+                        Rectangle {
+                            height: 30px; width: 190px;
+                            background: #1565C0; border-radius: 4px;
+                            accessible-role: button;
+                            accessible-label: "Import Legacy Data";
+                            TouchArea { clicked => { root.modal-state = "migration"; } }
+                            Text { text: "Import Legacy Data\u{2026}"; font-size: 11px; color: white;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
                     }
                 }
                 MFtr {
@@ -2552,6 +2580,91 @@ export component MainScreen inherits Rectangle {
                     }
                 }
                 MFtr {
+                    MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // ── Legacy Data Migration ───────────────────────────────────────────────────
+    if root.modal-state == "migration" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { } }
+        Rectangle {
+            x: (parent.width - 700px) / 2; y: (parent.height - 520px) / 2;
+            width: 700px; height: 520px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "Import Legacy Data"; close => { root.modal-state = ""; } }
+                VerticalBox { padding: 14px; spacing: 8px; vertical-stretch: 1;
+                    Text {
+                        text: "Select the JSON export from the old desktop app's DevTools console (see the app's migration guide for the one-line export command). A full backup of this app's database is taken automatically before anything is written.";
+                        font-size: 12px; color: #546E7A; wrap: word-wrap; width: parent.width;
+                    }
+                    HorizontalBox { padding: 0px; spacing: 8px; height: 36px;
+                        MBtn {
+                            text: "Select Export File\u{2026}"; bg: #F5F5F5; fg: #37474F;
+                            enabled: !root.migration-running;
+                            clicked => { root.migration-pick-file(); }
+                        }
+                        Text {
+                            text: root.migration-file-label == "" ? "No file selected" : root.migration-file-label;
+                            font-size: 12px; color: #888888; vertical-alignment: center; horizontal-stretch: 1;
+                        }
+                        MBtn {
+                            text: "Start Migration"; bg: #2E7D32; fg: white;
+                            enabled: root.migration-has-preview && !root.migration-running;
+                            clicked => { root.migration-run(); }
+                        }
+                    }
+                    // Progress
+                    if root.migration-running : Rectangle {
+                        height: 46px; background: #E3F2FD; border-radius: 6px;
+                        VerticalBox { padding: 8px; spacing: 4px;
+                            Text { text: root.migration-status; font-size: 11px; color: #1565C0; }
+                            Rectangle {
+                                height: 6px; background: #C5D9F0; border-radius: 3px;
+                                Rectangle {
+                                    x: 0px; y: 0px; height: 100%;
+                                    width: parent.width * (root.migration-pct / 100.0);
+                                    background: #1565C0; border-radius: 3px;
+                                }
+                            }
+                        }
+                    }
+                    // Content area — preview counts before running, full report after
+                    Rectangle {
+                        vertical-stretch: 1; background: #F5F5F5;
+                        border-radius: 4px; border-width: 1px; border-color: #E0E0E0;
+                        if !root.migration-has-preview && !root.migration-has-report : Text {
+                            text: "Select an export file to preview what will be imported.";
+                            font-size: 13px; color: #888888; horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        if root.migration-has-preview && !root.migration-has-report : Text {
+                            text: root.migration-preview-text;
+                            font-size: 12px; color: #37474F; wrap: word-wrap;
+                            x: 10px; y: 10px; width: parent.width - 20px;
+                        }
+                        if root.migration-has-report : ScrollView {
+                            width: 100%; height: 100%;
+                            Text {
+                                text: root.migration-report-text;
+                                font-size: 11px; color: root.migration-success ? #2E7D32 : #C62828;
+                                wrap: word-wrap;
+                                x: 10px; width: 650px;
+                            }
+                        }
+                    }
+                }
+                MFtr {
+                    MBtn {
+                        text: "Save Full Report\u{2026}"; bg: #F5F5F5; fg: #546E7A;
+                        enabled: root.migration-has-report;
+                        clicked => { root.migration-save-report(); }
+                    }
                     MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }

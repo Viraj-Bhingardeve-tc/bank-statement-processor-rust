@@ -170,6 +170,19 @@ export component AppWindow inherits Window {
     in property <string>     recon-file-label:   "";
     in property <bool>       recon-has-vouchers: false;
     in property <bool>       recon-has-report:   false;
+    // ── Legacy data migration ──────────────────────────────────────────────────
+    in property <string>     migration-file-label:   "";
+    in property <string>     migration-preview-text: "";
+    in property <bool>       migration-has-preview:  false;
+    in property <bool>       migration-running:      false;
+    in property <string>     migration-status:       "";
+    in property <float>      migration-pct:          0;
+    in property <bool>       migration-has-report:   false;
+    in property <string>     migration-report-text:  "";
+    in property <bool>       migration-success:      false;
+    callback do-migration-pick-file();
+    callback do-migration-run();
+    callback do-migration-save-report();
     // ── Audit trail ───────────────────────────────────────────────────────────
     in property <[string]>   audit-records: [];
     in property <bool>       can-undo:      false;
@@ -403,6 +416,15 @@ export component AppWindow inherits Window {
         recon-file-label:      root.recon-file-label;
         recon-has-vouchers:    root.recon-has-vouchers;
         recon-has-report:      root.recon-has-report;
+        migration-file-label:   root.migration-file-label;
+        migration-preview-text: root.migration-preview-text;
+        migration-has-preview:  root.migration-has-preview;
+        migration-running:      root.migration-running;
+        migration-status:       root.migration-status;
+        migration-pct:          root.migration-pct;
+        migration-has-report:   root.migration-has-report;
+        migration-report-text:  root.migration-report-text;
+        migration-success:      root.migration-success;
         audit-records:         root.audit-records;
         can-undo:              root.can-undo;
         undo-last-edit         => { root.do-undo-last-edit(); }
@@ -451,6 +473,9 @@ export component AppWindow inherits Window {
         reset-dedupe        => { root.do-reset-dedupe();        }
         reconcile           => { root.do-reconcile();           }
         run-reconciliation  => { root.do-run-reconciliation();  }
+        migration-pick-file => { root.do-migration-pick-file(); }
+        migration-run        => { root.do-migration-run();        }
+        migration-save-report => { root.do-migration-save-report(); }
         open-batch-monitor  => { root.do-batch-monitor();       }
         open-audit-trail(a, t) => { root.do-audit-trail(a, t);  }
         open-settings       => { root.do-settings();            }

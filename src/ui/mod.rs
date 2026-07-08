@@ -111,6 +111,12 @@ pub struct AppState {
     // CSV text built after the last successful reconciliation run; empty until then.
     pub recon_csv: String,
 
+    // Legacy data migration — export file picked by "Select Export File…",
+    // kept around so "Start Migration" doesn't need to re-pick it, and the
+    // full report text from the last run (for "Save Full Report…").
+    pub migration_export_path: Option<std::path::PathBuf>,
+    pub migration_report_md:   String,
+
     // PDF password — path waiting for a password prompt
     pub pending_pdf_path: Option<std::path::PathBuf>,
     pub pending_pdf_name: String,

@@ -25,7 +25,7 @@
 // copy instead removes the duplicate test binary entirely, closing the race
 // at its root instead of trying to widen the lock's reach across processes.
 use bank_statement_processor::{
-    auth, analytics, classifier, db, export, narration_cleaner,
+    auth, analytics, classifier, db, export, migration, narration_cleaner,
     tally_group_engine, parser, reconciliation, settings, ui,
 };
 #[cfg(feature = "ai")]
@@ -2950,6 +2950,188 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Err(e) = db::push_audit_event(conn, cid, &event_str) {
                             log::error!("[Audit] failed to persist audit event: {}", e);
                         }
+                    }
+                }
+            });
+        }
+
+        // ── Legacy Data Migration: step 1 — pick + preview the export file ─────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_migration_pick_file(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let path = match rfd::FileDialog::new()
+                    .set_title("Select Legacy Export (JSON)")
+                    .add_filter("JSON", &["json"])
+                    .pick_file()
+                { Some(p) => p, None => return };
+
+                match migration::preview(&path) {
+                    Ok(detected) => {
+                        let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("export.json").to_string();
+                        let mut lines = vec![format!("File: {}", file_name), String::new(), "Found:".to_string()];
+                        for (name, count) in &detected.entity_counts {
+                            lines.push(format!("  \u{2022} {}: {}", name, count));
+                        }
+                        if detected.is_empty() {
+                            lines.push(String::new());
+                            lines.push("Warning: no records found in any recognized category. Check that this is the right file.".to_string());
+                        }
+                        let preview_text = lines.join("\n");
+                        {
+                            let mut st = state_ref.lock().unwrap();
+                            st.migration_export_path = Some(path.clone());
+                        }
+                        h.set_migration_file_label(SharedString::from(file_name.as_str()));
+                        h.set_migration_preview_text(SharedString::from(preview_text.as_str()));
+                        h.set_migration_has_preview(true);
+                        h.set_migration_has_report(false);
+                    }
+                    Err(e) => {
+                        log::error!("[Migration] preview failed: {}", e);
+                        h.set_toast_msg(SharedString::from(format!("Could not read export file: {}", e).as_str()));
+                        h.set_toast_kind(2);
+                        h.set_migration_has_preview(false);
+                    }
+                }
+            });
+        }
+
+        // ── Legacy Data Migration: step 2 — run it ──────────────────────────────
+        // Runs on a background thread (mirrors the OCR pattern) since a real
+        // migration touches disk (backup copy + potentially thousands of
+        // transaction rows) and must not freeze the UI. `migration::migrate`
+        // owns its own DB connection lifecycle (see its doc comment) — this
+        // app's live connection is closed before the call and a fresh one
+        // reopened after, since SQLite runs in WAL mode here and replacing
+        // the on-disk files underneath an open connection is not safe.
+        {
+            let handle     = app.as_weak();
+            let state_ref  = app_state.clone();
+            let db_ref     = db_conn.clone();
+            let db_path_mg = db_path.clone();
+            app.on_do_migration_run(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let export_path = state_ref.lock().unwrap().migration_export_path.clone();
+                let Some(export_path) = export_path else {
+                    h.set_toast_msg(SharedString::from("Select an export file first"));
+                    h.set_toast_kind(2);
+                    return;
+                };
+
+                h.set_migration_running(true);
+                h.set_migration_pct(0.0);
+                h.set_migration_status(SharedString::from("Starting\u{2026}"));
+                h.set_migration_has_report(false);
+
+                {
+                    let mut db = db_ref.lock().unwrap();
+                    *db = None;
+                }
+
+                let handle2    = handle.clone();
+                let db_ref2    = db_ref.clone();
+                let db_path2   = db_path_mg.clone();
+                let state_ref2 = state_ref.clone();
+                std::thread::spawn(move || {
+                    let progress_handle = handle2.clone();
+                    let report = migration::migrate(
+                        &export_path,
+                        &db_path2,
+                        &migration::MigrationOptions::default(),
+                        move |phase| {
+                            let h   = progress_handle.clone();
+                            let msg = phase.to_string();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(h) = h.upgrade() {
+                                    h.set_migration_status(SharedString::from(msg.as_str()));
+                                }
+                            });
+                        },
+                    );
+
+                    // Reopen the app's live connection regardless of outcome
+                    // — callers must never leave db_ref permanently empty.
+                    let reopened = db::open(&db_path2);
+                    if let Err(e) = &reopened {
+                        log::error!("[Migration] failed to reopen the database after migrating: {}", e);
+                    }
+                    {
+                        let mut db = db_ref2.lock().unwrap();
+                        *db = reopened.ok();
+                    }
+
+                    let db_ref3 = db_ref2.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(h2) = handle2.upgrade() else { return };
+                        h2.set_migration_running(false);
+                        match report {
+                            Ok(r) => {
+                                let md = r.to_markdown();
+                                {
+                                    let mut st = state_ref2.lock().unwrap();
+                                    st.migration_report_md = md.clone();
+                                }
+                                h2.set_migration_report_text(SharedString::from(md.as_str()));
+                                h2.set_migration_success(r.success);
+                                h2.set_migration_has_report(true);
+                                h2.set_toast_msg(SharedString::from(r.one_line_summary().as_str()));
+                                h2.set_toast_kind(if r.success { 1 } else { 2 });
+                                log::info!("[Migration] {}", r.one_line_summary());
+                            }
+                            Err(e) => {
+                                log::error!("[Migration] hard failure: {}", e);
+                                h2.set_toast_msg(SharedString::from(format!("Migration could not run: {}", e).as_str()));
+                                h2.set_toast_kind(2);
+                            }
+                        }
+
+                        // Refresh the client dropdown — migration may have
+                        // added new clients that should appear immediately.
+                        let db = db_ref3.lock().unwrap();
+                        if let Some(conn) = db.as_ref() {
+                            if let Ok(clients) = db::get_clients(conn) {
+                                let names: Vec<SharedString> =
+                                    std::iter::once(SharedString::from("-- Select Client --"))
+                                    .chain(clients.iter().map(|c| SharedString::from(c.name.as_str())))
+                                    .collect();
+                                h2.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                            }
+                        }
+                    });
+                });
+            });
+        }
+
+        // ── Legacy Data Migration: save the full report to disk ────────────────
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_migration_save_report(move || {
+                let h  = match handle.upgrade() { Some(h) => h, None => return };
+                let md = state_ref.lock().unwrap().migration_report_md.clone();
+                if md.is_empty() {
+                    h.set_toast_msg(SharedString::from("Run a migration first"));
+                    h.set_toast_kind(2);
+                    return;
+                }
+                let path = match rfd::FileDialog::new()
+                    .set_title("Save Migration Report")
+                    .set_file_name("migration-report.md")
+                    .add_filter("Markdown", &["md"])
+                    .save_file()
+                { Some(p) => p, None => return };
+
+                match std::fs::write(&path, md) {
+                    Ok(_) => {
+                        h.set_toast_msg(SharedString::from(format!("Report saved to {}", path.display()).as_str()));
+                        h.set_toast_kind(1);
+                    }
+                    Err(e) => {
+                        log::error!("[Migration] failed to save report: {}", e);
+                        h.set_toast_msg(SharedString::from("Could not save the report file"));
+                        h.set_toast_kind(2);
                     }
                 }
             });
