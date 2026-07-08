@@ -14,13 +14,17 @@ pub struct BatchFileResult {
     pub err_msg: String,
 }
 
-/// State for a batch-folder import that's paused waiting for a PDF password.
+/// State for a batch-folder import that's paused waiting for a PDF password
+/// — or for a user-requested pause/abort (see `paused`/`aborted` below).
 /// Old app's batch loop can `await` a per-file password prompt inline
-/// (parser.js, single-threaded async); Rust's batch loop runs synchronously
-/// on the UI thread, so a password-protected file instead saves its
-/// in-progress accumulators here, shows the password modal (reusing
-/// `pending_pdf_path`/`pending_pdf_name`), and resumes from `remaining` once
-/// `on_do_pdf_pwd_confirm`/`on_do_pdf_pwd_cancel` fires.
+/// (parser.js, single-threaded async); Rust's batch loop runs one file per
+/// `continue_batch` call, rescheduling itself via a zero-delay Slint timer
+/// instead of looping synchronously — this both lets a password-protected
+/// file save its in-progress accumulators here and show the password modal
+/// (reusing `pending_pdf_path`/`pending_pdf_name`, resuming from `remaining`
+/// once `on_do_pdf_pwd_confirm`/`on_do_pdf_pwd_cancel` fires), and gives
+/// Pause/Abort a real point between files where they can actually take
+/// effect — see `continue_batch`'s doc comment in main.rs.
 #[derive(Debug, Clone, Default)]
 pub struct BatchProgress {
     pub remaining:        std::collections::VecDeque<std::path::PathBuf>,
@@ -34,6 +38,16 @@ pub struct BatchProgress {
     pub batch_results:    Vec<BatchFileResult>,
     pub persisted_hashes: std::collections::HashSet<String>,
     pub client_id:        Option<i64>,
+    /// User clicked "Pause" — `continue_batch` checks this before starting
+    /// the next file and, if set, stops rescheduling itself entirely
+    /// (no polling) until "Resume" is clicked, which re-invokes it directly.
+    pub paused:  bool,
+    /// User clicked "Abort" — takes effect at the next file boundary, same
+    /// granularity as the old app (`_aborted` checked once per loop
+    /// iteration, never mid-file). Kept distinct from just dropping
+    /// `batch_progress` so `finish_batch` can report an accurate "N of M
+    /// processed, aborted" summary instead of a generic completion message.
+    pub aborted: bool,
 }
 
 /// Snapshot of editable transaction fields for the undo stack.

@@ -842,6 +842,14 @@ export component MainScreen inherits Rectangle {
     // Batch monitor status line set by Rust after processing
     in property <string>          batch-log: "";
     in property <[BatchFileRow]>  batch-file-rows: [];
+    // Batch pause/abort — true for the whole duration a batch is running
+    // (from on_do_batch_folder's start until finish_batch's end, whether
+    // that's normal completion or an abort); batch-paused toggles the
+    // Pause/Resume button's label and state independently within that.
+    in property <bool>            batch-running: false;
+    in property <bool>            batch-paused:  false;
+    callback batch-pause();
+    callback batch-abort();
     // Export wizard step 4 preview (set by Rust via do-export-preview callback)
     in property <string>          export-preview-text: "";
     // Export wizard step 4 live validation (set by Rust via do-export-preview callback)
@@ -948,7 +956,7 @@ export component MainScreen inherits Rectangle {
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
                 TBtn { text: "Load Single File"; clicked => { root.load-file(); } }
-                TBtn { text: "Batch Process Folder"; enabled: true; clicked => { root.batch-folder(); } }
+                TBtn { text: "Batch Process Folder"; enabled: !root.batch-running; clicked => { root.batch-folder(); } }
 
                 Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
@@ -2238,8 +2246,17 @@ export component MainScreen inherits Rectangle {
                 VerticalBox { padding: 14px; spacing: 8px; vertical-stretch: 1;
                     HorizontalBox { padding: 0px; spacing: 8px;
                         MBtn { text: "Start Batch"; bg: #1565C0; clicked => { root.open-batch-monitor(); } }
-                        MBtn { text: "Pause"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
-                        MBtn { text: "Abort"; bg: #F5F5F5; fg: #BDBDBD; enabled: false; }
+                        MBtn {
+                            text: root.batch-paused ? "Resume" : "Pause";
+                            bg: #F5F5F5; fg: root.batch-running ? #37474F : #BDBDBD;
+                            enabled: root.batch-running;
+                            clicked => { root.batch-pause(); }
+                        }
+                        MBtn {
+                            text: "Abort"; bg: root.batch-running ? #FFEBEE : #F5F5F5; fg: root.batch-running ? #C62828 : #BDBDBD;
+                            enabled: root.batch-running;
+                            clicked => { root.batch-abort(); }
+                        }
                         MBtn { text: "Load All into Session"; bg: #2E7D32; fg: white; enabled: true; clicked => { root.load-all(); } }
                     }
                     // Summary line / empty hint

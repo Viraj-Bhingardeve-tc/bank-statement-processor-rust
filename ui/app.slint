@@ -157,6 +157,10 @@ export component AppWindow inherits Window {
     // ── Batch monitor log + per-file rows ─────────────────────────────────────
     in property <string>          batch-log: "";
     in property <[BatchFileRow]>  batch-file-rows: [];
+    in property <bool>            batch-running: false;
+    in property <bool>            batch-paused:  false;
+    callback do-batch-pause();
+    callback do-batch-abort();
     // ── Export wizard step 4 preview ──────────────────────────────────────────
     in property <string>          export-preview-text: "";
     in property <bool>            wiz-can-export: true;
@@ -405,6 +409,8 @@ export component AppWindow inherits Window {
         fs-debits:             root.fs-debits;
         batch-log:             root.batch-log;
         batch-file-rows:       root.batch-file-rows;
+        batch-running:         root.batch-running;
+        batch-paused:          root.batch-paused;
         export-preview-text:   root.export-preview-text;
         wiz-can-export:        root.wiz-can-export;
         recon-matched:         root.recon-matched;
@@ -477,6 +483,8 @@ export component AppWindow inherits Window {
         migration-run        => { root.do-migration-run();        }
         migration-save-report => { root.do-migration-save-report(); }
         open-batch-monitor  => { root.do-batch-monitor();       }
+        batch-pause         => { root.do-batch-pause();         }
+        batch-abort         => { root.do-batch-abort();         }
         open-audit-trail(a, t) => { root.do-audit-trail(a, t);  }
         open-settings       => { root.do-settings();            }
         add-row             => { root.do-add-row();             }

@@ -1205,11 +1205,23 @@ fn finish_batch(
     let Some(bp) = bp else { return };
     let ui::BatchProgress {
         mut all_txns, loaded, skipped, errors, first_bank, first_ob,
-        new_import_ids, batch_results, client_id, ..
+        new_import_ids, batch_results, client_id, remaining, aborted, ..
     } = bp;
+    let unprocessed = remaining.len();
+
+    // Reset in every finish path (including the early "nothing loaded"
+    // return below) — otherwise an aborted-before-any-success batch would
+    // leave Pause/Abort stuck enabled with nothing left for them to control.
+    h.set_batch_running(false);
+    h.set_batch_paused(false);
 
     if all_txns.is_empty() {
-        h.set_status_bank(SharedString::from("Batch: no transactions loaded"));
+        let msg = if aborted {
+            "Batch aborted \u{2014} no transactions loaded"
+        } else {
+            "Batch: no transactions loaded"
+        };
+        h.set_status_bank(SharedString::from(msg));
         return;
     }
 
@@ -1293,66 +1305,166 @@ fn finish_batch(
             }
         }
     }
-    log::info!("[Batch] loaded={} skipped={} errors={} total_txns={}", loaded, skipped, errors, real.len());
-    let mut summary = format!("{} file(s) loaded", loaded);
-    if skipped > 0 { summary.push_str(&format!(", {} dupe(s) skipped", skipped)); }
-    if errors  > 0 { summary.push_str(&format!(", {} file(s) failed", errors)); }
+    log::info!(
+        "[Batch] loaded={} skipped={} errors={} total_txns={} aborted={} unprocessed={}",
+        loaded, skipped, errors, real.len(), aborted, unprocessed
+    );
+    let (summary, toast_kind) = batch_summary_message(loaded, skipped, errors, aborted, unprocessed);
     h.set_toast_msg(SharedString::from(summary.as_str()));
-    h.set_toast_kind(if errors > 0 { 3 } else { 1 });
+    h.set_toast_kind(toast_kind);
 }
 
-/// Process files from `batch_progress.remaining` one at a time until either
-/// the batch completes (`finish_batch`) or a password-protected PDF pauses it.
+/// Builds `finish_batch`'s final toast message and kind (1 = success, 3 =
+/// warning/error) — pulled out as a pure function so it's testable without a
+/// live `AppWindow` (main.rs has no Slint-independent test scaffolding, so
+/// keeping this logic Slint-free is what makes it testable at all).
+fn batch_summary_message(
+    loaded: usize,
+    skipped: usize,
+    errors: usize,
+    aborted: bool,
+    unprocessed: usize,
+) -> (String, i32) {
+    let mut summary = if aborted {
+        format!("Batch aborted: {} file(s) loaded", loaded)
+    } else {
+        format!("{} file(s) loaded", loaded)
+    };
+    if skipped > 0 {
+        summary.push_str(&format!(", {} dupe(s) skipped", skipped));
+    }
+    if errors > 0 {
+        summary.push_str(&format!(", {} file(s) failed", errors));
+    }
+    if aborted && unprocessed > 0 {
+        summary.push_str(&format!(", {} file(s) not processed", unprocessed));
+    }
+    let toast_kind = if errors > 0 || aborted { 3 } else { 1 };
+    (summary, toast_kind)
+}
+
+/// Process one file from `batch_progress.remaining`, then schedule the next
+/// step as a fresh zero-delay Slint timer tick instead of looping
+/// synchronously in this same call. This is the whole mechanism behind
+/// Pause/Abort actually working: Slint callbacks (including the Pause/Abort
+/// buttons' own click handlers) cannot run while this function itself is
+/// still executing on the UI thread, so a tight `loop { ... }` processing
+/// every file in one call — which is what this function used to be — made
+/// the buttons physically unable to ever receive a click until the entire
+/// batch had already finished. Returning control to the event loop between
+/// every file (mirroring the old app's single-threaded `while` + `await`
+/// loop in `batch-processor.js`, just via a Slint timer instead of a JS
+/// microtask) gives Pause/Abort a real point where they take effect.
+///
+/// Called again to resume: from a fresh `on_do_batch_folder` start, from
+/// `on_do_pdf_pwd_confirm`/`on_do_pdf_pwd_cancel` after a password prompt
+/// resolves, and from `on_do_batch_pause` when "Resume" is clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchStep {
+    /// Stop entirely — either the queue is exhausted (checked separately,
+    /// after this) or the user aborted.
+    Finish,
+    /// User paused — do nothing and don't reschedule.
+    WaitPaused,
+    /// Normal case — go process the next file.
+    ProcessNext,
+}
+
+/// Pure decision function for what `continue_batch` should do next, given
+/// the current pause/abort flags — extracted so it's unit-testable without
+/// a live `AppWindow`/`Connection` (see `batch_summary_message` for the same
+/// rationale). Abort takes priority over pause: an aborted-while-paused
+/// batch must still finish, not sit frozen forever waiting for a resume
+/// that will never un-abort it.
+fn batch_step(aborted: bool, paused: bool) -> BatchStep {
+    if aborted {
+        BatchStep::Finish
+    } else if paused {
+        BatchStep::WaitPaused
+    } else {
+        BatchStep::ProcessNext
+    }
+}
+
 #[cfg(feature = "slint-ui")]
 fn continue_batch(
     h: &AppWindow,
     state_ref: &Arc<Mutex<ui::AppState>>,
     db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
 ) {
-    loop {
-        let next_path = {
-            let mut st = state_ref.lock().unwrap();
-            match st.batch_progress.as_mut() {
-                Some(bp) => bp.remaining.pop_front(),
-                None => return,
-            }
-        };
-        let Some(path) = next_path else {
+    let (aborted, paused) = {
+        let st = state_ref.lock().unwrap();
+        match st.batch_progress.as_ref() {
+            Some(bp) => (bp.aborted, bp.paused),
+            None => return,
+        }
+    };
+    match batch_step(aborted, paused) {
+        BatchStep::Finish => {
             finish_batch(h, state_ref, db_ref);
             return;
-        };
-        let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        }
+        // Stop making progress and don't reschedule — on_do_batch_pause's
+        // "Resume" click is what calls continue_batch again to pick back up.
+        BatchStep::WaitPaused => return,
+        BatchStep::ProcessNext => {}
+    }
 
-        match try_parse_batch_file(&path, &file_name) {
-            BatchFileOutcome::Parsed(r) => {
-                let mut st = state_ref.lock().unwrap();
-                if let Some(bp) = st.batch_progress.as_mut() {
-                    record_batch_success(bp, db_ref, &path, &file_name, r);
-                }
-            }
-            BatchFileOutcome::Failed => {
-                let mut st = state_ref.lock().unwrap();
-                if let Some(bp) = st.batch_progress.as_mut() {
-                    record_batch_failure(bp, &file_name, "Parse failed");
-                }
-            }
-            BatchFileOutcome::NeedsPassword => {
-                {
-                    let mut st = state_ref.lock().unwrap();
-                    st.pending_pdf_path = Some(path.clone());
-                    st.pending_pdf_name = file_name.clone();
-                }
-                h.set_pdf_pwd_visible(true);
-                h.set_pdf_pwd_prompt(SharedString::from(
-                    format!("'{}' is password-protected. Enter the PDF password:", file_name).as_str(),
-                ));
-                h.set_status_bank(SharedString::from(
-                    format!("PDF password required for {}\u{2026}", file_name).as_str(),
-                ));
-                return; // paused — resumes via on_do_pdf_pwd_confirm/on_do_pdf_pwd_cancel
+    let next_path = {
+        let mut st = state_ref.lock().unwrap();
+        match st.batch_progress.as_mut() {
+            Some(bp) => bp.remaining.pop_front(),
+            None => return,
+        }
+    };
+    let Some(path) = next_path else {
+        finish_batch(h, state_ref, db_ref);
+        return;
+    };
+    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+    match try_parse_batch_file(&path, &file_name) {
+        BatchFileOutcome::Parsed(r) => {
+            let mut st = state_ref.lock().unwrap();
+            if let Some(bp) = st.batch_progress.as_mut() {
+                record_batch_success(bp, db_ref, &path, &file_name, r);
             }
         }
+        BatchFileOutcome::Failed => {
+            let mut st = state_ref.lock().unwrap();
+            if let Some(bp) = st.batch_progress.as_mut() {
+                record_batch_failure(bp, &file_name, "Parse failed");
+            }
+        }
+        BatchFileOutcome::NeedsPassword => {
+            {
+                let mut st = state_ref.lock().unwrap();
+                st.pending_pdf_path = Some(path.clone());
+                st.pending_pdf_name = file_name.clone();
+            }
+            h.set_pdf_pwd_visible(true);
+            h.set_pdf_pwd_prompt(SharedString::from(
+                format!("'{}' is password-protected. Enter the PDF password:", file_name).as_str(),
+            ));
+            h.set_status_bank(SharedString::from(
+                format!("PDF password required for {}\u{2026}", file_name).as_str(),
+            ));
+            return; // paused — resumes via on_do_pdf_pwd_confirm/on_do_pdf_pwd_cancel
+        }
     }
+
+    let handle2    = h.as_weak();
+    let state_ref2 = state_ref.clone();
+    let db_ref2    = db_ref.clone();
+    // `Timer::single_shot` is a free function backed by a thread-local timer
+    // registry, not tied to any handle's lifetime — unlike the instance
+    // `Timer::start()` API, where the `Timer` must stay alive for the
+    // duration or its `Drop` impl deregisters the callback before it fires.
+    slint::Timer::single_shot(std::time::Duration::from_millis(0), move || {
+        if let Some(h2) = handle2.upgrade() {
+            continue_batch(&h2, &state_ref2, &db_ref2);
+        }
+    });
 }
 
 /// Maps the Settings screen's "Log Level" choice to a `log` crate filter.
@@ -1722,9 +1834,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         batch_results: vec![],
                         persisted_hashes,
                         client_id: batch_client_id,
+                        paused: false,
+                        aborted: false,
                     });
                 }
+                h.set_batch_running(true);
+                h.set_batch_paused(false);
                 continue_batch(&h, &state_ref, &db_ref);
+            });
+        }
+        // ── Batch Pause/Resume, Abort ────────────────────────────────────────────
+        // Real pause/abort, matching the old app's BatchProcessor.pause()/
+        // resume()/abort() (a single toggling "Pause"/"Resume" button plus a
+        // separate "Abort") — see continue_batch's doc comment for why this
+        // only works now that batch processing yields to the event loop
+        // between files instead of running as one blocking synchronous call.
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_batch_pause(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let now_paused = {
+                    let mut st = state_ref.lock().unwrap();
+                    match st.batch_progress.as_mut() {
+                        Some(bp) => {
+                            bp.paused = !bp.paused;
+                            bp.paused
+                        }
+                        None => return,
+                    }
+                };
+                h.set_batch_paused(now_paused);
+                if now_paused {
+                    h.set_status_bank(SharedString::from("Batch paused"));
+                } else {
+                    h.set_status_bank(SharedString::from("Batch resumed\u{2026}"));
+                    continue_batch(&h, &state_ref, &db_ref);
+                }
+            });
+        }
+        {
+            let handle    = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref    = db_conn.clone();
+            app.on_do_batch_abort(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    match st.batch_progress.as_mut() {
+                        Some(bp) => bp.aborted = true,
+                        None => return,
+                    }
+                }
+                // Takes effect immediately rather than waiting for
+                // continue_batch's own aborted-check on its next tick —
+                // finish_batch's `.take()` makes any already-scheduled
+                // continue_batch timer callback a safe no-op (it will see
+                // batch_progress == None and return without doing anything).
+                finish_batch(&h, &state_ref, &db_ref);
             });
         }
         // ── New Client ────────────────────────────────────────────────────────
@@ -4435,4 +4603,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod batch_pause_abort_tests {
+    use super::*;
+
+    #[test]
+    fn normal_batch_processes_the_next_file() {
+        assert_eq!(batch_step(false, false), BatchStep::ProcessNext);
+    }
+
+    #[test]
+    fn paused_batch_waits_without_processing() {
+        assert_eq!(batch_step(false, true), BatchStep::WaitPaused);
+    }
+
+    #[test]
+    fn aborted_batch_finishes() {
+        assert_eq!(batch_step(true, false), BatchStep::Finish);
+    }
+
+    #[test]
+    fn abort_takes_priority_over_a_simultaneous_pause() {
+        // A user could pause, then abort while still paused — must not get
+        // stuck waiting forever for a resume that will never come.
+        assert_eq!(batch_step(true, true), BatchStep::Finish);
+    }
+
+    #[test]
+    fn clean_completion_message_has_no_abort_wording() {
+        let (msg, kind) = batch_summary_message(5, 0, 0, false, 0);
+        assert_eq!(msg, "5 file(s) loaded");
+        assert_eq!(kind, 1, "a clean run must toast as success");
+    }
+
+    #[test]
+    fn completion_message_reports_skipped_and_failed_counts() {
+        let (msg, kind) = batch_summary_message(3, 2, 1, false, 0);
+        assert!(msg.contains("3 file(s) loaded"), "got: {msg}");
+        assert!(msg.contains("2 dupe(s) skipped"), "got: {msg}");
+        assert!(msg.contains("1 file(s) failed"), "got: {msg}");
+        assert_eq!(kind, 3, "any failure must toast as a warning, not success");
+    }
+
+    #[test]
+    fn aborted_message_reports_unprocessed_count_and_toasts_as_warning() {
+        let (msg, kind) = batch_summary_message(4, 0, 0, true, 6);
+        assert!(msg.starts_with("Batch aborted:"), "got: {msg}");
+        assert!(msg.contains("4 file(s) loaded"), "got: {msg}");
+        assert!(msg.contains("6 file(s) not processed"), "got: {msg}");
+        assert_eq!(kind, 3, "an aborted run must never toast as plain success");
+    }
+
+    #[test]
+    fn aborted_with_nothing_left_unprocessed_omits_the_unprocessed_clause() {
+        // Abort clicked right as the very last file finished — nothing was
+        // actually left behind, so the message shouldn't claim otherwise.
+        let (msg, _kind) = batch_summary_message(4, 0, 0, true, 0);
+        assert!(!msg.contains("not processed"), "got: {msg}");
+    }
 }
