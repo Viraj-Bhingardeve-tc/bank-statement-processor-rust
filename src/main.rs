@@ -3021,7 +3021,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 h.set_migration_running(true);
-                h.set_migration_pct(0.0);
+                h.set_migration_pct(0);
                 h.set_migration_status(SharedString::from("Starting\u{2026}"));
                 h.set_migration_has_report(false);
 
@@ -3040,11 +3040,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &export_path,
                         &db_path2,
                         &migration::MigrationOptions::default(),
-                        move |phase| {
+                        move |pct, phase| {
                             let h   = progress_handle.clone();
                             let msg = phase.to_string();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(h) = h.upgrade() {
+                                    h.set_migration_pct(pct);
                                     h.set_migration_status(SharedString::from(msg.as_str()));
                                 }
                             });

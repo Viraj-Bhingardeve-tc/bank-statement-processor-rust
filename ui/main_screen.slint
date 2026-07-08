@@ -863,7 +863,7 @@ export component MainScreen inherits Rectangle {
     in property <bool>       migration-has-preview:  false;
     in property <bool>       migration-running:      false;
     in property <string>     migration-status:       "";
-    in property <float>      migration-pct:          0;
+    in property <int>        migration-pct:          0;
     in property <bool>       migration-has-report:   false;
     in property <string>     migration-report-text:  "";
     in property <bool>       migration-success:      false;
@@ -2624,12 +2624,15 @@ export component MainScreen inherits Rectangle {
                     if root.migration-running : Rectangle {
                         height: 46px; background: #E3F2FD; border-radius: 6px;
                         VerticalBox { padding: 8px; spacing: 4px;
-                            Text { text: root.migration-status; font-size: 11px; color: #1565C0; }
+                            HorizontalBox { padding: 0px; spacing: 6px;
+                                Text { text: root.migration-status; font-size: 11px; color: #1565C0; horizontal-stretch: 1; }
+                                Text { text: root.migration-pct + "%"; font-size: 11px; color: #1565C0; font-weight: 700; }
+                            }
                             Rectangle {
                                 height: 6px; background: #C5D9F0; border-radius: 3px;
                                 Rectangle {
                                     x: 0px; y: 0px; height: 100%;
-                                    width: parent.width * (root.migration-pct / 100.0);
+                                    width: parent.width * root.migration-pct / 100;
                                     background: #1565C0; border-radius: 3px;
                                 }
                             }

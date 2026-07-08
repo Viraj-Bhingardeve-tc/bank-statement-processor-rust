@@ -29,7 +29,10 @@ use super::validator::{self, Severity};
 
 /// Import every recognized entity from `export` into `conn`, recording
 /// progress into `report`. `progress` is called once per phase (used to
-/// drive a UI progress indicator); it receives a human-readable phase label.
+/// drive a UI progress indicator); it receives `(percent_complete,
+/// phase_label)`, with `percent_complete` on the same 0-100 overall scale
+/// `mod::migrate` uses for its own pre/post-import phases (this function
+/// only owns the middle slice of that range).
 ///
 /// Deliberately does **not** wrap the whole import in one outer SQL
 /// transaction: `db::add_dedupe_hashes`/`db::upsert_transactions` (like
@@ -47,7 +50,7 @@ pub fn import_all(
     conn: &Connection,
     export: &LegacyExport,
     report: &mut MigrationReport,
-    mut progress: impl FnMut(&str),
+    mut progress: impl FnMut(i32, &str),
 ) -> Result<()> {
     let issues = validator::validate_source(export);
     let mut fatal_entities: HashSet<String> = HashSet::new();
@@ -63,35 +66,35 @@ pub fn import_all(
 
     let mut id_map = IdMap::default();
 
-    progress("Importing clients\u{2026}");
+    progress(10, "Importing clients\u{2026}");
     import_clients(conn, export, &mut id_map, report)?;
 
     if !fatal_entities.contains("classification_rules") {
-        progress("Importing classification rules\u{2026}");
+        progress(25, "Importing classification rules\u{2026}");
         import_rules(conn, export, &id_map, report)?;
     }
 
     if !fatal_entities.contains("ledgers") {
-        progress("Importing ledgers\u{2026}");
+        progress(40, "Importing ledgers\u{2026}");
         import_ledgers(conn, export, &id_map, report)?;
     }
 
     if !fatal_entities.contains("dedupe_hashes") {
-        progress("Importing duplicate-detection history\u{2026}");
+        progress(55, "Importing duplicate-detection history\u{2026}");
         import_dedupe(conn, export, &id_map, report)?;
     }
 
     if !fatal_entities.contains("import_history") {
-        progress("Importing transaction history\u{2026}");
+        progress(75, "Importing transaction history\u{2026}");
         import_history_and_transactions(conn, export, &id_map, report)?;
     }
 
     if !fatal_entities.contains("settings") {
-        progress("Importing settings\u{2026}");
+        progress(90, "Importing settings\u{2026}");
         import_settings(conn, export, report)?;
     }
 
-    progress("Finalizing\u{2026}");
+    progress(95, "Finalizing\u{2026}");
     Ok(())
 }
 
@@ -457,7 +460,7 @@ mod tests {
         let conn = db::open(":memory:").unwrap();
         let export = sample_export();
         let mut report = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report, |_| {}).expect("import should succeed");
+        import_all(&conn, &export, &mut report, |_, _| {}).expect("import should succeed");
 
         assert_eq!(report.entity_mut("clients").imported, 1);
         assert_eq!(report.entity_mut("classification_rules").imported, 2);
@@ -481,7 +484,7 @@ mod tests {
         let conn = db::open(":memory:").unwrap();
         let export = sample_export();
         let mut report = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report, |_| {}).unwrap();
+        import_all(&conn, &export, &mut report, |_, _| {}).unwrap();
 
         let created_at: String = conn
             .query_row(
@@ -498,7 +501,7 @@ mod tests {
         let conn = db::open(":memory:").unwrap();
         let export = sample_export();
         let mut report = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report, |_| {}).unwrap();
+        import_all(&conn, &export, &mut report, |_, _| {}).unwrap();
 
         let count: i64 = conn
             .query_row(
@@ -519,10 +522,10 @@ mod tests {
         let export = sample_export();
 
         let mut report1 = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report1, |_| {}).unwrap();
+        import_all(&conn, &export, &mut report1, |_, _| {}).unwrap();
 
         let mut report2 = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report2, |_| {}).unwrap();
+        import_all(&conn, &export, &mut report2, |_, _| {}).unwrap();
 
         assert_eq!(report2.entity_mut("clients").imported, 0);
         assert_eq!(report2.entity_mut("clients").skipped_duplicate, 1);
@@ -562,7 +565,7 @@ mod tests {
         )
         .unwrap();
         let mut report = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report, |_| {}).unwrap();
+        import_all(&conn, &export, &mut report, |_, _| {}).unwrap();
         assert_eq!(report.entity_mut("classification_rules").imported, 1);
         assert_eq!(report.entity_mut("classification_rules").failed, 1);
     }
@@ -583,7 +586,7 @@ mod tests {
             }).to_string(),
         ).unwrap();
         let mut report = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report, |_| {}).unwrap();
+        import_all(&conn, &export, &mut report, |_, _| {}).unwrap();
 
         assert_eq!(report.entity_mut("classification_rules").imported, 0);
         assert_eq!(
@@ -644,7 +647,7 @@ mod tests {
         let conn = db::open(":memory:").unwrap();
         let export = parse_export_str(r#"{"bsp_clients": []}"#).unwrap();
         let mut report = MigrationReport::new("test.json");
-        import_all(&conn, &export, &mut report, |_| {}).unwrap();
+        import_all(&conn, &export, &mut report, |_, _| {}).unwrap();
         assert_eq!(report.entity_mut("settings").found, 0);
         assert_eq!(report.entity_mut("settings").imported, 0);
     }

@@ -57,6 +57,16 @@ pub fn backup_database(db_path: &Path) -> Result<PathBuf> {
 /// a failed migration. Copies the backup (and any sidecar files) back over
 /// the live path, overwriting whatever partial state the failed migration
 /// left behind.
+///
+/// Verifies twice, not once: the *source* backup is checked before copying
+/// (no point restoring from something already broken), and the *destination*
+/// is independently re-opened and checked after copying — the copy itself
+/// reporting `Ok` only means the OS accepted the write, not that the bytes
+/// that landed on disk are a valid, openable database (a truncated write from
+/// a disk-full or permissions edge case would still return `Ok` from
+/// `fs::copy`). A rollback that silently leaves the live file corrupt would
+/// be worse than no rollback at all — the caller would report success while
+/// the user has an unusable database.
 pub fn restore_from_backup(backup_path: &Path, db_path: &Path) -> Result<()> {
     if !backup_path.exists() {
         anyhow::bail!(
@@ -89,6 +99,12 @@ pub fn restore_from_backup(backup_path: &Path, db_path: &Path) -> Result<()> {
             let _ = std::fs::remove_file(&live_sidecar);
         }
     }
+
+    verify_backup_readable(db_path).context(
+        "rollback copied the backup over the live database, but the restored file failed its \
+         own integrity check afterward — the live database may now be unusable; restore \
+         manually from the backup path before using this app further",
+    )?;
 
     Ok(())
 }
@@ -237,6 +253,43 @@ mod tests {
             v, "hello",
             "live file must now match the backup, not its pre-restore content"
         );
+
+        let _ = std::fs::remove_file(&live);
+        let _ = std::fs::remove_file(&backup);
+    }
+
+    #[test]
+    fn restore_from_backup_verifies_the_destination_is_openable_after_copying_not_just_the_source()
+    {
+        // `restore_from_backup_overwrites_live_file_with_backup_contents`
+        // above already proves the happy path works — this test names the
+        // specific guarantee explicitly: the function doesn't just trust
+        // `fs::copy`'s `Ok` return value, it independently re-opens the
+        // *destination* afterward (see the doc comment on
+        // `restore_from_backup`). A genuinely truncated/corrupt write from
+        // `fs::copy` itself isn't something a portable unit test can force
+        // deterministically, so this asserts the observable contract instead:
+        // if restore_from_backup returns Ok, db::open on db_path must
+        // *already* succeed with no further repair step, immediately and
+        // without needing its own migration-application side effects to
+        // "fix" anything.
+        let _guard = lock();
+        let live = temp_db("verify_dest_live");
+        let backup = temp_db("verify_dest_backup");
+        let _ = std::fs::remove_file(&live);
+        let _ = std::fs::remove_file(&backup);
+
+        make_real_sqlite_file(&backup);
+        std::fs::write(&live, b"garbage pre-restore content").unwrap();
+
+        restore_from_backup(&backup, &live).expect("restore should succeed and self-verify");
+
+        // If restore_from_backup's post-copy verification had been skipped,
+        // a corrupt destination could still slip through; opening it here
+        // independently re-proves it didn't.
+        let conn = crate::db::open(&live).expect("destination must be independently openable");
+        let v: String = conn.query_row("SELECT v FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, "hello");
 
         let _ = std::fs::remove_file(&live);
         let _ = std::fs::remove_file(&backup);

@@ -105,15 +105,24 @@ pub fn preview(export_path: &Path) -> anyhow::Result<DetectedSource> {
 /// meaningful to show. `Err` is reserved for failures so fundamental that no
 /// report can be trusted (e.g. the database file itself can't be opened at
 /// all).
+///
+/// `progress` is called at each named phase with `(percent_complete,
+/// phase_label)`, `percent_complete` monotonically non-decreasing from 0 to
+/// 100 across a single call — driving a real progress bar, not just a status
+/// line. The exact phases and their assigned percentages are internal and
+/// may shift between releases; callers should treat them only as "moved
+/// forward", not rely on specific values or a fixed phase count (phases
+/// covering entities absent from the export, or invalidated by a fatal
+/// pre-check, are skipped — see `importer::import_all`).
 pub fn migrate(
     export_path: &Path,
     db_path: &Path,
     opts: &MigrationOptions,
-    mut progress: impl FnMut(&str),
+    mut progress: impl FnMut(i32, &str),
 ) -> anyhow::Result<MigrationReport> {
     let mut report = MigrationReport::new(&export_path.display().to_string());
 
-    progress("Reading export file\u{2026}");
+    progress(2, "Reading export file\u{2026}");
     let export = match detector::parse_export_file(export_path) {
         Ok(e) => e,
         Err(err) => {
@@ -151,7 +160,7 @@ pub fn migrate(
         }
     };
 
-    progress("Importing data\u{2026}");
+    progress(5, "Importing data\u{2026}");
     // Opened and dropped entirely within this block: by the time rollback
     // (if needed) runs below, nothing still holds `db_path` open.
     let (import_result, post_check_issues) = {
@@ -163,8 +172,9 @@ pub fn migrate(
                 return Ok(report);
             }
         };
-        let import_result =
-            importer::import_all(&conn, &export, &mut report, |phase| progress(phase));
+        let import_result = importer::import_all(&conn, &export, &mut report, |pct, phase| {
+            progress(pct, phase)
+        });
         let post_check_issues = if import_result.is_ok() {
             validator::validate_migrated(&conn, &report)
         } else {
@@ -186,7 +196,7 @@ pub fn migrate(
     }
 
     if import_result.is_err() || post_check_failed {
-        progress("Rolling back\u{2026}");
+        progress(97, "Rolling back\u{2026}");
         match &backup_path {
             Some(bp) => match backup::restore_from_backup(bp, db_path) {
                 Ok(()) => {
@@ -210,7 +220,7 @@ pub fn migrate(
         return Ok(report);
     }
 
-    progress("Done");
+    progress(100, "Done");
     report.finish(true, false);
     Ok(report)
 }
@@ -285,11 +295,16 @@ mod tests {
         drop(crate::db::open(&db_path).expect("open fresh db"));
 
         let export_path = write_export("happy", &happy_export());
-        let mut progress_calls: Vec<String> = Vec::new();
+        let mut progress_calls: Vec<(i32, String)> = Vec::new();
 
-        let report = migrate(&export_path, &db_path, &MigrationOptions::default(), |p| {
-            progress_calls.push(p.to_string());
-        })
+        let report = migrate(
+            &export_path,
+            &db_path,
+            &MigrationOptions::default(),
+            |pct, p| {
+                progress_calls.push((pct, p.to_string()));
+            },
+        )
         .expect("migrate should not hard-error");
 
         assert!(report.success, "expected success, got: {:?}", report.errors);
@@ -307,6 +322,27 @@ mod tests {
         assert!(
             !progress_calls.is_empty(),
             "progress callback must be invoked"
+        );
+        // The percentage must actually drive a real progress bar, not sit at
+        // 0 the whole time: monotonically non-decreasing, reaching 100 at
+        // the very last call on a successful run.
+        assert!(
+            progress_calls.windows(2).all(|w| w[1].0 >= w[0].0),
+            "percent must never go backwards, got: {:?}",
+            progress_calls
+        );
+        assert_eq!(
+            progress_calls.last().unwrap().0,
+            100,
+            "a successful migration must finish progress at 100%, got: {:?}",
+            progress_calls
+        );
+        assert!(
+            progress_calls
+                .iter()
+                .any(|(_, msg)| msg.contains("clients")),
+            "expected a client-import phase in: {:?}",
+            progress_calls
         );
 
         let conn = crate::db::open(&db_path).expect("reopen after migrate");
@@ -329,7 +365,13 @@ mod tests {
         drop(crate::db::open(&db_path).expect("open fresh db"));
 
         let export_path = write_export("garbage_source", &serde_json::json!({"not_bsp": true}));
-        let report = migrate(&export_path, &db_path, &MigrationOptions::default(), |_| {}).unwrap();
+        let report = migrate(
+            &export_path,
+            &db_path,
+            &MigrationOptions::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert!(!report.success);
         assert!(!report.errors.is_empty());
@@ -392,8 +434,13 @@ mod tests {
         // Client" to the live, un-transacted database *before*
         // `import_rules` (the next phase) hits the missing column and
         // returns Err — a real partial write that rollback must undo.
-        let mut report =
-            migrate(&export_path, &db_path, &MigrationOptions::default(), |_| {}).unwrap();
+        let mut report = migrate(
+            &export_path,
+            &db_path,
+            &MigrationOptions::default(),
+            |_, _| {},
+        )
+        .unwrap();
 
         assert!(!report.success);
         assert!(
@@ -435,9 +482,21 @@ mod tests {
         drop(crate::db::open(&db_path).expect("open fresh db"));
         let export_path = write_export("idempotent_e2e", &happy_export());
 
-        let r1 = migrate(&export_path, &db_path, &MigrationOptions::default(), |_| {}).unwrap();
+        let r1 = migrate(
+            &export_path,
+            &db_path,
+            &MigrationOptions::default(),
+            |_, _| {},
+        )
+        .unwrap();
         assert!(r1.success, "first run failed: {:?}", r1.errors);
-        let r2 = migrate(&export_path, &db_path, &MigrationOptions::default(), |_| {}).unwrap();
+        let r2 = migrate(
+            &export_path,
+            &db_path,
+            &MigrationOptions::default(),
+            |_, _| {},
+        )
+        .unwrap();
         assert!(r2.success, "second run failed: {:?}", r2.errors);
 
         let conn = crate::db::open(&db_path).expect("reopen after migrate");
