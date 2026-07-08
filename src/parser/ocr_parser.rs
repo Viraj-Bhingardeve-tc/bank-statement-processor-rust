@@ -615,7 +615,9 @@ Account No: 50100123456789
         // prev_balance = None → first txn, debit = a=10000, credit = b=5000
         let result = parse_ocr_text(text, "x.pdf");
         let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
-        // Just verify parsing doesn't crash and produces a transaction
-        assert!(real.len() >= 0); // always passes; existence checked by is_some
+        // Verify parsing doesn't crash and actually produces a transaction
+        // (the previous `real.len() >= 0` here was vacuously always-true —
+        // a usize can never be negative — and didn't check anything).
+        assert!(!real.is_empty(), "expected at least one transaction to be parsed");
     }
 }
