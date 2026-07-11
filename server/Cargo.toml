@@ -2,7 +2,7 @@
 name        = "license-server"
 version     = "0.1.0"
 edition     = "2021"
-description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4B scope only: axum/tokio wiring, structured logging, env-based config, and a health endpoint. No license/payment/Razorpay logic yet."
+description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4C.1 scope: axum/tokio wiring, structured logging, env-based config, Postgres pool + migrations, repository scaffolding, health/readiness endpoints. No license/payment/Razorpay logic yet."
 publish     = false
 
 [[bin]]
@@ -26,6 +26,23 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # ── Serialisation (response bodies) ─────────────────────────────────────────
 serde = { version = "1", features = ["derive"] }
+
+# ── Database (PHASE4_DESIGN.md §7) ───────────────────────────────────────────
+# rustls (not native-tls) so this crate never needs the desktop app's
+# OPENSSL_DIR/system-OpenSSL setup (.cargo/config.toml) — a self-contained
+# pure-Rust TLS stack, independent build story from the desktop package.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "migrate",
+    # `sqlx::migrate!()` is a proc macro shipped in sqlx-macros, gated by
+    # this feature — "migrate" alone only pulls in the runtime `Migrator`/
+    # `MigrateError` types, not the macro that embeds `migrations/` at
+    # compile time. No compile-time-checked queries (`sqlx::query!`) are
+    # used anywhere in this phase, so this doesn't require a live database
+    # at build time.
+    "macros",
+] }
 
 [dev-dependencies]
 tower      = { version = "0.5", features = ["util"] }
