@@ -5,6 +5,16 @@ edition = "2021"
 authors = ["A S Havaldar"]
 description = "Bank Statement Processor — Rust + Slint"
 
+# Phase 4A (PHASE4_DESIGN.md §1.1): `protocol` is a standalone shared-types
+# crate for the future licensing server, kept out of this package's own
+# dependency graph — listing it here only so `cargo build --workspace`/IDEs
+# resolve it, not so every `cargo build` at this root pulls it in (Cargo's
+# default-run-set for a mixed [package]+[workspace] manifest is the root
+# package alone, unless `--workspace` is passed).
+[workspace]
+members  = ["protocol"]
+resolver = "2"
+
 [[bin]]
 name = "bank-statement-processor"
 path = "src/main.rs"
