@@ -12,7 +12,7 @@ description = "Bank Statement Processor — Rust + Slint"
 # default-run-set for a mixed [package]+[workspace] manifest is the root
 # package alone, unless `--workspace` is passed).
 [workspace]
-members  = ["protocol"]
+members  = ["protocol", "server"]
 resolver = "2"
 
 [[bin]]

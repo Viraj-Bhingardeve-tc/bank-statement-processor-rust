@@ -1,0 +1,32 @@
+[package]
+name        = "license-server"
+version     = "0.1.0"
+edition     = "2021"
+description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4B scope only: axum/tokio wiring, structured logging, env-based config, and a health endpoint. No license/payment/Razorpay logic yet."
+publish     = false
+
+[[bin]]
+name = "license-server"
+path = "src/main.rs"
+
+[lib]
+name = "license_server"
+path = "src/lib.rs"
+
+[dependencies]
+# ── Web framework ─────────────────────────────────────────────────────────
+axum = "0.7"
+
+# ── Async runtime ────────────────────────────────────────────────────────
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+
+# ── Logging ───────────────────────────────────────────────────────────────
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Serialisation (response bodies) ─────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tower      = { version = "0.5", features = ["util"] }
+serde_json = "1"
