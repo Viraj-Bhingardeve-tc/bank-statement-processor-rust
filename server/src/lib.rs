@@ -1,18 +1,21 @@
 //! `license-server` — Phase 4 licensing + payment server.
 //!
-//! **Phase 4C.1 scope** (`PHASE4_DESIGN.md` §13 phase 2): axum + tokio
+//! **Phase 4C.2 scope** (`PHASE4_DESIGN.md` §13 phase 2): axum and tokio
 //! wiring, structured logging, environment-based configuration, dependency-
-//! injection scaffolding (`AppState`), a Postgres connection pool +
-//! migration runner (`db`), repository-layer scaffolding, and health/
-//! readiness endpoints. No license, payment, or Razorpay logic — those land
-//! in later, separately approved phases, added as new modules under
-//! `routes/`/`repository/` following the same patterns `health`/`ready`
-//! already establish.
+//! injection scaffolding (`AppState`), a Postgres connection pool and
+//! migration runner (`db`), domain models (`domain`), repository interfaces
+//! and Postgres implementations (`repository`), service-layer scaffolding
+//! (`service`), and health/readiness endpoints. No Razorpay, payment, or
+//! webhook logic, and no new API endpoints beyond `/healthz`/`/readyz` —
+//! those land in later, separately approved phases, added as new modules
+//! following the same patterns already established here.
 
 pub mod config;
 pub mod db;
+pub mod domain;
 pub mod repository;
 pub mod routes;
+pub mod service;
 pub mod state;
 
 use axum::Router;
