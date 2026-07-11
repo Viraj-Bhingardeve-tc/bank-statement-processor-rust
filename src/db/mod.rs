@@ -771,6 +771,42 @@ const MIGRATIONS: &[(i64, &str)] = &[
          CREATE INDEX IF NOT EXISTS idx_txn_vendor  ON transactions(vendor);
          CREATE INDEX IF NOT EXISTS idx_txn_import  ON transactions(import_id);
          COMMIT;"),
+    // Phase 3A licensing architecture — see LICENSE_DATABASE_SCHEMA.md §2 for
+    // the full design rationale (why these are dedicated tables rather than
+    // rows in `settings`, why `local_license`/`device_info` are
+    // single-row-enforced via `CHECK (id = 1)`). Additive only: does not
+    // touch any existing table, does not affect the existing
+    // `auth::validate_credentials` monthly-password gate — see
+    // LICENSE_SYSTEM_DESIGN.md §1 for why the two systems are deliberately
+    // kept separate in this phase.
+    (6, "CREATE TABLE IF NOT EXISTS local_license (
+             id                  INTEGER PRIMARY KEY CHECK (id = 1),
+             customer_id         TEXT,
+             license_id          TEXT,
+             license_key         TEXT,
+             subscription_type   TEXT,
+             status              TEXT NOT NULL DEFAULT 'not_activated',
+             expires_at          TEXT,
+             last_validated_at   TEXT,
+             grace_period_days   INTEGER NOT NULL DEFAULT 7,
+             highest_seen_clock  TEXT,
+             updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE TABLE IF NOT EXISTS device_info (
+             id                  INTEGER PRIMARY KEY CHECK (id = 1),
+             device_id           TEXT NOT NULL,
+             machine_fingerprint TEXT NOT NULL,
+             fingerprint_inputs  TEXT,
+             created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE TABLE IF NOT EXISTS license_validation_log (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+             result     TEXT NOT NULL,
+             online     INTEGER NOT NULL,
+             detail     TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_license_validation_log_time ON license_validation_log(checked_at DESC);"),
 ];
 
 /// The highest migration version every database created by a pre-migration-
@@ -1252,6 +1288,78 @@ mod tests {
         apply_migrations(&conn, MIGRATIONS, 4).expect("second run must be a no-op, not an error");
         let count_2 = get_transactions(&conn, client_id).unwrap().len();
         assert_eq!(count_1, count_2, "re-running migrations must not duplicate or lose data");
+    }
+
+    // ── Migration 6: Phase 3A licensing tables ──────────────────────────────────
+    // See LICENSE_DATABASE_SCHEMA.md §2. Purely additive (`CREATE TABLE IF NOT
+    // EXISTS` / `CREATE INDEX IF NOT EXISTS`) — these tests exist to prove that
+    // claim against a real pre-migration-6 database that already has genuine
+    // client/transaction data, not just against a fresh in-memory schema.
+
+    #[test]
+    fn migration_6_creates_license_tables_on_a_real_pre_existing_database_without_touching_its_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..5], 0).unwrap();
+        assert_eq!(user_version(&conn), 5, "test setup: must land exactly on version 5, before migration 6");
+
+        // Real user data present before the upgrade — migration 6 must not
+        // touch it (it's additive, unrelated tables only).
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").unwrap();
+        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+        upsert_transactions(&conn, client_id, None, std::slice::from_ref(&txn)).unwrap();
+
+        apply_migrations(&conn, MIGRATIONS, 5).expect("migration 6 must apply cleanly on top of real data");
+        assert_eq!(user_version(&conn), latest_migration_version());
+
+        for table in ["local_license", "device_info", "license_validation_log"] {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(count, 1, "{table} must have been created by migration 6");
+        }
+
+        // Pre-existing data must survive untouched.
+        assert_eq!(get_transactions(&conn, client_id).unwrap().len(), 1);
+        let clients = get_clients(&conn).unwrap();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].name, "Acme Co");
+    }
+
+    #[test]
+    fn migration_6_is_idempotent_when_run_twice() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        apply_migrations(&conn, &MIGRATIONS[..5], 0).unwrap();
+
+        apply_migrations(&conn, MIGRATIONS, 5).expect("first run");
+        apply_migrations(&conn, MIGRATIONS, 5).expect("second run must be a no-op, not an error");
+        assert_eq!(user_version(&conn), latest_migration_version());
+    }
+
+    #[test]
+    fn local_license_and_device_info_reject_a_second_row() {
+        // CHECK (id = 1) is the single-row-enforcement mechanism
+        // LICENSE_DATABASE_SCHEMA.md documents — prove SQLite actually
+        // enforces it, not just that application code happens to always
+        // pass id=1.
+        let conn = open(":memory:").expect("open");
+        conn.execute(
+            "INSERT INTO local_license (id, status) VALUES (1, 'not_activated')", [],
+        ).unwrap();
+        let second = conn.execute(
+            "INSERT INTO local_license (id, status) VALUES (2, 'not_activated')", [],
+        );
+        assert!(second.is_err(), "CHECK (id = 1) must reject a second local_license row");
+
+        conn.execute(
+            "INSERT INTO device_info (id, device_id, machine_fingerprint) VALUES (1, 'd1', 'f1')", [],
+        ).unwrap();
+        let second_device = conn.execute(
+            "INSERT INTO device_info (id, device_id, machine_fingerprint) VALUES (2, 'd2', 'f2')", [],
+        );
+        assert!(second_device.is_err(), "CHECK (id = 1) must reject a second device_info row");
     }
 
     #[test]

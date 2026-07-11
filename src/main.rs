@@ -25,7 +25,7 @@
 // copy instead removes the duplicate test binary entirely, closing the race
 // at its root instead of trying to widen the lock's reach across processes.
 use bank_statement_processor::{
-    auth, analytics, classifier, db, export, migration, narration_cleaner,
+    auth, analytics, classifier, db, export, license, migration, narration_cleaner,
     tally_group_engine, parser, reconciliation, settings, ui,
 };
 #[cfg(feature = "ai")]
@@ -1523,6 +1523,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     ));
 
+    // ── Phase 3A licensing status (non-blocking — see LICENSE_SYSTEM_DESIGN.md
+    // §7 for why this is deliberately not a startup gate yet: no real server
+    // or payment path exists for `license::should_enforce()` to safely flip
+    // on). Logged on every launch so the machinery is exercised and visible
+    // in support logs well before it becomes load-bearing. Computed exactly
+    // once here — the resulting display string is reused below to populate
+    // the Settings screen rather than calling `check_status` a second time
+    // (which would double-log `license_validation_log` and, once a real
+    // `HttpLicenseClient` exists, double the network calls on every launch).
+    let license_status_display = {
+        let db = db_conn.lock().unwrap();
+        match db.as_ref() {
+            Some(conn) => {
+                let status = license::check_status(conn, &license::OfflineClient);
+                log::info!(
+                    "[license] status={:?} enforce={} (see LICENSE_SYSTEM_DESIGN.md §7)",
+                    status,
+                    license::should_enforce()
+                );
+                let record = license::storage::load_local_license(conn).ok().flatten();
+                license::describe(status, record.as_ref())
+            }
+            None => "License status unavailable — database is not open.".to_string(),
+        }
+    };
+
     // ── Slint UI ──────────────────────────────────────────────────────────────
     #[cfg(feature = "slint-ui")]
     {
@@ -1568,6 +1594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "DEBUG" => 1, "WARN" => 2, "ERROR" => 3, _ => 0,
                 });
                 app.set_settings_state_idx(cfg.default_state_idx);
+                app.set_license_status_text(SharedString::from(license_status_display.as_str()));
                 log::set_max_level(log_level_filter(&cfg.log_level));
                 {
                     let mut st = app_state.lock().unwrap();
@@ -3679,6 +3706,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             h.set_toast_msg(SharedString::from(format!("Failed to save settings: {}", e)));
                             h.set_toast_kind(2);
                         }
+                    }
+                }
+            });
+        }
+
+        // ── License Activation (Phase 3A — see LICENSE_SYSTEM_DESIGN.md §9) ────
+        // `OfflineClient` is the only `LicenseApiClient` in this phase and
+        // always returns `NoServerConfigured` — this wires the real flow
+        // end-to-end (UI → license::activate → LicenseApiClient trait call →
+        // persisted result) against that honest, predictable error, so the
+        // whole path is exercised and ready for a drop-in `HttpLicenseClient`
+        // later with no call-site change here.
+        {
+            let handle = app.as_weak();
+            let db_ref = db_conn.clone();
+            app.on_do_license_activate(move || {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let key = h.get_license_key_input().to_string();
+                let key = key.trim();
+                if key.is_empty() {
+                    h.set_license_activate_result(SharedString::from("Enter a license key first."));
+                    return;
+                }
+                let db = db_ref.lock().unwrap();
+                let Some(conn) = db.as_ref() else {
+                    h.set_license_activate_result(SharedString::from(
+                        "Activation unavailable — database is not open.",
+                    ));
+                    return;
+                };
+                match license::activate(conn, &license::OfflineClient, key) {
+                    Ok(status) => {
+                        let record = license::storage::load_local_license(conn).ok().flatten();
+                        h.set_license_status_text(SharedString::from(
+                            license::describe(status, record.as_ref()).as_str(),
+                        ));
+                        h.set_license_activate_result(SharedString::from("License activated."));
+                        h.set_license_key_input(SharedString::from(""));
+                    }
+                    Err(license::ApiError::NoServerConfigured) => {
+                        log::info!("[license] activation attempted with no server configured yet");
+                        h.set_license_activate_result(SharedString::from(
+                            "No licensing server is configured yet — activation will be available in a future update.",
+                        ));
+                    }
+                    Err(e) => {
+                        log::warn!("[license] activation failed: {:?}", e);
+                        h.set_license_activate_result(SharedString::from(
+                            format!("Activation failed: {e:?}").as_str(),
+                        ));
                     }
                 }
             });

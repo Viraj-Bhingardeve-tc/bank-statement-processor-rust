@@ -898,6 +898,12 @@ export component MainScreen inherits Rectangle {
     callback settings-save-all();
     callback clear-logs();
 
+    // ── License status / activation (Phase 3A — see LICENSE_SYSTEM_DESIGN.md) ──
+    in-out property <string> license-status-text:    "";
+    in-out property <string> license-key-input:      "";
+    in-out property <string> license-activate-result:"";
+    callback license-activate();
+
     // ── MAIN LAYOUT ───────────────────────────────────────────────────────────
     VerticalLayout {
         padding: 0px; spacing: 0px;
@@ -2069,6 +2075,29 @@ export component MainScreen inherits Rectangle {
                             TouchArea { clicked => { root.modal-state = "migration"; } }
                             Text { text: "Import Legacy Data\u{2026}"; font-size: 11px; color: white;
                                    horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle { height: 1px; background: #E3F2FD; }
+                        Text { text: "LICENSE"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
+                        Text { text: root.license-status-text; font-size: 11px; color: #546E7A; wrap: word-wrap; width: 640px; }
+                        HorizontalBox { padding: 0px; spacing: 8px;
+                            LineEdit {
+                                text <=> root.license-key-input;
+                                placeholder-text: "License key (XXXX-XXXX-XXXX-XXXX)";
+                                height: 30px; min-width: 260px;
+                            }
+                            Rectangle {
+                                height: 30px; width: 100px;
+                                background: #1565C0; border-radius: 4px;
+                                accessible-role: button;
+                                accessible-label: "Activate License";
+                                TouchArea { clicked => { root.license-activate(); } }
+                                Text { text: "Activate"; font-size: 11px; color: white;
+                                       horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        if root.license-activate-result != "" : Text {
+                            text: root.license-activate-result; font-size: 11px; color: #546E7A;
+                            wrap: word-wrap; width: 640px;
                         }
                     }
                 }

@@ -267,6 +267,8 @@ export component AppWindow inherits Window {
     // Application settings save-all (reads from in-out properties)
     callback do-settings-save-all();
     callback do-clear-logs();
+    // License activation (Phase 3A)
+    callback do-license-activate();
     // Rules backup / restore
     callback do-backup-rules();
     callback do-restore-rules();
@@ -282,6 +284,9 @@ export component AppWindow inherits Window {
     in-out property <string> settings-recon-pct:       "0.5";
     in-out property <int>    settings-log-level:       0;
     in-out property <int>    settings-state-idx:       0;
+    in-out property <string> license-status-text:      "";
+    in-out property <string> license-key-input:        "";
+    in-out property <string> license-activate-result:  "";
 
     // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
@@ -510,6 +515,7 @@ export component AppWindow inherits Window {
         backup-rules       => { root.do-backup-rules();      }
         restore-rules      => { root.do-restore-rules();     }
         delete-rule(i)     => { root.do-delete-rule(i);      }
+        license-activate   => { root.do-license-activate();  }
         dedup-enabled            <=> root.dedup-enabled;
         settings-narr-enabled    <=> root.settings-narr-enabled;
         settings-narr-title-case <=> root.settings-narr-title-case;
@@ -520,5 +526,8 @@ export component AppWindow inherits Window {
         settings-recon-pct       <=> root.settings-recon-pct;
         settings-log-level       <=> root.settings-log-level;
         settings-state-idx       <=> root.settings-state-idx;
+        license-status-text      <=> root.license-status-text;
+        license-key-input        <=> root.license-key-input;
+        license-activate-result  <=> root.license-activate-result;
     }
 }

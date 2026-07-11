@@ -14,3 +14,4 @@ pub mod ui;
 #[cfg(feature = "ai")]
 pub mod ai_classifier;
 pub mod migration;
+pub mod license;
