@@ -1,0 +1,44 @@
+# Production deployment foundation for the licensing server
+# (PHASE4_DESIGN.md §8 — VPS + Docker Compose + Postgres; Caddy/TLS is a
+# later addition, not part of this phase, so `license-server` publishes
+# :8080 directly here for now).
+#
+# Usage:
+#   1. cp server/.env.example server/.env   # fill in real values, never commit
+#   2. export POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB (or put them in
+#      a repository-root .env — docker compose loads that automatically) so
+#      they match the credentials embedded in server/.env's DATABASE_URL
+#   3. docker compose up -d --build
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-license_server}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (shell env or a repository-root .env) before starting}
+      POSTGRES_DB: ${POSTGRES_DB:-license_server}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-license_server} -d ${POSTGRES_DB:-license_server}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  license-server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - server/.env
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

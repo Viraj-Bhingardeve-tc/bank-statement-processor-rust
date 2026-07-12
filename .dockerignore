@@ -1,0 +1,32 @@
+# Docker build context for server/Dockerfile = the repository root (needed
+# to reach the sibling protocol/ crate + the workspace Cargo.toml/Cargo.lock
+# — see docker-compose.yml and the note at the top of server/Dockerfile).
+# This is the .dockerignore Docker actually reads for that build (context
+# root); server/.dockerignore does not apply in this configuration.
+#
+# server/Dockerfile only ever COPYs Cargo.toml, Cargo.lock, protocol/, and
+# server/ — everything below is dead weight in the build context, not
+# something the image needs.
+
+target
+.git
+tests
+docs
+examples
+
+# Desktop app + repo-root tooling/docs — never referenced by
+# server/Dockerfile's COPY set. Anchored to the repository root (leading
+# `/`) since server/src is the license-server crate's own source and must
+# NOT be excluded.
+/.cargo
+/.claude
+/src
+/ui
+/assets
+/build.rs
+/*.md
+/*.diff
+/*.patch
+
+# Never bake secrets into a build context/image layer.
+.env

@@ -1,0 +1,15 @@
+# NOTE: the actual Docker build context for server/Dockerfile is the
+# repository root (needed to reach the sibling protocol/ crate — see
+# docker-compose.yml), so Docker reads the root-level .dockerignore for
+# that build, not this file. This file is kept for documentation/for
+# `docker build server` style contexts and stays in sync with the root one
+# by convention.
+target
+.git
+tests
+docs
+examples
+
+# Never bake secrets into a build context/image layer.
+.env
+server/.env
