@@ -1,6 +1,7 @@
-//! Route modules — one per endpoint group. License/payment/webhook routes
-//! land in later phases (`PHASE4_DESIGN.md` §3), each as its own module
-//! here, following this same pattern.
+//! Route modules — one per endpoint group. Payment/webhook routes land in
+//! a later phase (`PHASE4_DESIGN.md` §3), following this same pattern.
 
+pub mod error;
 pub mod health;
+pub mod license;
 pub mod ready;

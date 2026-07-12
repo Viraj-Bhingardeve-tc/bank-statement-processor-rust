@@ -2,7 +2,7 @@
 name        = "license-server"
 version     = "0.1.0"
 edition     = "2021"
-description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4C.2 scope: domain models, repository interfaces + Postgres implementations, service-layer scaffolding for the non-payment license domain. No Razorpay/payment/webhook logic yet."
+description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4D scope: real Postgres schema for the non-payment license domain, /activate-license, /validate-license, /deactivate-license. No Razorpay/payment/webhook/reconciliation logic yet."
 publish     = false
 
 [[bin]]
@@ -55,6 +55,12 @@ uuid   = { version = "1", features = ["v4", "serde"] }
 # LicenseRepository>` (so services depend on the trait, never a concrete
 # `Pg*` type — PHASE4_DESIGN.md §1.2) needs a trait object. Standard fix.
 async-trait = "0.1"
+
+# ── Shared wire types (PHASE4_DESIGN.md §1.1) ────────────────────────────────
+# Same DTOs `src/license/client.rs`'s desktop-side `HttpLicenseClient` will
+# eventually use — request/response shape can't drift between the two
+# independently, it's a compile error instead.
+license-protocol = { path = "../protocol" }
 
 [dev-dependencies]
 tower      = { version = "0.5", features = ["util"] }

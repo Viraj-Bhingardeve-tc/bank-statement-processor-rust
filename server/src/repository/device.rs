@@ -20,7 +20,30 @@ pub trait DeviceRepository: Send + Sync {
     /// (`LICENSE_DATABASE_SCHEMA.md` §1's comment on `licenses.max_devices`).
     async fn count_active_by_license(&self, license_id: i64) -> Result<i64, RepositoryError>;
 
+    /// The full active-device list, for `409 DEVICE_LIMIT_REACHED`'s
+    /// response (`API_SPECIFICATION.md`: "response includes the existing
+    /// device list so the customer/admin can deactivate one").
+    async fn list_active_by_license(&self, license_id: i64)
+        -> Result<Vec<Device>, RepositoryError>;
+
     async fn insert(&self, new_device: NewDevice) -> Result<Device, RepositoryError>;
+
+    /// Bumps `last_seen_at` to now — called on every successful
+    /// `/validate-license` (and, later, `/heartbeat`) for an already-
+    /// activated device.
+    async fn touch_last_seen(&self, id: i64) -> Result<(), RepositoryError>;
+
+    /// Clears `deactivated_at` and refreshes `last_seen_at` — used when
+    /// `/activate-license` is called again for a device that was
+    /// previously deactivated on this same license (re-activation reuses
+    /// the existing row rather than inserting a second one, since
+    /// `(license_id, device_id)` is unique).
+    async fn reactivate(&self, id: i64) -> Result<(), RepositoryError>;
+
+    /// Sets `deactivated_at` — `/deactivate-license`. Soft-delete, never a
+    /// row removal, same reasoning as every other status transition in
+    /// this schema.
+    async fn deactivate(&self, id: i64) -> Result<(), RepositoryError>;
 }
 
 pub struct PgDeviceRepository {
@@ -91,6 +114,23 @@ impl DeviceRepository for PgDeviceRepository {
         Ok(count)
     }
 
+    async fn list_active_by_license(
+        &self,
+        license_id: i64,
+    ) -> Result<Vec<Device>, RepositoryError> {
+        let rows = sqlx::query_as::<_, DeviceRow>(
+            "SELECT id, license_id, device_id, machine_fingerprint, device_label, \
+                    first_seen_at, last_seen_at, deactivated_at \
+             FROM devices WHERE license_id = $1 AND deactivated_at IS NULL \
+             ORDER BY first_seen_at",
+        )
+        .bind(license_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Device::from).collect())
+    }
+
     async fn insert(&self, new_device: NewDevice) -> Result<Device, RepositoryError> {
         let row = sqlx::query_as::<_, DeviceRow>(
             "INSERT INTO devices (license_id, device_id, machine_fingerprint, device_label) \
@@ -106,5 +146,29 @@ impl DeviceRepository for PgDeviceRepository {
         .await?;
 
         Ok(Device::from(row))
+    }
+
+    async fn touch_last_seen(&self, id: i64) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE devices SET last_seen_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn reactivate(&self, id: i64) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE devices SET deactivated_at = NULL, last_seen_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn deactivate(&self, id: i64) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE devices SET deactivated_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }

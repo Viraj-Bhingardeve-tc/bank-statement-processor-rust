@@ -3442,6 +3442,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "license-protocol",
  "serde",
  "serde_json",
  "sqlx",

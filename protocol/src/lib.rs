@@ -122,6 +122,25 @@ pub struct SubscriptionSummary {
     pub auto_renew: bool,
 }
 
+/// `POST /deactivate-license` — additive beyond the original 7 endpoints
+/// this crate was first built against (`API_SPECIFICATION.md` mentions
+/// device deactivation only as an admin-surface action, not a customer-
+/// facing endpoint). Added in Phase 4D so a customer/support flow can free
+/// up a device slot without an admin dashboard existing yet. Same
+/// `license_id`/`device_id` shape as `ValidateLicenseRequest`, minus the
+/// fields (`machine_fingerprint`, `client_clock`) deactivation doesn't need.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeactivateLicenseRequest {
+    pub license_id: String,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeactivateLicenseResponse {
+    pub status: String,
+    pub devices_active: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +241,18 @@ mod tests {
             status: "active".to_string(),
             current_period_end: Some("2027-07-09T00:00:00Z".to_string()),
             auto_renew: true,
+        });
+    }
+
+    #[test]
+    fn deactivate_license_request_and_response_round_trip() {
+        round_trips(DeactivateLicenseRequest {
+            license_id: "lic_456".to_string(),
+            device_id: "a1b2c3d4-uuid".to_string(),
+        });
+        round_trips(DeactivateLicenseResponse {
+            status: "deactivated".to_string(),
+            devices_active: 0,
         });
     }
 
