@@ -14,7 +14,7 @@
 //! HTTP framework type anywhere in this file, same pattern
 //! `service::license_service` already established in Phase 4D.
 
-use crate::auth::password::verify_password;
+use crate::auth::password::{verify_password, DUMMY_PASSWORD_HASH};
 use crate::auth::token::{generate_session_token, hash_token};
 use crate::domain::{NewSession, Session, User};
 use crate::repository::error::RepositoryError;
@@ -58,18 +58,34 @@ impl AuthService {
     /// `InvalidCredentials` error whether the email is unknown or the
     /// password is wrong — distinguishing the two in the response would
     /// let a caller enumerate registered emails.
+    ///
+    /// **Timing side-channel fix (production readiness audit HIGH finding
+    /// #4):** an unknown email used to return `InvalidCredentials`
+    /// immediately, before ever calling `verify_password`, while a known
+    /// email always paid Argon2's real (deliberately slow) verification
+    /// cost — the same *response body* for both cases, but a measurably
+    /// different *response time*, letting a caller enumerate registered
+    /// emails from latency alone even though the JSON never says which
+    /// case occurred. This method now runs exactly one `verify_password`
+    /// call on every attempt, unknown email or not: real stored hash when
+    /// the user exists, `DUMMY_PASSWORD_HASH` (a fixed, never-secret,
+    /// never-runtime-generated constant) when it doesn't. The dummy
+    /// verification's boolean result is never trusted — success still
+    /// requires an actual `User` row, so no input can authenticate as a
+    /// nonexistent account.
     pub async fn login(&self, email: &str, password: &str) -> Result<LoginOutcome, AuthError> {
-        let user = self
-            .user_repository
-            .find_by_email(email)
-            .await?
-            .ok_or(AuthError::InvalidCredentials)?;
+        let user = self.user_repository.find_by_email(email).await?;
 
-        let matches = verify_password(password, &user.password_hash)
+        let matches = verify_password(password, hash_to_verify(&user))
             .map_err(|e| AuthError::Repository(RepositoryError::InvalidData(e.to_string())))?;
-        if !matches {
-            return Err(AuthError::InvalidCredentials);
-        }
+
+        // `matches` is only ever acted on alongside a real `user` — for
+        // the dummy-hash path `user` is `None`, so this arm rejects
+        // regardless of what `matches` says.
+        let user = match (user, matches) {
+            (Some(user), true) => user,
+            _ => return Err(AuthError::InvalidCredentials),
+        };
 
         let token = generate_session_token();
         let expires_at = Utc::now() + Duration::days(SESSION_LIFETIME_DAYS);
@@ -118,6 +134,18 @@ impl AuthService {
         self.session_repository.revoke(session_id).await?;
         Ok(())
     }
+}
+
+/// The Argon2 hash `login` should verify the caller-supplied password
+/// against: the real stored hash for an existing user, or the fixed
+/// `DUMMY_PASSWORD_HASH` when `find_by_email` found no such user. Pulled
+/// out of `login` as its own pure function so a test can assert on the
+/// selection itself — which hash gets chosen for which input — directly
+/// and deterministically, without timing anything.
+fn hash_to_verify(user: &Option<User>) -> &str {
+    user.as_ref()
+        .map(|u| u.password_hash.as_str())
+        .unwrap_or(DUMMY_PASSWORD_HASH)
 }
 
 #[derive(Debug)]
@@ -335,6 +363,43 @@ mod tests {
 
         let err = service
             .login("nobody@example.com", "anything")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidCredentials));
+    }
+
+    // ── Phase 4J.5: timing side-channel fix ─────────────────────────────
+
+    #[test]
+    fn hash_to_verify_selects_the_dummy_hash_when_no_user_was_found() {
+        // The exact branch `login` takes for an unknown email — proves the
+        // dummy-verification path is genuinely reachable and selects
+        // `DUMMY_PASSWORD_HASH`, without timing anything.
+        assert_eq!(hash_to_verify(&None), DUMMY_PASSWORD_HASH);
+    }
+
+    #[test]
+    fn hash_to_verify_selects_the_real_stored_hash_when_a_user_was_found() {
+        let user = sample_user("customer@example.com", "correct-password");
+        let expected_hash = user.password_hash.clone();
+        assert_eq!(hash_to_verify(&Some(user)), expected_hash);
+    }
+
+    #[tokio::test]
+    async fn login_with_unknown_email_never_authenticates_even_with_the_exact_dummy_password() {
+        // Requirement: the dummy hash's verification result must never be
+        // trusted. Even a caller who somehow knows the literal plaintext
+        // `DUMMY_PASSWORD_HASH` was generated from — so `verify_password`
+        // would return `Ok(true)` against it — still cannot authenticate
+        // as a nonexistent account, because `login` only ever grants a
+        // session alongside a real `User` row.
+        let service = service_with(vec![], vec![]);
+
+        let err = service
+            .login(
+                "nobody@example.com",
+                "dummy-password-for-timing-equalization-4j5",
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, AuthError::InvalidCredentials));
