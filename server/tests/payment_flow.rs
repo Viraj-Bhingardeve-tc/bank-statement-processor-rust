@@ -317,3 +317,99 @@ async fn a_valid_webhook_is_processed_and_a_replay_is_idempotent() {
 
     cleanup_user(&pool, user_id).await;
 }
+
+/// Phase 4J.1 — the actual regression test for the production readiness
+/// audit's CRITICAL finding #1: two *genuinely concurrent* deliveries of
+/// the identical webhook event (real, separate Postgres connections/
+/// transactions racing on `INSERT ... ON CONFLICT DO NOTHING`, not just
+/// two sequential calls like the replay test above) must still apply the
+/// mutation exactly once. Before the fix, both deliveries could pass the
+/// old check-then-act idempotency check before either had written
+/// anything, and both would issue a license.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn concurrent_duplicate_webhook_deliveries_apply_the_mutation_exactly_once() {
+    let pool = connected_pool().await;
+    let secret = "whsec_integration_test_concurrent";
+    let config = license_server::config::AppConfig {
+        razorpay_webhook_secret: Some(secret.to_string()),
+        ..common::test_config()
+    };
+    let app = build_router(AppState::new(config, pool.clone()));
+
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at) \
+         VALUES ($1, 'yearly', 'pending_payment', now()) RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let order_ref = format!("order_{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, provider_ref, status) \
+         VALUES ($1, 499900, 'INR', 'razorpay', $2, 'pending')",
+    )
+    .bind(subscription_id)
+    .bind(&order_ref)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let body = json!({
+        "event": "payment.captured",
+        "payload": { "payment": { "entity": { "id": "pay_concurrent", "order_id": order_ref } } }
+    });
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let signature = sign(secret, &body_bytes);
+
+    // Fire two genuinely concurrent deliveries of the *same* event (same
+    // body ⇒ same fallback event_id, since no X-Razorpay-Event-Id header
+    // is sent) — the scenario Phase 4J.1 fixes: a live webhook racing a
+    // redelivery, or a live webhook racing a concurrent reconciliation
+    // pass discovering the same payment.
+    let app_a = app.clone();
+    let body_a = body_bytes.clone();
+    let signature_a = signature.clone();
+    let task_a =
+        tokio::spawn(async move { post_webhook(&app_a, &body_a, Some(&signature_a)).await });
+
+    let app_b = app.clone();
+    let task_b =
+        tokio::spawn(async move { post_webhook(&app_b, &body_bytes, Some(&signature)).await });
+
+    let (status_a, status_b) = tokio::join!(task_a, task_b);
+    // Both callers see success regardless of which one won the race —
+    // preserving existing API behaviour (a losing caller is not an error).
+    assert_eq!(status_a.unwrap(), StatusCode::OK);
+    assert_eq!(status_b.unwrap(), StatusCode::OK);
+
+    let license_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM licenses WHERE subscription_id = $1")
+            .bind(subscription_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        license_count, 1,
+        "two concurrent deliveries of the same webhook event must issue exactly one license, not two"
+    );
+
+    let subscription_status: String =
+        sqlx::query_scalar("SELECT status FROM subscriptions WHERE id = $1")
+            .bind(subscription_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(subscription_status, "active");
+
+    cleanup_user(&pool, user_id).await;
+}

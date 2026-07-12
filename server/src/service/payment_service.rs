@@ -26,30 +26,21 @@
 //! (with a stable synthetic id, so repeated reconciliation runs are still
 //! idempotent against *each other*) when there's a genuine mismatch.
 //!
-//! **Deliberately not transactional across repository calls
-//! (`PHASE4_DESIGN.md` §4 step 3 asks for "a single database
-//! transaction").** This architecture's repositories each operate on
-//! `&self.pool` independently — there's no shared multi-statement
-//! transaction primitive threaded through them (adding one is a real,
-//! separate piece of work, not bundled into this phase). Correctness
-//! without it rests on two properties instead: (1) every individual step
-//! here is idempotent on its own (setting a status to a value it's
-//! already at, or extending a license's expiry, are both safe to repeat),
-//! and (2) the idempotency ledger row (`payment_webhook_events`) is
-//! written *last*, only after every other write succeeds — so a crash
-//! mid-sequence leaves the ledger silent about this event, and Razorpay's
-//! own webhook retry (or a future reconciliation pass) re-drives the same,
-//! individually-safe-to-repeat sequence rather than double-applying
-//! anything. A crash between two of these steps can still leave the
-//! *local* state briefly inconsistent until the next retry — a real,
-//! narrower gap than "no atomicity at all," and worth closing with a real
-//! transaction if this becomes the system of record before a
-//! reconciliation job (deliberately out of scope this phase) exists to
-//! paper over it.
+//! **Phase 4J.1 (production readiness audit, CRITICAL finding #1):**
+//! `process_webhook_event` used to check `payment_webhook_events` for
+//! `(provider, event_id)` and only insert that ledger row *last*, after
+//! every other write — a check-then-act race where two concurrent calls
+//! for the same event could both pass the "not found" check before either
+//! had written anything. The claim now happens *first*, atomically, via
+//! `PaymentWebhookEventRepository::claim_and_apply` — see that trait's
+//! doc comment for the full fix. This method's job is unchanged: resolve
+//! *what* should be applied (`repository::payment_webhook_event::
+//! WebhookMutation`) from already-known local state, then hand it to the
+//! repository to claim-and-apply atomically.
 
 use crate::domain::{
-    LicenseRecordStatus, NewLicense, NewPayment, NewPaymentWebhookEvent, NewSubscription,
-    PaymentStatus, PlanType, SubscriptionStatus,
+    NewPayment, NewPaymentWebhookEvent, NewSubscription, PaymentStatus, PlanType,
+    SubscriptionStatus,
 };
 use crate::razorpay::{
     extract_entity_ref, CreateCheckoutRequest, RazorpayClient, RazorpayPayment,
@@ -58,7 +49,9 @@ use crate::razorpay::{
 use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
 use crate::repository::payment::PaymentRepository;
-use crate::repository::payment_webhook_event::PaymentWebhookEventRepository;
+use crate::repository::payment_webhook_event::{
+    LicenseMutation, PaymentWebhookEventRepository, WebhookMutation,
+};
 use crate::repository::subscription::SubscriptionRepository;
 use chrono::{Duration, Utc};
 use rand::Rng;
@@ -151,69 +144,72 @@ impl PaymentService {
     /// verification has already passed (`routes::payment`); `event_id` is
     /// what the handler extracted from `X-Razorpay-Event-Id` (or derived,
     /// if absent — see that module). Idempotent: a second call with the
-    /// same `event_id` is a no-op.
+    /// same `event_id` is a no-op — and, since Phase 4J.1, a *concurrent*
+    /// second call is too (see `PaymentWebhookEventRepository::
+    /// claim_and_apply`'s doc comment).
+    ///
+    /// Resolves *what* this event implies (`resolve_*` below — read-only
+    /// lookups keyed by immutable provider references, safe to run before
+    /// any idempotency claim) into a `WebhookMutation`, then hands both the
+    /// ledger row and the mutation to the repository, which claims and
+    /// applies them atomically. If the claim loses the race (the event was
+    /// already processed by a concurrent or earlier call), the repository
+    /// applies nothing — this method still returns `Ok(())`.
     pub async fn process_webhook_event(
         &self,
         event_id: &str,
         payload: RazorpayWebhookPayload,
     ) -> Result<(), PaymentOperationError> {
-        if self
-            .webhook_event_repository
-            .find_by_provider_and_event_id(PROVIDER, event_id)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        match payload.event.as_str() {
-            "payment.captured" => self.handle_payment_captured(&payload).await?,
-            "payment.failed" => self.handle_payment_failed(&payload).await?,
+        let mutation = match payload.event.as_str() {
+            "payment.captured" => self.resolve_payment_captured(&payload).await?,
+            "payment.failed" => self.resolve_payment_failed(&payload).await?,
             "subscription.activated" | "subscription.charged" => {
-                self.handle_subscription_active(&payload).await?
+                self.resolve_subscription_active(&payload).await?
             }
             "subscription.cancelled" | "subscription.halted" => {
-                self.handle_subscription_inactive(&payload).await?
+                self.resolve_subscription_inactive(&payload).await?
             }
             other => {
                 tracing::info!(
                     event = other,
                     "unrecognized webhook event type; acknowledged, no action taken"
                 );
+                WebhookMutation::None
             }
-        }
+        };
+
+        let new_event = NewPaymentWebhookEvent {
+            provider: PROVIDER.to_string(),
+            event_id: event_id.to_string(),
+            event_type: payload.event.clone(),
+            payload: payload.payload.clone(),
+        };
 
         self.webhook_event_repository
-            .insert(NewPaymentWebhookEvent {
-                provider: PROVIDER.to_string(),
-                event_id: event_id.to_string(),
-                event_type: payload.event.clone(),
-                payload: payload.payload.clone(),
-            })
+            .claim_and_apply(new_event, mutation)
             .await?;
 
         Ok(())
     }
 
-    async fn handle_payment_captured(
+    async fn resolve_payment_captured(
         &self,
         payload: &RazorpayWebhookPayload,
-    ) -> Result<(), PaymentOperationError> {
+    ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(provider_ref) = extract_entity_ref(&payload.payload, "payment") else {
             tracing::warn!("payment.captured webhook missing a usable entity reference; ignoring");
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
-        self.mark_payment_succeeded_and_activate(&provider_ref)
-            .await
+        self.resolve_activation(&provider_ref).await
     }
 
-    async fn handle_payment_failed(
+    async fn resolve_payment_failed(
         &self,
         payload: &RazorpayWebhookPayload,
-    ) -> Result<(), PaymentOperationError> {
+    ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(provider_ref) = extract_entity_ref(&payload.payload, "payment") else {
             tracing::warn!("payment.failed webhook missing a usable entity reference; ignoring");
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
         let Some(payment) = self
             .payment_repository
@@ -221,33 +217,31 @@ impl PaymentService {
             .await?
         else {
             tracing::warn!(provider_ref = %provider_ref, "payment.failed webhook references an unknown payment; ignoring");
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
-        self.payment_repository
-            .update_status(payment.id, PaymentStatus::Failed)
-            .await?;
-        Ok(())
+        Ok(WebhookMutation::MarkPaymentFailed {
+            payment_id: payment.id,
+        })
     }
 
-    async fn handle_subscription_active(
+    async fn resolve_subscription_active(
         &self,
         payload: &RazorpayWebhookPayload,
-    ) -> Result<(), PaymentOperationError> {
+    ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(provider_ref) = extract_entity_ref(&payload.payload, "subscription") else {
             tracing::warn!("subscription webhook missing a usable entity reference; ignoring");
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
-        self.mark_payment_succeeded_and_activate(&provider_ref)
-            .await
+        self.resolve_activation(&provider_ref).await
     }
 
-    async fn handle_subscription_inactive(
+    async fn resolve_subscription_inactive(
         &self,
         payload: &RazorpayWebhookPayload,
-    ) -> Result<(), PaymentOperationError> {
+    ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(provider_ref) = extract_entity_ref(&payload.payload, "subscription") else {
             tracing::warn!("subscription webhook missing a usable entity reference; ignoring");
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
         let Some(payment) = self
             .payment_repository
@@ -255,14 +249,14 @@ impl PaymentService {
             .await?
         else {
             tracing::warn!(provider_ref = %provider_ref, "subscription webhook references an unknown payment; ignoring");
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
         let Some(subscription) = self
             .subscription_repository
             .find_by_id(payment.subscription_id)
             .await?
         else {
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
 
         let new_status = if payload.event == "subscription.halted" {
@@ -270,80 +264,69 @@ impl PaymentService {
         } else {
             SubscriptionStatus::Cancelled
         };
-        self.subscription_repository
-            .update_status(subscription.id, new_status, subscription.current_period_end)
-            .await?;
-        Ok(())
+        Ok(WebhookMutation::UpdateSubscriptionStatus {
+            subscription_id: subscription.id,
+            status: new_status,
+            current_period_end: subscription.current_period_end,
+        })
     }
 
     /// Shared by both `payment.captured` (one-time, Payment Links) and
     /// `subscription.activated`/`.charged` (recurring) — see this module's
     /// doc comment for the "reuse the original payments row on renewal"
-    /// simplification.
-    async fn mark_payment_succeeded_and_activate(
+    /// simplification. Resolves what *should* happen without mutating
+    /// anything itself; `PaymentWebhookEventRepository::claim_and_apply`
+    /// performs the actual write, atomically with the idempotency claim,
+    /// only if this call wins it.
+    async fn resolve_activation(
         &self,
         provider_ref: &str,
-    ) -> Result<(), PaymentOperationError> {
+    ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(payment) = self
             .payment_repository
             .find_by_provider_ref(provider_ref)
             .await?
         else {
             tracing::warn!(provider_ref = %provider_ref, "webhook references an unknown payment; ignoring (no local record)");
-            return Ok(());
+            return Ok(WebhookMutation::None);
         };
-        self.payment_repository
-            .update_status(payment.id, PaymentStatus::Succeeded)
-            .await?;
-        self.activate_subscription_and_license(payment.subscription_id)
-            .await
-    }
 
-    async fn activate_subscription_and_license(
-        &self,
-        subscription_id: i64,
-    ) -> Result<(), PaymentOperationError> {
         let Some(subscription) = self
             .subscription_repository
-            .find_by_id(subscription_id)
+            .find_by_id(payment.subscription_id)
             .await?
         else {
             return Err(PaymentOperationError::Repository(
                 RepositoryError::InvalidData(format!(
-                    "payment references missing subscription {subscription_id}"
+                    "payment references missing subscription {}",
+                    payment.subscription_id
                 )),
             ));
         };
 
         let period_end = plan_duration(subscription.plan_type).map(|d| Utc::now() + d);
-        self.subscription_repository
-            .update_status(subscription.id, SubscriptionStatus::Active, period_end)
-            .await?;
 
-        match self
+        let license = match self
             .license_repository
             .find_latest_by_subscription(subscription.id)
             .await?
         {
-            Some(existing) => {
-                self.license_repository
-                    .extend(existing.id, LicenseRecordStatus::Active, period_end)
-                    .await?;
-            }
-            None => {
-                self.license_repository
-                    .insert(NewLicense {
-                        subscription_id: subscription.id,
-                        license_key: generate_license_key(),
-                        status: LicenseRecordStatus::Active,
-                        expires_at: period_end,
-                        max_devices: 1,
-                        grace_period_days: 7,
-                    })
-                    .await?;
-            }
-        }
-        Ok(())
+            Some(existing) => LicenseMutation::Extend {
+                license_id: existing.id,
+            },
+            None => LicenseMutation::Insert {
+                license_key: generate_license_key(),
+                max_devices: 1,
+                grace_period_days: 7,
+            },
+        };
+
+        Ok(WebhookMutation::ActivateSubscriptionAndLicense {
+            payment_id: payment.id,
+            subscription_id: subscription.id,
+            period_end,
+            license,
+        })
     }
 
     /// `PHASE4_DESIGN.md` §12 — the pull-based backstop for webhooks that
@@ -593,8 +576,11 @@ fn generate_license_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{License, Payment, PaymentWebhookEvent, Subscription};
+    use crate::domain::{
+        License, LicenseRecordStatus, NewLicense, Payment, PaymentWebhookEvent, Subscription,
+    };
     use crate::razorpay::{CreateCheckoutResponse, RazorpayError};
+    use crate::repository::payment_webhook_event::ClaimOutcome;
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::Mutex;
@@ -667,53 +653,127 @@ mod tests {
         }
     }
 
+    /// Simulates `claim_and_apply`'s atomic claim-then-mutate contract
+    /// entirely in memory: the `events` `Mutex` is the mock's own
+    /// idempotency ledger (a check-then-insert under one lock acquisition,
+    /// so two calls racing on the same `(provider, event_id)` can't both
+    /// see "not claimed"), and — only for the caller that wins the claim —
+    /// the resolved `WebhookMutation` is applied by calling straight
+    /// through to the *same* payment/subscription/license mocks the test
+    /// itself holds handles to, exactly mirroring what the real
+    /// `PgPaymentWebhookEventRepository::claim_and_apply` does against
+    /// real tables on one transaction.
     struct MockWebhookEventRepository {
         events: Mutex<Vec<PaymentWebhookEvent>>,
         next_id: Mutex<i64>,
+        payment_repository: Arc<dyn PaymentRepository>,
+        subscription_repository: Arc<dyn SubscriptionRepository>,
+        license_repository: Arc<dyn LicenseRepository>,
     }
 
     impl MockWebhookEventRepository {
-        fn new() -> Self {
+        fn new(
+            payment_repository: Arc<dyn PaymentRepository>,
+            subscription_repository: Arc<dyn SubscriptionRepository>,
+            license_repository: Arc<dyn LicenseRepository>,
+        ) -> Self {
             MockWebhookEventRepository {
                 events: Mutex::new(Vec::new()),
                 next_id: Mutex::new(1),
+                payment_repository,
+                subscription_repository,
+                license_repository,
             }
         }
     }
 
     #[async_trait]
     impl PaymentWebhookEventRepository for MockWebhookEventRepository {
-        async fn find_by_provider_and_event_id(
-            &self,
-            provider: &str,
-            event_id: &str,
-        ) -> Result<Option<PaymentWebhookEvent>, RepositoryError> {
-            Ok(self
-                .events
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|e| e.provider == provider && e.event_id == event_id)
-                .cloned())
-        }
-
-        async fn insert(
+        async fn claim_and_apply(
             &self,
             new_event: NewPaymentWebhookEvent,
-        ) -> Result<PaymentWebhookEvent, RepositoryError> {
-            let mut next_id = self.next_id.lock().unwrap();
-            let id = *next_id;
-            *next_id += 1;
-            let event = PaymentWebhookEvent {
-                id,
-                provider: new_event.provider,
-                event_id: new_event.event_id,
-                event_type: new_event.event_type,
-                payload: new_event.payload,
-                processed_at: Utc::now(),
-            };
-            self.events.lock().unwrap().push(event.clone());
-            Ok(event)
+            mutation: WebhookMutation,
+        ) -> Result<ClaimOutcome, RepositoryError> {
+            {
+                // Claim: check-and-insert under one lock acquisition, with
+                // no `.await` point in between — the same "only one
+                // concurrent caller can ever win" guarantee the real
+                // `INSERT ... ON CONFLICT DO NOTHING` provides.
+                let mut events = self.events.lock().unwrap();
+                if events
+                    .iter()
+                    .any(|e| e.provider == new_event.provider && e.event_id == new_event.event_id)
+                {
+                    return Ok(ClaimOutcome::AlreadyProcessed);
+                }
+                let mut next_id = self.next_id.lock().unwrap();
+                let id = *next_id;
+                *next_id += 1;
+                events.push(PaymentWebhookEvent {
+                    id,
+                    provider: new_event.provider,
+                    event_id: new_event.event_id,
+                    event_type: new_event.event_type,
+                    payload: new_event.payload,
+                    processed_at: Utc::now(),
+                });
+            }
+
+            match mutation {
+                WebhookMutation::None => {}
+                WebhookMutation::MarkPaymentFailed { payment_id } => {
+                    self.payment_repository
+                        .update_status(payment_id, PaymentStatus::Failed)
+                        .await?;
+                }
+                WebhookMutation::UpdateSubscriptionStatus {
+                    subscription_id,
+                    status,
+                    current_period_end,
+                } => {
+                    self.subscription_repository
+                        .update_status(subscription_id, status, current_period_end)
+                        .await?;
+                }
+                WebhookMutation::ActivateSubscriptionAndLicense {
+                    payment_id,
+                    subscription_id,
+                    period_end,
+                    license,
+                } => {
+                    self.payment_repository
+                        .update_status(payment_id, PaymentStatus::Succeeded)
+                        .await?;
+                    self.subscription_repository
+                        .update_status(subscription_id, SubscriptionStatus::Active, period_end)
+                        .await?;
+                    match license {
+                        LicenseMutation::Extend { license_id } => {
+                            self.license_repository
+                                .extend(license_id, LicenseRecordStatus::Active, period_end)
+                                .await?;
+                        }
+                        LicenseMutation::Insert {
+                            license_key,
+                            max_devices,
+                            grace_period_days,
+                        } => {
+                            self.license_repository
+                                .insert(NewLicense {
+                                    subscription_id,
+                                    license_key,
+                                    status: LicenseRecordStatus::Active,
+                                    expires_at: period_end,
+                                    max_devices,
+                                    grace_period_days,
+                                })
+                                .await?;
+                        }
+                    }
+                }
+            }
+
+            Ok(ClaimOutcome::Applied)
         }
     }
 
@@ -959,11 +1019,18 @@ mod tests {
         Arc<MockSubscriptionRepository>,
         Arc<MockLicenseRepository>,
     ) {
+        let payment_repository: Arc<dyn PaymentRepository> =
+            Arc::new(MockPaymentRepository::with(payments));
         let subscription_repository = Arc::new(MockSubscriptionRepository::with(subscriptions));
         let license_repository = Arc::new(MockLicenseRepository::with(licenses));
+        let webhook_event_repository = Arc::new(MockWebhookEventRepository::new(
+            payment_repository.clone(),
+            subscription_repository.clone(),
+            license_repository.clone(),
+        ));
         let service = PaymentService::new(
-            Arc::new(MockPaymentRepository::with(payments)),
-            Arc::new(MockWebhookEventRepository::new()),
+            payment_repository,
+            webhook_event_repository,
             subscription_repository.clone(),
             license_repository.clone(),
             Arc::new(MockRazorpayClient {
@@ -1001,9 +1068,14 @@ mod tests {
         let payment_repository = Arc::new(MockPaymentRepository::with(payments));
         let subscription_repository = Arc::new(MockSubscriptionRepository::with(subscriptions));
         let license_repository = Arc::new(MockLicenseRepository::with(licenses));
+        let webhook_event_repository = Arc::new(MockWebhookEventRepository::new(
+            payment_repository.clone(),
+            subscription_repository.clone(),
+            license_repository.clone(),
+        ));
         let service = PaymentService::new(
             payment_repository.clone(),
-            Arc::new(MockWebhookEventRepository::new()),
+            webhook_event_repository,
             subscription_repository.clone(),
             license_repository.clone(),
             Arc::new(MockRazorpayClient {
@@ -1156,6 +1228,61 @@ mod tests {
         // pure no-op (idempotency check short-circuits before any write).
         let licenses_for_subscription = licenses.find_latest_by_subscription(10).await.unwrap();
         assert!(licenses_for_subscription.is_some());
+    }
+
+    /// Phase 4J.1 regression test — two *concurrent* calls for the same
+    /// event, not two sequential ones (the case above). Proves the claim
+    /// is what gates the mutation: `MockWebhookEventRepository::
+    /// claim_and_apply` only ever pushes a license once its own `Mutex`-
+    /// guarded claim succeeds, so no interleaving of these two spawned
+    /// tasks can result in two licenses. The real race this guards against
+    /// — two genuinely separate database connections/transactions racing
+    /// on `INSERT ... ON CONFLICT DO NOTHING` — is additionally proven
+    /// against a real Postgres by
+    /// `tests/payment_flow.rs`'s
+    /// `concurrent_duplicate_webhook_deliveries_apply_the_mutation_exactly_once`.
+    #[tokio::test]
+    async fn concurrent_duplicate_webhook_deliveries_apply_the_mutation_exactly_once() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+        let service = Arc::new(service);
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({ "payment": { "entity": { "id": "pay_xyz", "order_id": "order_abc" } } }),
+        };
+
+        let service_a = Arc::clone(&service);
+        let payload_a = payload.clone();
+        let task_a =
+            tokio::spawn(
+                async move { service_a.process_webhook_event("evt_race", payload_a).await },
+            );
+
+        let service_b = Arc::clone(&service);
+        let task_b =
+            tokio::spawn(async move { service_b.process_webhook_event("evt_race", payload).await });
+
+        let (result_a, result_b) = tokio::join!(task_a, task_b);
+        result_a.unwrap().unwrap();
+        result_b.unwrap().unwrap();
+
+        let license_count = licenses
+            .licenses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.subscription_id == 10)
+            .count();
+        assert_eq!(
+            license_count, 1,
+            "two concurrent deliveries of the same event must issue exactly one license, not two"
+        );
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
     }
 
     #[tokio::test]
