@@ -9,6 +9,7 @@
 
 use crate::auth::token::hash_token;
 use crate::auth::webhook_signature::verify_webhook_signature;
+use crate::observability::{WEBHOOK_EVENTS_TOTAL, WEBHOOK_REQUESTS_TOTAL};
 use crate::razorpay::RazorpayWebhookPayload;
 use crate::routes::auth::{require_session, AuthenticatedSession};
 use crate::routes::error::ApiError;
@@ -80,10 +81,13 @@ async fn webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<WebhookAck>, ApiError> {
-    let signature = headers
+    let Some(signature) = headers
         .get("x-razorpay-signature")
         .and_then(|v| v.to_str().ok())
-        .ok_or(ApiError::Unauthorized)?;
+    else {
+        metrics::counter!(WEBHOOK_REQUESTS_TOTAL, "outcome" => "missing_signature").increment(1);
+        return Err(ApiError::Unauthorized);
+    };
 
     let Some(secret) = state.config.razorpay_webhook_secret.as_deref() else {
         // A missing secret is a real configuration problem — logged loudly
@@ -92,16 +96,23 @@ async fn webhook(
         // secret is wrong or absent isn't Razorpay's concern, and telling
         // them apart in the response would be a minor information leak.
         tracing::error!("RAZORPAY_WEBHOOK_SECRET is not configured; rejecting all webhook calls");
+        metrics::counter!(WEBHOOK_REQUESTS_TOTAL, "outcome" => "not_configured").increment(1);
         return Err(ApiError::Unauthorized);
     };
 
     if !verify_webhook_signature(secret, &body, signature) {
         tracing::warn!("razorpay webhook signature verification failed; rejecting");
+        metrics::counter!(WEBHOOK_REQUESTS_TOTAL, "outcome" => "invalid_signature").increment(1);
         return Err(ApiError::Unauthorized);
     }
 
-    let payload: RazorpayWebhookPayload =
-        serde_json::from_slice(&body).map_err(|e| ApiError::InvalidRequest(e.to_string()))?;
+    let payload: RazorpayWebhookPayload = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(e) => {
+            metrics::counter!(WEBHOOK_REQUESTS_TOTAL, "outcome" => "invalid_payload").increment(1);
+            return Err(ApiError::InvalidRequest(e.to_string()));
+        }
+    };
     let event_id = resolve_event_id(&headers, &body);
 
     // Logged post-signature-verification only — event id/type are Razorpay
@@ -109,12 +120,19 @@ async fn webhook(
     // mean logging attacker-controlled input from an unauthenticated call.
     tracing::info!(event_id = %event_id, event_type = %payload.event, "received razorpay webhook");
 
-    state
+    let event_type = payload.event.clone();
+    if let Err(e) = state
         .payment_service
         .process_webhook_event(&event_id, payload)
-        .await?;
+        .await
+    {
+        metrics::counter!(WEBHOOK_REQUESTS_TOTAL, "outcome" => "processing_error").increment(1);
+        return Err(e.into());
+    }
 
     tracing::info!(event_id = %event_id, "razorpay webhook processed");
+    metrics::counter!(WEBHOOK_REQUESTS_TOTAL, "outcome" => "processed").increment(1);
+    metrics::counter!(WEBHOOK_EVENTS_TOTAL, "event_type" => event_type).increment(1);
 
     Ok(Json(WebhookAck { status: "ok" }))
 }

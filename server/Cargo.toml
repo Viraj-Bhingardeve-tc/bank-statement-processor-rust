@@ -111,3 +111,16 @@ reqwest = { version = "0.12", features = ["json"] }
 # dev-dependencies (was test-only, via `tower::ServiceExt::oneshot`) now that
 # production code depends on it too.
 tower = { version = "0.5", features = ["util"] }
+
+# ── Metrics (Phase 4I.2 — PHASE4_DESIGN.md §8.3 "Operational properties") ──
+# `metrics` is the facade macros (`counter!`/`histogram!`/`gauge!`) instrumented
+# code calls into (`lib.rs`'s HTTP middleware, `routes::payment`'s webhook
+# handler, `reconciliation.rs`) without depending on a concrete exporter.
+metrics = "0.24"
+# The concrete recorder: aggregates in memory and renders Prometheus text
+# exposition format on demand (`routes::metrics`'s `GET /metrics` calls
+# `PrometheusHandle::render()` directly) — no default features, since this
+# crate never needs the bundled push-gateway/hyper-listener machinery
+# (`default-features = false` matches this file's existing `sqlx` precedent
+# of trimming unused feature surface).
+metrics-exporter-prometheus = { version = "0.18", default-features = false }

@@ -1,5 +1,15 @@
 //! `license-server` — Phase 4 licensing + payment server.
 //!
+//! **Phase 4I.2 scope** (`PHASE4_DESIGN.md` §8.3 "Operational properties"):
+//! production monitoring — a Prometheus-compatible `GET /metrics`
+//! (`routes::metrics`) exposing HTTP request count/duration/in-flight
+//! (`observability::track_http_metrics`, layered onto the router below),
+//! webhook counts (`routes::payment`), reconciliation job run counts
+//! (`reconciliation.rs`), and database pool gauges (computed at scrape
+//! time). Builds on Phase 4I.1's logging/request-IDs/graceful shutdown, all
+//! unchanged — no new behavior on any existing endpoint, `/healthz`
+//! untouched.
+//!
 //! **Phase 4I.1 scope** (`PHASE4_DESIGN.md` §8.3 "Logging"): production
 //! observability — every request gets a propagated `x-request-id` and a
 //! `tracing` span (`build_router`, below) logged at INFO alongside
@@ -24,6 +34,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod observability;
 pub mod razorpay;
 pub mod reconciliation;
 pub mod repository;
@@ -53,6 +64,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(routes::health::router())
         .merge(routes::ready::router())
+        .merge(routes::metrics::router())
         .merge(routes::license::router())
         .merge(routes::auth::router(state.clone()))
         .merge(routes::payment::router(state.clone()))
@@ -93,5 +105,12 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER.clone())),
         )
+        // Phase 4I.2: HTTP request-count/duration/in-flight metrics — a
+        // separate `.layer()` call (rather than folded into the
+        // `ServiceBuilder` above) since it has no ordering dependency on
+        // request-id/tracing, only on `MatchedPath` already being in the
+        // request's extensions, which axum guarantees for any middleware
+        // added via `Router::layer` regardless of relative order.
+        .layer(axum::middleware::from_fn(observability::track_http_metrics))
         .with_state(state)
 }

@@ -30,13 +30,38 @@ const INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// A failed run (e.g. Razorpay unreachable) is logged and the loop
 /// continues to the next tick — reconciliation failing must never affect
 /// the server's ability to keep serving normal traffic.
+///
+/// Phase 4I.2 adds `reconciliation_runs_total`/
+/// `reconciliation_payments_checked_total`/
+/// `reconciliation_payments_healed_total` metrics here, alongside the
+/// logging Phase 4G already established — same information, machine-
+/// readable for an alerting rule (e.g. "no successful run in the last N
+/// hours") rather than only grep-able in logs.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(INTERVAL);
         loop {
             interval.tick().await;
-            if let Err(e) = state.payment_service.reconcile_once().await {
-                tracing::error!(error = %e, "reconciliation run failed; will retry next tick");
+            match state.payment_service.reconcile_once().await {
+                Ok(summary) => {
+                    metrics::counter!(
+                        crate::observability::RECONCILIATION_RUNS_TOTAL,
+                        "result" => "success",
+                    )
+                    .increment(1);
+                    metrics::counter!(crate::observability::RECONCILIATION_PAYMENTS_CHECKED_TOTAL)
+                        .increment(summary.checked as u64);
+                    metrics::counter!(crate::observability::RECONCILIATION_PAYMENTS_HEALED_TOTAL)
+                        .increment(summary.healed as u64);
+                }
+                Err(e) => {
+                    metrics::counter!(
+                        crate::observability::RECONCILIATION_RUNS_TOTAL,
+                        "result" => "failure",
+                    )
+                    .increment(1);
+                    tracing::error!(error = %e, "reconciliation run failed; will retry next tick");
+                }
             }
         }
     })

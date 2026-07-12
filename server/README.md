@@ -133,6 +133,55 @@ All configuration is environment variables, read once at startup
 `DATABASE_URL` is required; the Razorpay variables are optional (Razorpay integration is
 simply unavailable, not a startup failure, when unset).
 
+## Monitoring
+
+Three unauthenticated operational endpoints, in addition to the customer-facing API
+(`API_SPECIFICATION.md`) — none of them require a bearer token, matching each other's existing
+precedent (`PHASE4_DESIGN.md` §8.3):
+
+| Endpoint     | Purpose                                                                                   |
+|--------------|--------------------------------------------------------------------------------------------|
+| `GET /healthz` | Liveness — "the process is running." No database dependency. Used by Docker's `healthcheck:` directive. |
+| `GET /readyz`  | Readiness — liveness **and** the database is reachable. `503` (not `500`) when the database can't be queried. |
+| `GET /metrics` | Prometheus-compatible scrape endpoint (Phase 4I.2), described below.                        |
+
+### `GET /metrics`
+
+Returns the current process's metrics in Prometheus text exposition format
+(`Content-Type: text/plain; version=0.0.4; charset=utf-8`). Point a Prometheus server at it with a
+scrape config along these lines:
+
+```yaml
+scrape_configs:
+  - job_name: license-server
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["license.example.com:443"]
+    scheme: https
+```
+
+Metrics exposed (every counter/gauge/histogram also carries a `# HELP`/`# TYPE` line in the
+scrape itself — `server/src/observability.rs` is the source of truth if this table and the code
+ever drift):
+
+| Metric | Type | Labels | What it means |
+|---|---|---|---|
+| `http_requests_total` | counter | `method`, `path`, `status` | Every HTTP request handled, by matched route, not raw URI (bounded label cardinality — an unmatched/404 request falls back to the raw path). |
+| `http_request_duration_seconds` | histogram | `method`, `path`, `status` | Request latency. |
+| `http_requests_in_flight` | gauge | — | Requests currently being handled (a sudden climb with no matching drop is a stuck-handler/slow-downstream signal — e.g. Razorpay hanging on `/create-checkout-session`). |
+| `webhook_requests_total` | counter | `outcome` | Every inbound call to `/webhooks/razorpay`, by outcome (`processed`, `missing_signature`, `invalid_signature`, `not_configured`, `invalid_payload`, `processing_error`). A nonzero rate of anything but `processed` is worth alerting on — see §4/§5's webhook-trust-boundary reasoning in `PHASE4_DESIGN.md`. |
+| `webhook_events_total` | counter | `event_type` | Successfully processed Razorpay events, by type (`payment.captured`, `subscription.charged`, etc.). |
+| `reconciliation_runs_total` | counter | `result` (`success`/`failure`) | Every reconciliation job tick (`PHASE4_DESIGN.md` §12) — alert if there's been no `success` in longer than a few tick intervals (15 minutes each). |
+| `reconciliation_payments_checked_total` | counter | — | Cumulative Razorpay payments inspected across all runs. |
+| `reconciliation_payments_healed_total` | counter | — | Cumulative payments healed — i.e. a webhook never arrived and this job caught it instead. A sustained nonzero rate here means webhook delivery is unhealthy even though the system is still self-correcting. |
+| `db_pool_connections` | gauge | — | Current total connections (idle + in-use) held by the Postgres pool. Computed at scrape time from `PgPool::size()` — not a background poller. |
+| `db_pool_idle_connections` | gauge | — | Current idle connections. `db_pool_connections - db_pool_idle_connections` is connections actually in use. |
+
+`/metrics` never exposes secrets or per-customer data — every value is an aggregate
+count/duration/gauge (see `server/src/observability.rs`'s own doc comment). It goes through the
+same HTTP-metrics middleware as every other route, so scraping it also counts as one more
+`http_requests_total{path="/metrics", ...}` observation.
+
 ## Running locally without Docker
 
 ```sh

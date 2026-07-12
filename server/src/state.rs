@@ -19,6 +19,7 @@ use crate::repository::session::PgSessionRepository;
 use crate::repository::subscription::PgSubscriptionRepository;
 use crate::repository::user::PgUserRepository;
 use crate::service::{AuthService, LicenseService, PaymentService};
+use metrics_exporter_prometheus::PrometheusHandle;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -31,6 +32,11 @@ pub struct AppState {
     pub license_service: Arc<LicenseService>,
     pub auth_service: Arc<AuthService>,
     pub payment_service: Arc<PaymentService>,
+    /// The process-wide Prometheus recorder handle (`observability::handle`)
+    /// — only `routes::metrics`'s `GET /metrics` handler actually calls
+    /// `.render()` on it; every other metric call site instruments through
+    /// the `metrics` crate's own macros instead of touching this field.
+    pub metrics_handle: PrometheusHandle,
 }
 
 impl AppState {
@@ -64,6 +70,7 @@ impl AppState {
             license_service,
             auth_service,
             payment_service,
+            metrics_handle: crate::observability::handle(),
         }
     }
 }
