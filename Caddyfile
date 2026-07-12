@@ -1,0 +1,27 @@
+# Caddyfile — reverse proxy + automatic HTTPS for the licensing server
+# (PHASE4_DESIGN.md §8: "single VPS, Docker Compose, Caddy for TLS,
+# ... custom domain").
+#
+# Replace the placeholder domain below with the real one before deploying
+# (server/README.md's "DNS requirements" / "First deployment" sections).
+# Do not commit a real domain here.
+license.example.com {
+	# zstd preferred over gzip when the client supports it; Caddy negotiates
+	# per-request via Accept-Encoding, this just enables both.
+	encode zstd gzip
+
+	# Everything — including /healthz and /readyz — proxies to
+	# license-server:8080 (the `licensing` Docker network, docker-compose.yml).
+	# No path matcher: the health endpoints stay reachable at
+	# https://license.example.com/healthz and /readyz, same as every other
+	# route, per PHASE4_DESIGN.md §8.3's "GET /healthz ... used by Docker's
+	# own healthcheck directive" (and manually/by an uptime monitor here).
+	reverse_proxy license-server:8080
+}
+
+# HTTPS is automatic: Caddy provisions and renews a certificate (Let's
+# Encrypt by default, HTTP-01 challenge over :80) the first time it sees a
+# request for the domain above — no separate tls/acme directive needed for
+# the default case. Plain HTTP on :80 is handled by Caddy itself (ACME
+# challenge + redirect to HTTPS), which is why :80 stays published in
+# docker-compose.yml even though every real request ends up on :443.

@@ -1,16 +1,47 @@
-# Production deployment foundation for the licensing server
-# (PHASE4_DESIGN.md §8 — VPS + Docker Compose + Postgres; Caddy/TLS is a
-# later addition, not part of this phase, so `license-server` publishes
-# :8080 directly here for now).
+# Production deployment for the licensing server
+# (PHASE4_DESIGN.md §8 — VPS + Docker Compose + Caddy + Postgres).
 #
 # Usage:
 #   1. cp server/.env.example server/.env   # fill in real values, never commit
 #   2. export POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB (or put them in
 #      a repository-root .env — docker compose loads that automatically) so
 #      they match the credentials embedded in server/.env's DATABASE_URL
-#   3. docker compose up -d --build
+#   3. Edit Caddyfile: replace the placeholder domain with your real one,
+#      and point that domain's DNS at this VPS (server/README.md's
+#      "DNS requirements" / "First deployment" sections)
+#   4. docker compose up -d --build
+#
+# Only `caddy` publishes ports to the host (80/443) — `license-server` and
+# `postgres` are reachable only over the internal `licensing` network, never
+# bound to the host's public interface (PHASE4_DESIGN.md §8.1: "a
+# misconfiguration can't accidentally expose Postgres or the raw axum port
+# to the internet — the network topology enforces it, not just a firewall
+# rule someone could forget").
 
 services:
+  caddy:
+    # `:2` tracks the latest stable Caddy 2.x release (not a moving
+    # `latest` tag that could jump an unannounced major version); `-alpine`
+    # keeps the runtime image small, same reasoning as license-server's own
+    # slim runtime stage (server/Dockerfile).
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy's own state: issued certificates + ACME account (`caddy_data`)
+      # and its running config (`caddy_config`) — named volumes so
+      # `docker compose down` (without `-v`) never re-triggers certificate
+      # issuance (and risks Let's Encrypt's rate limits) on the next start.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - license-server
+    networks:
+      - licensing
+
   postgres:
     image: postgres:16
     restart: unless-stopped
@@ -26,6 +57,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - licensing
 
   license-server:
     build:
@@ -37,8 +70,19 @@ services:
         condition: service_healthy
     env_file:
       - server/.env
-    ports:
-      - "8080:8080"
+    # Reachable at license-server:8080 from other containers on the
+    # `licensing` network (Caddy's reverse_proxy target — see Caddyfile);
+    # deliberately NOT published to the host (see the network-topology note
+    # above).
+    expose:
+      - "8080"
+    networks:
+      - licensing
+
+networks:
+  licensing:
 
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
