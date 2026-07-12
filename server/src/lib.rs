@@ -1,14 +1,17 @@
 //! `license-server` — Phase 4 licensing + payment server.
 //!
-//! **Phase 4D scope** (`PHASE4_DESIGN.md` §13 phase 2): the real Postgres
-//! schema for the non-payment license domain (`db`'s `migrations/`), a
-//! `LicenseService` with real activate/validate/deactivate business logic
-//! (`service`), and the HTTP endpoints in front of it
-//! (`routes::license`) — `POST /activate-license`, `POST
-//! /validate-license`, `POST /deactivate-license`, alongside the existing
-//! `/healthz`/`/readyz`. No Razorpay, payment, webhook, or reconciliation
-//! logic — those land in later, separately approved phases.
+//! **Phase 4E scope** (`PHASE4_DESIGN.md` §13 phase 2): server-account
+//! authentication — Argon2 password hashing and secure session tokens
+//! (`auth`), real login/session-validation/logout business logic in
+//! `AuthService` (`service`), and the HTTP endpoints in front of it
+//! (`routes::auth`) — `POST /login`, `POST /logout`, plus the
+//! `require_session` protected-route middleware every future account-
+//! scoped endpoint will reuse. Builds on Phase 4D's
+//! `/activate-license`/`/validate-license`/`/deactivate-license` and
+//! `/healthz`/`/readyz`, all unchanged. No Razorpay, payment, webhook, or
+//! reconciliation logic — those land in later, separately approved phases.
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod domain;
@@ -28,5 +31,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(routes::health::router())
         .merge(routes::ready::router())
         .merge(routes::license::router())
+        .merge(routes::auth::router(state.clone()))
         .with_state(state)
 }

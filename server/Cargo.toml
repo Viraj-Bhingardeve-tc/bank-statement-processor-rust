@@ -2,7 +2,7 @@
 name        = "license-server"
 version     = "0.1.0"
 edition     = "2021"
-description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4D scope: real Postgres schema for the non-payment license domain, /activate-license, /validate-license, /deactivate-license. No Razorpay/payment/webhook/reconciliation logic yet."
+description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4E scope: server-account authentication (Argon2 password hashing, session creation/validation/logout, protected-route middleware), POST /login, POST /logout. No Razorpay/payment/webhook/reconciliation logic."
 publish     = false
 
 [[bin]]
@@ -61,6 +61,22 @@ async-trait = "0.1"
 # eventually use — request/response shape can't drift between the two
 # independently, it's a compile error instead.
 license-protocol = { path = "../protocol" }
+
+# ── Authentication (PHASE4_DESIGN.md §1.3/§6) ────────────────────────────────
+# Argon2 for `users.password_hash` — current OWASP-recommended KDF, and
+# explicitly not the desktop's HMAC-based `auth::monthly_password` scheme
+# (a different threat model — server-side account passwords need real
+# credential-storage hygiene). Default features pull in the `password-hash`
+# crate + an `OsRng` re-export, no separate dependency needed for salting.
+argon2 = "0.5"
+# High-entropy session tokens (256-bit, hex-encoded) — a separate `rand`
+# from argon2's own internal `rand_core` re-export, used directly for
+# `sessions.token_hash` generation.
+rand = "0.8"
+# SHA-256 for hashing session tokens at rest — same crate the desktop
+# already uses for its own `auth::monthly_password` (no new algorithm
+# choice introduced, just reused server-side for a different value).
+sha2 = "0.10"
 
 [dev-dependencies]
 tower      = { version = "0.5", features = ["util"] }

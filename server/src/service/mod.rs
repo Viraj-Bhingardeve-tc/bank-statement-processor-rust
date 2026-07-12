@@ -4,18 +4,17 @@
 //! hand-written mock without a real database — see each module's own
 //! tests.
 //!
-//! Phase 4D: `LicenseService` now implements the real
-//! activate/validate/deactivate business logic behind
-//! `routes::license`'s handlers. `AuthService` remains Phase 4C.2
-//! scaffolding (a thin pass-through) — the real `/login` workflow
-//! (password verification, session issuance) lands in a later,
-//! separately approved phase.
+//! Phase 4D implemented `LicenseService`'s real
+//! activate/validate/deactivate business logic. Phase 4E does the same for
+//! `AuthService`: real Argon2-backed login, session validation, and
+//! logout/revocation, behind `routes::auth`'s handlers and
+//! `require_session` middleware.
 
 pub mod auth_service;
 pub mod error;
 pub mod license_service;
 
-pub use auth_service::AuthService;
+pub use auth_service::{AuthError, AuthService, LoginOutcome};
 pub use license_service::{
     ActivationOutcome, DeactivationOutcome, LicenseOperationError, LicenseService,
     ValidationOutcome,

@@ -6,7 +6,7 @@
 //! `HttpLicenseClient` sending values it generated itself.
 
 use crate::domain::Device;
-use crate::service::LicenseOperationError;
+use crate::service::{AuthError, LicenseOperationError};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -54,6 +54,14 @@ pub enum ApiError {
     LicenseExpired,
     DeviceNotActivated,
     DeviceLimitReached(Vec<Device>),
+    /// `POST /login` failure — matches `API_SPECIFICATION.md`'s
+    /// `401 INVALID_CREDENTIALS`. Deliberately the same response whether
+    /// the email is unknown or the password is wrong (see
+    /// `AuthService::login`'s doc comment).
+    InvalidCredentials,
+    /// Missing, malformed, expired, or revoked bearer token — matches
+    /// `API_SPECIFICATION.md`'s `401 UNAUTHORIZED`.
+    Unauthorized,
     Server(String),
 }
 
@@ -66,6 +74,8 @@ impl fmt::Display for ApiError {
             ApiError::LicenseExpired => write!(f, "license has expired"),
             ApiError::DeviceNotActivated => write!(f, "device not activated for this license"),
             ApiError::DeviceLimitReached(_) => write!(f, "device limit reached for this license"),
+            ApiError::InvalidCredentials => write!(f, "invalid credentials"),
+            ApiError::Unauthorized => write!(f, "unauthorized"),
             ApiError::Server(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -86,6 +96,16 @@ impl From<LicenseOperationError> for ApiError {
     }
 }
 
+impl From<AuthError> for ApiError {
+    fn from(e: AuthError) -> Self {
+        match e {
+            AuthError::InvalidCredentials => ApiError::InvalidCredentials,
+            AuthError::Unauthorized => ApiError::Unauthorized,
+            AuthError::Repository(err) => ApiError::Server(err.to_string()),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, devices): (StatusCode, &'static str, Option<Vec<DeviceSummary>>) =
@@ -102,6 +122,10 @@ impl IntoResponse for ApiError {
                 ),
                 ApiError::LicenseExpired => (StatusCode::GONE, "LICENSE_EXPIRED", None),
                 ApiError::LicenseRevoked => (StatusCode::GONE, "LICENSE_REVOKED", None),
+                ApiError::InvalidCredentials => {
+                    (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", None)
+                }
+                ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", None),
                 ApiError::Server(_) => (StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR", None),
             };
         let message = self.to_string();
