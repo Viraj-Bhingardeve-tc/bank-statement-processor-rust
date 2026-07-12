@@ -1,9 +1,14 @@
 //! Server configuration, loaded from environment variables.
 //!
-//! `PHASE4_DESIGN.md` §6 ("Authentication and secret management") lists the
-//! fuller secret set (`RAZORPAY_KEY_ID`/`_SECRET`, `RAZORPAY_WEBHOOK_SECRET`)
-//! this will grow to cover once those subsystems land in later phases —
-//! deliberately not read here yet, since nothing in this phase uses them.
+//! Phase 4F adds the Razorpay secret set `PHASE4_DESIGN.md` §6 named
+//! (`RAZORPAY_KEY_ID`/`_SECRET`, `RAZORPAY_WEBHOOK_SECRET`), plus the
+//! plan-id mapping §2 describes ("a small env-driven config map"). All
+//! five are optional — a missing value means Razorpay isn't configured in
+//! this environment, surfaced honestly by `razorpay::HttpRazorpayClient`/
+//! `routes::payment`'s webhook handler as `PROVIDER_ERROR`/`401` (Phase 3's
+//! "no server configured" precedent), never a parse failure at startup —
+//! this is a normal, expected state for local dev and early staging, not a
+//! misconfiguration.
 
 use std::env;
 use std::fmt;
@@ -15,6 +20,11 @@ pub struct AppConfig {
     pub log_filter: String,
     pub database_url: String,
     pub database_max_connections: u32,
+    pub razorpay_key_id: Option<String>,
+    pub razorpay_key_secret: Option<String>,
+    pub razorpay_webhook_secret: Option<String>,
+    pub razorpay_monthly_plan_id: Option<String>,
+    pub razorpay_yearly_plan_id: Option<String>,
 }
 
 impl AppConfig {
@@ -63,6 +73,11 @@ impl AppConfig {
             log_filter,
             database_url,
             database_max_connections,
+            razorpay_key_id: get("RAZORPAY_KEY_ID"),
+            razorpay_key_secret: get("RAZORPAY_KEY_SECRET"),
+            razorpay_webhook_secret: get("RAZORPAY_WEBHOOK_SECRET"),
+            razorpay_monthly_plan_id: get("RAZORPAY_MONTHLY_PLAN_ID"),
+            razorpay_yearly_plan_id: get("RAZORPAY_YEARLY_PLAN_ID"),
         })
     }
 }
@@ -179,6 +194,46 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             ConfigError::InvalidPort("99999".to_string())
+        );
+    }
+
+    #[test]
+    fn razorpay_settings_default_to_none_when_unset() {
+        let config = AppConfig::from_vars(vars(&[("DATABASE_URL", DB_URL)])).unwrap();
+        assert_eq!(config.razorpay_key_id, None);
+        assert_eq!(config.razorpay_key_secret, None);
+        assert_eq!(config.razorpay_webhook_secret, None);
+        assert_eq!(config.razorpay_monthly_plan_id, None);
+        assert_eq!(config.razorpay_yearly_plan_id, None);
+    }
+
+    #[test]
+    fn explicit_razorpay_settings_are_honored() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RAZORPAY_KEY_ID", "rzp_test_key"),
+            ("RAZORPAY_KEY_SECRET", "rzp_test_secret"),
+            ("RAZORPAY_WEBHOOK_SECRET", "whsec_test"),
+            ("RAZORPAY_MONTHLY_PLAN_ID", "plan_monthly"),
+            ("RAZORPAY_YEARLY_PLAN_ID", "plan_yearly"),
+        ]))
+        .unwrap();
+        assert_eq!(config.razorpay_key_id.as_deref(), Some("rzp_test_key"));
+        assert_eq!(
+            config.razorpay_key_secret.as_deref(),
+            Some("rzp_test_secret")
+        );
+        assert_eq!(
+            config.razorpay_webhook_secret.as_deref(),
+            Some("whsec_test")
+        );
+        assert_eq!(
+            config.razorpay_monthly_plan_id.as_deref(),
+            Some("plan_monthly")
+        );
+        assert_eq!(
+            config.razorpay_yearly_plan_id.as_deref(),
+            Some("plan_yearly")
         );
     }
 

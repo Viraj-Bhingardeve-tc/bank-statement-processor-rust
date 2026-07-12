@@ -2,7 +2,7 @@
 name        = "license-server"
 version     = "0.1.0"
 edition     = "2021"
-description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4E scope: server-account authentication (Argon2 password hashing, session creation/validation/logout, protected-route middleware), POST /login, POST /logout. No Razorpay/payment/webhook/reconciliation logic."
+description = "Phase 4 licensing + payment server — see PHASE4_DESIGN.md. Phase 4F scope: payment domain, Razorpay client abstraction, POST /create-checkout-session, POST /webhooks/razorpay with HMAC verification and idempotent processing. No automatic reconciliation job/desktop changes."
 publish     = false
 
 [[bin]]
@@ -44,11 +44,17 @@ sqlx = { version = "0.8", default-features = false, features = [
     "macros",
     "chrono",
     "uuid",
+    # `payment_webhook_events.payload JSONB` (PHASE4_DESIGN.md §7) maps to
+    # `serde_json::Value` via this feature.
+    "json",
 ] }
 
 # ── Domain types ──────────────────────────────────────────────────────────
 chrono = { version = "0.4", features = ["serde"] }
 uuid   = { version = "1", features = ["v4", "serde"] }
+# Promoted from dev-dependencies: `PaymentWebhookEvent::payload` is a real
+# `serde_json::Value` field in production code now, not just a test tool.
+serde_json = "1"
 
 # ── Dyn-compatible async traits (repository/service interfaces) ─────────────
 # Native `async fn` in traits isn't object-safe yet, and `Arc<dyn
@@ -78,6 +84,17 @@ rand = "0.8"
 # choice introduced, just reused server-side for a different value).
 sha2 = "0.10"
 
+# ── Payments (PHASE4_DESIGN.md §2/§4) ────────────────────────────────────────
+# Razorpay webhook signature verification — same crate pairing
+# (hmac + sha2) already used desktop-side (`auth/monthly_password.rs`) and
+# server-side for session tokens, so no new crypto primitive enters the
+# tree just for this.
+hmac = "0.12"
+# Async Razorpay API calls (order/payment-link/subscription creation) —
+# `reqwest` (async), matching PHASE4_DESIGN.md §1.3's stated choice; the
+# desktop app uses reqwest's `blocking` feature for the same crate family,
+# this crate uses the async variant since it's already tokio-based.
+reqwest = { version = "0.12", features = ["json"] }
+
 [dev-dependencies]
-tower      = { version = "0.5", features = ["util"] }
-serde_json = "1"
+tower = { version = "0.5", features = ["util"] }

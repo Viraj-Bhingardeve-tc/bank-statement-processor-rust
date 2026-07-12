@@ -61,6 +61,21 @@ pub struct License {
     pub revoked_reason: Option<String>,
 }
 
+/// Fields needed to create a new `License` row — no `id`/`issued_at`,
+/// since those are database-generated. Issued on a successful payment
+/// (`service::payment_service`), not on `/activate-license` — that
+/// endpoint only ever binds an *existing* license to a device
+/// (`PHASE4_DESIGN.md` §3.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewLicense {
+    pub subscription_id: i64,
+    pub license_key: String,
+    pub status: LicenseRecordStatus,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub max_devices: i32,
+    pub grace_period_days: i32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

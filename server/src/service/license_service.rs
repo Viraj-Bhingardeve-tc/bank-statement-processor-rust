@@ -316,6 +316,35 @@ mod tests {
                 .find(|l| l.id == id)
                 .cloned())
         }
+
+        async fn find_latest_by_subscription(
+            &self,
+            _subscription_id: i64,
+        ) -> Result<Option<License>, RepositoryError> {
+            unimplemented!(
+                "not exercised by these tests — see service::payment_service for coverage"
+            )
+        }
+
+        async fn insert(
+            &self,
+            _new_license: crate::domain::NewLicense,
+        ) -> Result<License, RepositoryError> {
+            unimplemented!(
+                "not exercised by these tests — see service::payment_service for coverage"
+            )
+        }
+
+        async fn extend(
+            &self,
+            _id: i64,
+            _status: LicenseRecordStatus,
+            _expires_at: Option<chrono::DateTime<Utc>>,
+        ) -> Result<(), RepositoryError> {
+            unimplemented!(
+                "not exercised by these tests — see service::payment_service for coverage"
+            )
+        }
     }
 
     struct MockDeviceRepository {
@@ -450,6 +479,26 @@ mod tests {
                 .iter()
                 .find(|s| s.user_id == user_id && s.status == SubscriptionStatus::Active)
                 .cloned())
+        }
+
+        async fn insert(
+            &self,
+            _new_subscription: crate::domain::NewSubscription,
+        ) -> Result<Subscription, RepositoryError> {
+            unimplemented!(
+                "not exercised by these tests — see service::payment_service for coverage"
+            )
+        }
+
+        async fn update_status(
+            &self,
+            _id: i64,
+            _status: SubscriptionStatus,
+            _current_period_end: Option<chrono::DateTime<Utc>>,
+        ) -> Result<(), RepositoryError> {
+            unimplemented!(
+                "not exercised by these tests — see service::payment_service for coverage"
+            )
         }
     }
 

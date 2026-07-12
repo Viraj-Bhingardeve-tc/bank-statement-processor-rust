@@ -102,6 +102,21 @@ pub struct Subscription {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Fields needed to create a new `Subscription` row — no `id`/timestamps,
+/// since those are database-generated. A new row per checkout attempt
+/// (`POST /create-checkout-session`), not a mutation of a past one — same
+/// "history via new rows, not overwritten past rows" convention this
+/// table's own doc comment above states.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewSubscription {
+    pub user_id: i64,
+    pub plan_type: PlanType,
+    pub status: SubscriptionStatus,
+    pub started_at: DateTime<Utc>,
+    pub current_period_end: Option<DateTime<Utc>>,
+    pub auto_renew: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

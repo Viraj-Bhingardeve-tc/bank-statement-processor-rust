@@ -1,6 +1,6 @@
 //! `subscriptions` table access (`LICENSE_DATABASE_SCHEMA.md` §1).
 
-use crate::domain::{PlanType, Subscription, SubscriptionStatus};
+use crate::domain::{NewSubscription, PlanType, Subscription, SubscriptionStatus};
 use crate::repository::error::RepositoryError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -18,6 +18,22 @@ pub trait SubscriptionRepository: Send + Sync {
         &self,
         user_id: i64,
     ) -> Result<Option<Subscription>, RepositoryError>;
+    /// `POST /create-checkout-session` — a new row per checkout attempt,
+    /// never a mutation of a past one (see `NewSubscription`'s doc
+    /// comment).
+    async fn insert(
+        &self,
+        new_subscription: NewSubscription,
+    ) -> Result<Subscription, RepositoryError>;
+    /// Transitions a subscription's status on a payment/webhook outcome
+    /// (e.g. `pending_payment` → `active` on `payment.captured`,
+    /// → `cancelled`/`suspended` on `subscription.cancelled`/`.halted`).
+    async fn update_status(
+        &self,
+        id: i64,
+        status: SubscriptionStatus,
+        current_period_end: Option<DateTime<Utc>>,
+    ) -> Result<(), RepositoryError>;
 }
 
 pub struct PgSubscriptionRepository {
@@ -90,5 +106,45 @@ impl SubscriptionRepository for PgSubscriptionRepository {
         .await?;
 
         row.map(Subscription::try_from).transpose()
+    }
+
+    async fn insert(
+        &self,
+        new_subscription: NewSubscription,
+    ) -> Result<Subscription, RepositoryError> {
+        let row = sqlx::query_as::<_, SubscriptionRow>(
+            "INSERT INTO subscriptions (user_id, plan_type, status, started_at, current_period_end, auto_renew) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             RETURNING id, user_id, plan_type, status, started_at, current_period_end, auto_renew, created_at, updated_at",
+        )
+        .bind(new_subscription.user_id)
+        .bind(new_subscription.plan_type.as_str())
+        .bind(new_subscription.status.as_str())
+        .bind(new_subscription.started_at)
+        .bind(new_subscription.current_period_end)
+        .bind(new_subscription.auto_renew)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Subscription::try_from(row)
+    }
+
+    async fn update_status(
+        &self,
+        id: i64,
+        status: SubscriptionStatus,
+        current_period_end: Option<DateTime<Utc>>,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE subscriptions SET status = $2, current_period_end = $3, updated_at = now() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(status.as_str())
+        .bind(current_period_end)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 }

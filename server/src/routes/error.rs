@@ -6,7 +6,7 @@
 //! `HttpLicenseClient` sending values it generated itself.
 
 use crate::domain::Device;
-use crate::service::{AuthError, LicenseOperationError};
+use crate::service::{AuthError, LicenseOperationError, PaymentOperationError};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -62,6 +62,14 @@ pub enum ApiError {
     /// Missing, malformed, expired, or revoked bearer token — matches
     /// `API_SPECIFICATION.md`'s `401 UNAUTHORIZED`.
     Unauthorized,
+    /// `POST /create-checkout-session` with an unrecognized `plan_type` —
+    /// `PHASE4_DESIGN.md` §3's additive `400 INVALID_PLAN_TYPE` code.
+    InvalidPlanType,
+    /// The Razorpay API call itself failed (unconfigured, network error,
+    /// non-2xx response) — `PHASE4_DESIGN.md` §3's additive
+    /// `502 PROVIDER_ERROR` code, surfaced honestly rather than a fake
+    /// success (same "no server configured" precedent from Phase 3).
+    ProviderError(String),
     Server(String),
 }
 
@@ -76,6 +84,8 @@ impl fmt::Display for ApiError {
             ApiError::DeviceLimitReached(_) => write!(f, "device limit reached for this license"),
             ApiError::InvalidCredentials => write!(f, "invalid credentials"),
             ApiError::Unauthorized => write!(f, "unauthorized"),
+            ApiError::InvalidPlanType => write!(f, "invalid plan_type"),
+            ApiError::ProviderError(msg) => write!(f, "payment provider error: {msg}"),
             ApiError::Server(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -106,6 +116,16 @@ impl From<AuthError> for ApiError {
     }
 }
 
+impl From<PaymentOperationError> for ApiError {
+    fn from(e: PaymentOperationError) -> Self {
+        match e {
+            PaymentOperationError::InvalidPlanType => ApiError::InvalidPlanType,
+            PaymentOperationError::ProviderError(msg) => ApiError::ProviderError(msg),
+            PaymentOperationError::Repository(err) => ApiError::Server(err.to_string()),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, devices): (StatusCode, &'static str, Option<Vec<DeviceSummary>>) =
@@ -126,6 +146,8 @@ impl IntoResponse for ApiError {
                     (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", None)
                 }
                 ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", None),
+                ApiError::InvalidPlanType => (StatusCode::BAD_REQUEST, "INVALID_PLAN_TYPE", None),
+                ApiError::ProviderError(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR", None),
                 ApiError::Server(_) => (StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR", None),
             };
         let message = self.to_string();

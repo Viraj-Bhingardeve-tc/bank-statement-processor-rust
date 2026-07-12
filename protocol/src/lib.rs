@@ -141,6 +141,22 @@ pub struct DeactivateLicenseResponse {
     pub devices_active: i64,
 }
 
+/// `POST /create-checkout-session` — the one additive endpoint
+/// `PHASE4_DESIGN.md` §3 anticipated from the start (payment was out of
+/// scope for the original 7). Auth: Bearer session token — this is a
+/// *server-account* action (`LICENSE_SYSTEM_DESIGN.md` §1), not something
+/// `/activate-license`'s license-key flow needs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateCheckoutSessionRequest {
+    pub plan_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateCheckoutSessionResponse {
+    pub checkout_url: String,
+    pub provider_ref: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +269,17 @@ mod tests {
         round_trips(DeactivateLicenseResponse {
             status: "deactivated".to_string(),
             devices_active: 0,
+        });
+    }
+
+    #[test]
+    fn create_checkout_session_request_and_response_round_trip() {
+        round_trips(CreateCheckoutSessionRequest {
+            plan_type: "yearly".to_string(),
+        });
+        round_trips(CreateCheckoutSessionResponse {
+            checkout_url: "https://checkout.razorpay.com/xyz".to_string(),
+            provider_ref: "order_xyz".to_string(),
         });
     }
 

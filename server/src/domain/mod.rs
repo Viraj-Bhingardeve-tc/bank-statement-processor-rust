@@ -1,6 +1,6 @@
 //! Domain models — plain data types mirroring `LICENSE_DATABASE_SCHEMA.md`
-//! §1's server-side schema (`payments`/`payment_webhook_events`
-//! intentionally excluded — out of scope until the payment phase).
+//! §1's server-side schema, plus `PHASE4_DESIGN.md` §7's
+//! `payment_webhook_events` addition.
 //!
 //! Deliberately `sqlx`-agnostic: no type here derives `sqlx::FromRow` or
 //! implements `sqlx::Type`. Each `repository::*` module owns the detail of
@@ -11,12 +11,16 @@
 
 pub mod device;
 pub mod license;
+pub mod payment;
+pub mod payment_webhook_event;
 pub mod session;
 pub mod subscription;
 pub mod user;
 
 pub use device::{Device, NewDevice};
-pub use license::{License, LicenseRecordStatus};
+pub use license::{License, LicenseRecordStatus, NewLicense};
+pub use payment::{NewPayment, Payment, PaymentStatus};
+pub use payment_webhook_event::{NewPaymentWebhookEvent, PaymentWebhookEvent};
 pub use session::{NewSession, Session};
-pub use subscription::{PlanType, Subscription, SubscriptionStatus};
+pub use subscription::{NewSubscription, PlanType, Subscription, SubscriptionStatus};
 pub use user::{NewUser, User};
