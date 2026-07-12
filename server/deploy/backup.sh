@@ -6,6 +6,18 @@
 # (ideally off-VPS ...), retained on a rolling window of 14 daily backups +
 # 8 weekly backups").
 #
+# Phase 4J.2 (production readiness audit, CRITICAL finding #2) hardens two
+# things this script used to get wrong:
+#   1. The dump is now restore-safe (`--clean --if-exists`) — `restore.sh`
+#      can replace an already-populated database's contents instead of
+#      erroring on "already exists" or, worse, silently appending
+#      duplicate rows via `COPY` into tables that were never dropped.
+#   2. The dump is written to a temporary file, gzip-integrity-checked,
+#      and only renamed into `daily/`/`weekly/` once verified complete —
+#      a `pg_dump`/`gzip` failure or truncated archive can no longer land
+#      a partial/corrupt file at a path `prune()` or `restore.sh` would
+#      treat as a real backup.
+#
 # Intended to run via host cron, e.g.:
 #   0 2 * * * REPO_DIR=/opt/license-server /opt/license-server/server/deploy/backup.sh
 #
@@ -30,6 +42,12 @@ WEEKLY_RETENTION=8
 cd "$REPO_DIR"
 mkdir -p "$DAILY_DIR" "$WEEKLY_DIR"
 
+# Clean up any `.partial` file a previous run left behind (e.g. the host
+# was killed mid-backup, before the `trap` below could fire) — these are
+# never counted by `prune()` (its glob only matches `*.sql.gz`) and would
+# otherwise accumulate on disk forever.
+find "$DAILY_DIR" -maxdepth 1 -name '*.sql.gz.partial' -type f -delete
+
 if [[ -f server/.env ]]; then
     # shellcheck disable=SC1091
     source server/.env
@@ -39,9 +57,29 @@ POSTGRES_DB="${POSTGRES_DB:-license_server}"
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DUMP_FILE="$DAILY_DIR/license-server-$TIMESTAMP.sql.gz"
+TMP_FILE="$DUMP_FILE.partial"
+
+# Always remove a half-written temp file on exit — a no-op on success
+# (already renamed away by the `mv` below), the cleanup on any failure.
+trap 'rm -f "$TMP_FILE"' EXIT
 
 echo "==> Dumping '$POSTGRES_DB' from the running postgres container"
-docker compose exec -T postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "$DUMP_FILE"
+# --clean --if-exists: emit `DROP ... IF EXISTS` before each `CREATE`, so
+# this dump is safe to restore straight into an already-populated database
+# (`restore.sh`'s actual use case) instead of erroring on "already exists"
+# — or, worse, silently appending duplicate rows via `COPY` into tables
+# that were never dropped. `--if-exists` also keeps a restore into a
+# genuinely empty database working (no "does not exist" errors from the
+# `DROP` statements themselves).
+docker compose exec -T postgres pg_dump --clean --if-exists -U "$POSTGRES_USER" "$POSTGRES_DB" \
+    | gzip > "$TMP_FILE"
+
+# Verify the archive is actually complete and uncorrupted before it's
+# treated as a real backup — catches a truncated/corrupt result that
+# `pg_dump`/`gzip`'s own exit codes didn't already catch.
+gzip -t "$TMP_FILE"
+
+mv "$TMP_FILE" "$DUMP_FILE"
 echo "Wrote $DUMP_FILE"
 
 # Sunday's daily dump is also kept in the weekly retention set.

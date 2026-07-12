@@ -126,6 +126,21 @@ off-VPS (object storage, another host, etc.); `backup.sh` has a marked `TODO` ho
 the design doc doesn't fix a specific destination. `server/deploy/restore.sh` restores from a
 dump it produced.
 
+**Restore-safety and corruption protection (Phase 4J.2):** `pg_dump` runs with `--clean
+--if-exists`, so a dump can be restored straight into an already-populated database — `DROP ...
+IF EXISTS` before each `CREATE` — instead of erroring on "already exists" or silently appending
+duplicate rows via `COPY` into tables nothing dropped first. `backup.sh` writes to a `.partial`
+temp file, verifies it with `gzip -t`, and only then renames it into `daily/`/`weekly/` — a failed
+or truncated dump never leaves a corrupt or half-written file at a path `restore.sh` or the
+retention pruning would treat as a real backup (any `.partial` left by a hard kill mid-run is
+swept up at the start of the next scheduled run). `restore.sh` mirrors this on the way in: it
+runs `gzip -t` on the given file before touching Docker at all, and restores via
+`psql -v ON_ERROR_STOP=1`, so a corrupt input file or any SQL error during the restore itself
+aborts immediately instead of silently leaving a partially-restored database. Run
+`bash server/deploy/test-backup-restore.sh` to exercise both scripts offline against a fake
+`docker` shim (no VPS, containers, or real Postgres needed) — it asserts the flags above are
+actually present and that a simulated dump/restore failure leaves nothing behind.
+
 ## Configuration
 
 All configuration is environment variables, read once at startup
