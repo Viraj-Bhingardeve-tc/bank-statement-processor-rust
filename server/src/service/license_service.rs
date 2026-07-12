@@ -10,8 +10,8 @@
 //! HTTP framework type appears anywhere in this file (`PHASE4_DESIGN.md`
 //! §1.2's "Services... independent of HTTP framework types").
 
-use crate::domain::{Device, License, LicenseRecordStatus, NewDevice, PlanType};
-use crate::repository::device::DeviceRepository;
+use crate::domain::{Device, License, LicenseRecordStatus, PlanType};
+use crate::repository::device::{DeviceActivationOutcome, DeviceRepository};
 use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
 use crate::repository::subscription::SubscriptionRepository;
@@ -54,6 +54,15 @@ impl LicenseService {
     /// contract) — and reuses a previously-deactivated device's row rather
     /// than inserting a second one, since `(license_id, device_id)` is
     /// unique.
+    ///
+    /// **Phase 4J.3 fix (production readiness audit, HIGH finding #3):**
+    /// the device-count check and the insert/reactivate used to be two
+    /// separate round trips — two concurrent activations for *different*
+    /// `device_id`s on the same license could both see a free slot before
+    /// either had written anything, together exceeding `max_devices`.
+    /// `DeviceRepository::activate_device` now performs that whole
+    /// decide-then-mutate step atomically in one transaction; see its own
+    /// doc comment for how.
     pub async fn activate(
         &self,
         license_key: &str,
@@ -77,29 +86,20 @@ impl LicenseService {
             LicenseRecordStatus::Active | LicenseRecordStatus::Suspended => {}
         }
 
-        let existing = self
+        match self
             .device_repository
-            .find_by_license_and_device_id(license.id, device_id)
-            .await?;
-
-        match existing {
-            Some(device) if device.deactivated_at.is_none() => {
-                self.device_repository.touch_last_seen(device.id).await?;
-            }
-            Some(device) => {
-                self.ensure_device_slot_available(&license).await?;
-                self.device_repository.reactivate(device.id).await?;
-            }
-            None => {
-                self.ensure_device_slot_available(&license).await?;
-                self.device_repository
-                    .insert(NewDevice {
-                        license_id: license.id,
-                        device_id,
-                        machine_fingerprint: machine_fingerprint.to_string(),
-                        device_label: Some(device_label.to_string()),
-                    })
-                    .await?;
+            .activate_device(
+                license.id,
+                license.max_devices,
+                device_id,
+                machine_fingerprint,
+                device_label,
+            )
+            .await?
+        {
+            DeviceActivationOutcome::Activated => {}
+            DeviceActivationOutcome::LimitReached(existing) => {
+                return Err(LicenseOperationError::DeviceLimitReached(existing));
             }
         }
 
@@ -119,24 +119,6 @@ impl LicenseService {
             plan_type: subscription.plan_type,
             license,
         })
-    }
-
-    async fn ensure_device_slot_available(
-        &self,
-        license: &License,
-    ) -> Result<(), LicenseOperationError> {
-        let active_count = self
-            .device_repository
-            .count_active_by_license(license.id)
-            .await?;
-        if active_count >= i64::from(license.max_devices) {
-            let existing = self
-                .device_repository
-                .list_active_by_license(license.id)
-                .await?;
-            return Err(LicenseOperationError::DeviceLimitReached(existing));
-        }
-        Ok(())
     }
 
     /// `POST /validate-license`. Called on every online app launch
@@ -388,49 +370,8 @@ mod tests {
                 .count() as i64)
         }
 
-        async fn list_active_by_license(
-            &self,
-            license_id: i64,
-        ) -> Result<Vec<Device>, RepositoryError> {
-            Ok(self
-                .devices
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|d| d.license_id == license_id && d.deactivated_at.is_none())
-                .cloned()
-                .collect())
-        }
-
-        async fn insert(&self, new_device: NewDevice) -> Result<Device, RepositoryError> {
-            let mut next_id = self.next_id.lock().unwrap();
-            let id = *next_id;
-            *next_id += 1;
-            let now = Utc::now();
-            let device = Device {
-                id,
-                license_id: new_device.license_id,
-                device_id: new_device.device_id,
-                machine_fingerprint: new_device.machine_fingerprint,
-                device_label: new_device.device_label,
-                first_seen_at: now,
-                last_seen_at: now,
-                deactivated_at: None,
-            };
-            self.devices.lock().unwrap().push(device.clone());
-            Ok(device)
-        }
-
         async fn touch_last_seen(&self, id: i64) -> Result<(), RepositoryError> {
             if let Some(d) = self.devices.lock().unwrap().iter_mut().find(|d| d.id == id) {
-                d.last_seen_at = Utc::now();
-            }
-            Ok(())
-        }
-
-        async fn reactivate(&self, id: i64) -> Result<(), RepositoryError> {
-            if let Some(d) = self.devices.lock().unwrap().iter_mut().find(|d| d.id == id) {
-                d.deactivated_at = None;
                 d.last_seen_at = Utc::now();
             }
             Ok(())
@@ -441,6 +382,86 @@ mod tests {
                 d.deactivated_at = Some(Utc::now());
             }
             Ok(())
+        }
+
+        /// Simulates `activate_device`'s atomic decide-then-mutate
+        /// contract entirely in memory: the whole method body runs under
+        /// one `Mutex` acquisition (no `.await` point in between any of
+        /// the reads and the eventual write), so two calls racing on the
+        /// same `license_id` with different `device_id`s can't both
+        /// observe a free slot before either writes — exactly the
+        /// guarantee the real `SELECT ... FOR UPDATE` transaction gives.
+        async fn activate_device(
+            &self,
+            license_id: i64,
+            max_devices: i32,
+            device_id: Uuid,
+            machine_fingerprint: &str,
+            device_label: &str,
+        ) -> Result<DeviceActivationOutcome, RepositoryError> {
+            let mut devices = self.devices.lock().unwrap();
+
+            let existing_match = devices
+                .iter()
+                .find(|d| d.license_id == license_id && d.device_id == device_id)
+                .map(|d| (d.id, d.deactivated_at.is_some()));
+
+            if let Some((id, was_deactivated)) = existing_match {
+                if !was_deactivated {
+                    if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                        d.last_seen_at = Utc::now();
+                    }
+                    return Ok(DeviceActivationOutcome::Activated);
+                }
+
+                let active_count = devices
+                    .iter()
+                    .filter(|d| d.license_id == license_id && d.deactivated_at.is_none())
+                    .count() as i32;
+                if active_count >= max_devices {
+                    let active = devices
+                        .iter()
+                        .filter(|d| d.license_id == license_id && d.deactivated_at.is_none())
+                        .cloned()
+                        .collect();
+                    return Ok(DeviceActivationOutcome::LimitReached(active));
+                }
+
+                if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                    d.deactivated_at = None;
+                    d.last_seen_at = Utc::now();
+                }
+                return Ok(DeviceActivationOutcome::Activated);
+            }
+
+            let active_count = devices
+                .iter()
+                .filter(|d| d.license_id == license_id && d.deactivated_at.is_none())
+                .count() as i32;
+            if active_count >= max_devices {
+                let active = devices
+                    .iter()
+                    .filter(|d| d.license_id == license_id && d.deactivated_at.is_none())
+                    .cloned()
+                    .collect();
+                return Ok(DeviceActivationOutcome::LimitReached(active));
+            }
+
+            let mut next_id = self.next_id.lock().unwrap();
+            let id = *next_id;
+            *next_id += 1;
+            let now = Utc::now();
+            devices.push(Device {
+                id,
+                license_id,
+                device_id,
+                machine_fingerprint: machine_fingerprint.to_string(),
+                device_label: Some(device_label.to_string()),
+                first_seen_at: now,
+                last_seen_at: now,
+                deactivated_at: None,
+            });
+            Ok(DeviceActivationOutcome::Activated)
         }
     }
 

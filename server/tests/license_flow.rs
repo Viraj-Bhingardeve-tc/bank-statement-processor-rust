@@ -213,3 +213,97 @@ async fn activate_beyond_max_devices_returns_409_with_existing_device_list() {
 
     cleanup(&pool, license_id, subscription_id, user_id).await;
 }
+
+/// Phase 4J.3 — the regression test for the production readiness audit's
+/// HIGH finding #3: two *genuinely concurrent* activation requests for two
+/// *different* new `device_id`s, with the license already at
+/// `max_devices - 1` active devices (exactly one free slot), must result
+/// in exactly one success and one `409 DEVICE_LIMIT_REACHED` — never both
+/// succeeding. Before the fix, `ensure_device_slot_available`'s `SELECT
+/// COUNT` and the later `INSERT` were separate round trips, so both
+/// concurrent requests could observe the same free slot before either had
+/// written anything.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn concurrent_activation_for_different_devices_at_the_device_limit_allows_exactly_one() {
+    let pool = connected_pool().await;
+    // max_devices = 2, one device already active ⇒ exactly one free slot,
+    // matching the audit's own example (max_devices=2, current active=1).
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 2).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+
+    let first = ActivateLicenseRequest {
+        license_key: license_key.clone(),
+        device_id: Uuid::new_v4().to_string(),
+        machine_fingerprint: "fp-existing".to_string(),
+        device_label: "existing-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &first).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "seeding the first active device must succeed"
+    );
+
+    // Two concurrent requests for two different, brand-new device_ids,
+    // racing for the single remaining slot.
+    let app_a = app.clone();
+    let req_a = ActivateLicenseRequest {
+        license_key: license_key.clone(),
+        device_id: Uuid::new_v4().to_string(),
+        machine_fingerprint: "fp-a".to_string(),
+        device_label: "device-a".to_string(),
+    };
+    let task_a = tokio::spawn(async move { post_json(&app_a, "/activate-license", &req_a).await });
+
+    let app_b = app.clone();
+    let req_b = ActivateLicenseRequest {
+        license_key: license_key.clone(),
+        device_id: Uuid::new_v4().to_string(),
+        machine_fingerprint: "fp-b".to_string(),
+        device_label: "device-b".to_string(),
+    };
+    let task_b = tokio::spawn(async move { post_json(&app_b, "/activate-license", &req_b).await });
+
+    let (result_a, result_b) = tokio::join!(task_a, task_b);
+    let (status_a, body_a) = result_a.unwrap();
+    let (status_b, body_b) = result_b.unwrap();
+
+    let statuses = [status_a, status_b];
+    let successes = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+    let conflicts = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CONFLICT)
+        .count();
+    assert_eq!(
+        successes, 1,
+        "expected exactly one success, got statuses {statuses:?} (bodies: {body_a} / {body_b})"
+    );
+    assert_eq!(
+        conflicts, 1,
+        "expected exactly one 409 DEVICE_LIMIT_REACHED, got statuses {statuses:?} (bodies: {body_a} / {body_b})"
+    );
+
+    let error_body = if status_a == StatusCode::CONFLICT {
+        &body_a
+    } else {
+        &body_b
+    };
+    assert_eq!(error_body["error"]["code"], "DEVICE_LIMIT_REACHED");
+
+    // The database must agree: exactly 2 active devices, never 3.
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM devices WHERE license_id = $1 AND deactivated_at IS NULL",
+    )
+    .bind(license_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        active_count, 2,
+        "max_devices must never be exceeded, even under concurrent activation"
+    );
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}

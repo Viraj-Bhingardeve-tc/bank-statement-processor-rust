@@ -17,7 +17,7 @@ pub mod session;
 pub mod subscription;
 pub mod user;
 
-pub use device::{Device, NewDevice};
+pub use device::Device;
 pub use license::{License, LicenseRecordStatus, NewLicense};
 pub use payment::{NewPayment, Payment, PaymentStatus};
 pub use payment_webhook_event::{NewPaymentWebhookEvent, PaymentWebhookEvent};
