@@ -96,6 +96,7 @@ async fn webhook(
     };
 
     if !verify_webhook_signature(secret, &body, signature) {
+        tracing::warn!("razorpay webhook signature verification failed; rejecting");
         return Err(ApiError::Unauthorized);
     }
 
@@ -103,10 +104,17 @@ async fn webhook(
         serde_json::from_slice(&body).map_err(|e| ApiError::InvalidRequest(e.to_string()))?;
     let event_id = resolve_event_id(&headers, &body);
 
+    // Logged post-signature-verification only — event id/type are Razorpay
+    // metadata, not secrets, but logging them before the HMAC check would
+    // mean logging attacker-controlled input from an unauthenticated call.
+    tracing::info!(event_id = %event_id, event_type = %payload.event, "received razorpay webhook");
+
     state
         .payment_service
         .process_webhook_event(&event_id, payload)
         .await?;
+
+    tracing::info!(event_id = %event_id, "razorpay webhook processed");
 
     Ok(Json(WebhookAck { status: "ok" }))
 }

@@ -18,11 +18,20 @@ path = "src/lib.rs"
 axum = "0.7"
 
 # ── Async runtime ────────────────────────────────────────────────────────
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+# "signal" is Phase 4I.1's graceful-shutdown hook (`tokio::signal::ctrl_c`/
+# `unix::signal`) — main.rs's shutdown future needs it to notice
+# Ctrl+C/SIGTERM instead of only stopping on a hard process kill.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 
-# ── Logging ───────────────────────────────────────────────────────────────
+# ── Logging (Phase 4I.1 — PHASE4_DESIGN.md §8.3 "Logging") ─────────────────
 tracing            = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# "json" turns on `fmt().json()` for release-mode structured logs (main.rs);
+# debug builds use the default `.pretty()` formatter instead.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# HTTP request logging + request-id propagation (`lib.rs::build_router`) —
+# already present transitively via `reqwest`'s own dependency tree; this
+# makes it a direct dependency with just the two features actually used.
+tower-http = { version = "0.6", features = ["trace", "request-id"] }
 
 # ── Serialisation (response bodies) ─────────────────────────────────────────
 serde = { version = "1", features = ["derive"] }
@@ -96,5 +105,9 @@ hmac = "0.12"
 # this crate uses the async variant since it's already tokio-based.
 reqwest = { version = "0.12", features = ["json"] }
 
-[dev-dependencies]
+# ── Middleware composition ───────────────────────────────────────────────────
+# `ServiceBuilder` — used in `lib.rs::build_router` to compose the
+# request-id/tracing layers in an explicit, documented order. Promoted from
+# dev-dependencies (was test-only, via `tower::ServiceExt::oneshot`) now that
+# production code depends on it too.
 tower = { version = "0.5", features = ["util"] }
