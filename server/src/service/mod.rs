@@ -6,9 +6,11 @@
 //!
 //! Phase 4D implemented `LicenseService`'s real
 //! activate/validate/deactivate business logic. Phase 4E did the same for
-//! `AuthService` (login/session validation/logout). Phase 4F adds
+//! `AuthService` (login/session validation/logout). Phase 4F added
 //! `PaymentService`: checkout-session creation and Razorpay webhook
-//! processing, behind `routes::payment`'s handlers.
+//! processing, behind `routes::payment`'s handlers. Phase 4G adds
+//! `PaymentService::reconcile_once` — the scheduled reconciliation pass
+//! (`PHASE4_DESIGN.md` §12), driven by `reconciliation::spawn`.
 
 pub mod auth_service;
 pub mod error;
@@ -20,4 +22,7 @@ pub use license_service::{
     ActivationOutcome, DeactivationOutcome, LicenseOperationError, LicenseService,
     ValidationOutcome,
 };
-pub use payment_service::{CheckoutOutcome, PaymentOperationError, PaymentService};
+pub use payment_service::{
+    CheckoutOutcome, PaymentOperationError, PaymentService, ReconciliationSummary,
+    RECONCILIATION_INTERVAL_MINUTES,
+};

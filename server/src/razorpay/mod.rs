@@ -10,6 +10,6 @@ pub mod webhook;
 
 pub use client::{
     CreateCheckoutRequest, CreateCheckoutResponse, HttpRazorpayClient, RazorpayClient,
-    RazorpayError,
+    RazorpayError, RazorpayPayment,
 };
 pub use webhook::{extract_entity_ref, RazorpayWebhookPayload};

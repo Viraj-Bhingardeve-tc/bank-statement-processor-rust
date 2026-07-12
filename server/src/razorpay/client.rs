@@ -25,6 +25,7 @@
 //! for.**
 
 use crate::domain::PlanType;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -70,12 +71,44 @@ pub struct CreateCheckoutResponse {
     pub provider_ref: String,
 }
 
+/// A payment as Razorpay's `GET /v1/payments` list reports it — the
+/// reconciliation job's (`PHASE4_DESIGN.md` §12) only source of truth
+/// about what actually happened at Razorpay, independent of whether a
+/// webhook for it ever arrived. Deliberately thin: `status` is Razorpay's
+/// own string (`"captured"`, `"failed"`, `"authorized"`, ...), interpreted
+/// by `service::payment_service` the same way a webhook payload's status
+/// would be — not re-typed as our own `PaymentStatus` here, since this
+/// type describes what Razorpay said, not our own domain model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RazorpayPayment {
+    pub id: String,
+    /// Populated for Payment-Link/Order-originated payments; absent for
+    /// most Subscription-originated recurring charges. Correlated against
+    /// stored `payments.provider_ref` the same way inbound webhooks are
+    /// (`razorpay::extract_entity_ref`'s order_id-then-id preference).
+    pub order_id: Option<String>,
+    pub status: String,
+}
+
 #[async_trait::async_trait]
 pub trait RazorpayClient: Send + Sync {
     async fn create_checkout(
         &self,
         req: CreateCheckoutRequest,
     ) -> Result<CreateCheckoutResponse, RazorpayError>;
+
+    /// Lists payments created at or after `since` — the reconciliation
+    /// job's pull-based backstop for webhooks that never arrived
+    /// (`PHASE4_DESIGN.md` §12.2 step 1). **Single page only (Razorpay's
+    /// default/max `count=100`), no pagination** — a real production
+    /// deployment handling more than 100 payments inside one 2-hour
+    /// lookback window would silently miss the overflow; flagged here
+    /// rather than silently assumed complete, since `PHASE4_DESIGN.md`
+    /// §12 doesn't specify pagination and this phase doesn't add it.
+    async fn list_payments_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<RazorpayPayment>, RazorpayError>;
 }
 
 /// The real implementation — HTTP calls against `api.razorpay.com`.
@@ -238,4 +271,57 @@ impl RazorpayClient for HttpRazorpayClient {
             }
         }
     }
+
+    async fn list_payments_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<RazorpayPayment>, RazorpayError> {
+        let (key_id, key_secret) = self.credentials()?;
+
+        let response = self
+            .http
+            .get("https://api.razorpay.com/v1/payments")
+            .basic_auth(key_id, Some(key_secret))
+            .query(&[
+                ("from", since.timestamp().to_string()),
+                ("count", "100".to_string()),
+            ])
+            .send()
+            .await
+            .map_err(|e| RazorpayError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(RazorpayError::Http(format!(
+                "payments list returned {}",
+                response.status()
+            )));
+        }
+
+        let parsed: ListPaymentsResponse = response
+            .json()
+            .await
+            .map_err(|e| RazorpayError::Http(e.to_string()))?;
+
+        Ok(parsed
+            .items
+            .into_iter()
+            .map(|item| RazorpayPayment {
+                id: item.id,
+                order_id: item.order_id,
+                status: item.status,
+            })
+            .collect())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListPaymentsResponse {
+    items: Vec<PaymentListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaymentListItem {
+    id: String,
+    order_id: Option<String>,
+    status: String,
 }

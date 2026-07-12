@@ -5,7 +5,7 @@
 
 use license_server::config::AppConfig;
 use license_server::state::AppState;
-use license_server::{build_router, db};
+use license_server::{build_router, db, reconciliation};
 
 #[tokio::main]
 async fn main() {
@@ -40,7 +40,14 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let app = build_router(AppState::new(config, pool));
+    let state = AppState::new(config, pool);
+
+    // Runs for the lifetime of the process, independent of HTTP traffic —
+    // dropping this handle does not stop the task (it isn't `.abort()`ed),
+    // it just means nothing here awaits its (never-returning) completion.
+    let _reconciliation_handle = reconciliation::spawn(state.clone());
+
+    let app = build_router(state);
 
     let listener = match tokio::net::TcpListener::bind(bind_addr).await {
         Ok(l) => l,

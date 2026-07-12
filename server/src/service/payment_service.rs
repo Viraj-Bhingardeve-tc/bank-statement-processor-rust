@@ -1,11 +1,30 @@
-//! Business logic for checkout creation and Razorpay webhook processing
-//! (`PHASE4_DESIGN.md` §2/§4).
+//! Business logic for checkout creation, Razorpay webhook processing, and
+//! payment reconciliation (`PHASE4_DESIGN.md` §2/§4/§12).
 //!
 //! Depends only on repository/client *traits*, never a concrete `Pg*`/
-//! `HttpRazorpayClient` implementation, so the full checkout and webhook
-//! flows are unit-tested against hand-written mocks below — no real
-//! database and no real Razorpay call, same pattern
+//! `HttpRazorpayClient` implementation, so the full checkout, webhook, and
+//! reconciliation flows are unit-tested against hand-written mocks below —
+//! no real database and no real Razorpay call, same pattern
 //! `service::license_service`/`service::auth_service` already established.
+//!
+//! **Reconciliation's idempotency mechanism deliberately differs from
+//! `PHASE4_DESIGN.md` §12.2 step 2's literal wording, flagged here rather
+//! than silently resolved either way.** That section describes checking
+//! `payment_webhook_events` directly by "the Razorpay event's own id" —
+//! but Razorpay's payments-list API (what `reconcile_once` below actually
+//! calls) returns payment objects, not webhook deliveries, and has no
+//! "event id" a real inbound webhook would have used. Checking a
+//! *synthesized* id against the ledger in isolation would be actively
+//! wrong: it would never match the real `event_id` a webhook already
+//! inserted, so reconciliation would re-process (and, via `extend()`,
+//! keep pushing a license's expiry further into the future) every payment
+//! a webhook already correctly handled, on every run within the 2-hour
+//! lookback window. Instead, `reconcile_one` first compares the *payment's
+//! own stored status* against what Razorpay reports — a signal that's
+//! true regardless of whether a webhook, a prior reconciliation run, or
+//! nothing at all produced it — and only calls `process_webhook_event`
+//! (with a stable synthetic id, so repeated reconciliation runs are still
+//! idempotent against *each other*) when there's a genuine mismatch.
 //!
 //! **Deliberately not transactional across repository calls
 //! (`PHASE4_DESIGN.md` §4 step 3 asks for "a single database
@@ -33,7 +52,8 @@ use crate::domain::{
     PaymentStatus, PlanType, SubscriptionStatus,
 };
 use crate::razorpay::{
-    extract_entity_ref, CreateCheckoutRequest, RazorpayClient, RazorpayWebhookPayload,
+    extract_entity_ref, CreateCheckoutRequest, RazorpayClient, RazorpayPayment,
+    RazorpayWebhookPayload,
 };
 use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
@@ -324,6 +344,170 @@ impl PaymentService {
             }
         }
         Ok(())
+    }
+
+    /// `PHASE4_DESIGN.md` §12 — the pull-based backstop for webhooks that
+    /// never arrived. Runs on a fixed schedule (`reconciliation::spawn`),
+    /// but is a plain method here so it's directly callable from tests
+    /// (§12.4) without a running scheduler.
+    ///
+    /// Lists Razorpay payments from the trailing lookback window,
+    /// compares each against local state, and heals genuine gaps through
+    /// the exact same `process_webhook_event` path a real webhook would
+    /// have used — see this module's doc comment for why "genuine gap" is
+    /// detected via payment-status comparison rather than a synthesized
+    /// event-id lookup.
+    pub async fn reconcile_once(&self) -> Result<ReconciliationSummary, PaymentOperationError> {
+        let since = Utc::now() - Duration::hours(RECONCILIATION_LOOKBACK_HOURS);
+        let payments = self
+            .razorpay_client
+            .list_payments_since(since)
+            .await
+            .map_err(|e| PaymentOperationError::ProviderError(e.to_string()))?;
+
+        let checked = payments.len();
+        let mut healed = 0usize;
+
+        for razorpay_payment in &payments {
+            match self.reconcile_one(razorpay_payment).await {
+                Ok(true) => healed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    // One bad payment must not abort the whole run — every
+                    // other discovered payment still gets a chance this
+                    // pass, and this one gets picked up again next run
+                    // (it's still inside the 2-hour lookback window then).
+                    tracing::warn!(
+                        razorpay_payment_id = %razorpay_payment.id,
+                        error = %e,
+                        "reconciliation: failed to process a discovered payment; will retry next run"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            checked,
+            healed,
+            lookback_hours = RECONCILIATION_LOOKBACK_HOURS,
+            "reconciliation run complete"
+        );
+
+        Ok(ReconciliationSummary { checked, healed })
+    }
+
+    /// Returns `Ok(true)` if this payment was healed, `Ok(false)` if it
+    /// was already in sync (or deliberately skipped — an unhandled status,
+    /// or a reference with no local match at all, per `PHASE4_DESIGN.md`
+    /// §12.3's "no silent healing of ambiguous cases").
+    async fn reconcile_one(
+        &self,
+        razorpay_payment: &RazorpayPayment,
+    ) -> Result<bool, PaymentOperationError> {
+        let Some(razorpay_status) = map_razorpay_payment_status(&razorpay_payment.status) else {
+            // An unrecognized-or-unhandled Razorpay status (e.g.
+            // "authorized", "refunded" — the latter has no corresponding
+            // webhook handler in this phase either, see PHASE4_DESIGN.md
+            // §4's event list). Nothing to heal against.
+            return Ok(false);
+        };
+
+        // Same order_id-then-id preference `razorpay::extract_entity_ref`
+        // uses for inbound webhooks, so this pre-check and the eventual
+        // `process_webhook_event` call (which re-derives the same
+        // provider_ref independently from the synthetic payload below)
+        // always agree on which local row they mean.
+        let candidate_refs = [
+            razorpay_payment.order_id.as_deref(),
+            Some(razorpay_payment.id.as_str()),
+        ];
+
+        let mut local_payment = None;
+        for candidate in candidate_refs.into_iter().flatten() {
+            if let Some(p) = self
+                .payment_repository
+                .find_by_provider_ref(candidate)
+                .await?
+            {
+                local_payment = Some(p);
+                break;
+            }
+        }
+
+        let Some(local_payment) = local_payment else {
+            tracing::warn!(
+                razorpay_payment_id = %razorpay_payment.id,
+                status = %razorpay_payment.status,
+                "reconciliation: Razorpay payment has no matching local record; logged as an anomaly, not guessed at"
+            );
+            return Ok(false);
+        };
+
+        if local_payment.status == razorpay_status {
+            // Already in sync — via a webhook, or a prior reconciliation
+            // run. This is what makes repeated runs over the same
+            // still-in-window payment idempotent: nothing past this point
+            // ever executes a second time for the same real-world event.
+            return Ok(false);
+        }
+
+        let event_type = match razorpay_status {
+            PaymentStatus::Succeeded => "payment.captured",
+            PaymentStatus::Failed => "payment.failed",
+            // Only captured/failed are reachable here — see
+            // `map_razorpay_payment_status`.
+            _ => return Ok(false),
+        };
+        let event_id = format!(
+            "reconcile:{}:{}",
+            razorpay_payment.status, razorpay_payment.id
+        );
+        let payload = RazorpayWebhookPayload {
+            event: event_type.to_string(),
+            payload: serde_json::json!({
+                "payment": {
+                    "entity": {
+                        "id": razorpay_payment.id,
+                        "order_id": razorpay_payment.order_id,
+                    }
+                }
+            }),
+        };
+
+        self.process_webhook_event(&event_id, payload).await?;
+
+        tracing::warn!(
+            razorpay_payment_id = %razorpay_payment.id,
+            provider_ref = %local_payment.provider_ref.as_deref().unwrap_or(""),
+            new_status = %razorpay_payment.status,
+            "reconciliation: healed a payment a webhook apparently never delivered for"
+        );
+
+        Ok(true)
+    }
+}
+
+/// `PHASE4_DESIGN.md` §14 item 8/9 (confirmed, fixed values).
+pub const RECONCILIATION_INTERVAL_MINUTES: i64 = 15;
+const RECONCILIATION_LOOKBACK_HOURS: i64 = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReconciliationSummary {
+    pub checked: usize,
+    pub healed: usize,
+}
+
+/// Maps a Razorpay payment status string onto the one local status it
+/// implies, for the statuses reconciliation actually knows how to heal
+/// against (matching `process_webhook_event`'s own handled event types —
+/// see this module's doc comment). Any other Razorpay status (e.g.
+/// `"authorized"`, `"refunded"`) has no corresponding webhook handler in
+/// this phase, so reconciliation deliberately doesn't attempt one either.
+fn map_razorpay_payment_status(status: &str) -> Option<PaymentStatus> {
+    match status {
+        "captured" => Some(PaymentStatus::Succeeded),
+        "failed" => Some(PaymentStatus::Failed),
+        _ => None,
     }
 }
 
@@ -704,7 +888,8 @@ mod tests {
     }
 
     struct MockRazorpayClient {
-        result: Result<CreateCheckoutResponse, RazorpayError>,
+        checkout_result: Result<CreateCheckoutResponse, RazorpayError>,
+        list_result: Vec<RazorpayPayment>,
     }
 
     #[async_trait]
@@ -713,7 +898,14 @@ mod tests {
             &self,
             _req: CreateCheckoutRequest,
         ) -> Result<CreateCheckoutResponse, RazorpayError> {
-            self.result.clone()
+            self.checkout_result.clone()
+        }
+
+        async fn list_payments_since(
+            &self,
+            _since: chrono::DateTime<Utc>,
+        ) -> Result<Vec<RazorpayPayment>, RazorpayError> {
+            Ok(self.list_result.clone())
         }
     }
 
@@ -775,7 +967,8 @@ mod tests {
             subscription_repository.clone(),
             license_repository.clone(),
             Arc::new(MockRazorpayClient {
-                result: razorpay_result,
+                checkout_result: razorpay_result,
+                list_result: vec![],
             }),
         );
         (service, subscription_repository, license_repository)
@@ -786,6 +979,46 @@ mod tests {
             checkout_url: "https://rzp.io/checkout/xyz".to_string(),
             provider_ref: "sub_rzp_123".to_string(),
         })
+    }
+
+    /// Builds a `PaymentService` for reconciliation tests specifically —
+    /// unlike `service_with`, this also hands back the payment-repository
+    /// mock (reconciliation tests need to assert on `payments.status`,
+    /// which checkout/webhook tests never do) and takes the canned
+    /// `RazorpayClient::list_payments_since` response directly instead of
+    /// a single checkout result.
+    fn service_with_reconciliation(
+        payments: Vec<Payment>,
+        subscriptions: Vec<Subscription>,
+        licenses: Vec<License>,
+        razorpay_payments: Vec<RazorpayPayment>,
+    ) -> (
+        PaymentService,
+        Arc<MockPaymentRepository>,
+        Arc<MockSubscriptionRepository>,
+        Arc<MockLicenseRepository>,
+    ) {
+        let payment_repository = Arc::new(MockPaymentRepository::with(payments));
+        let subscription_repository = Arc::new(MockSubscriptionRepository::with(subscriptions));
+        let license_repository = Arc::new(MockLicenseRepository::with(licenses));
+        let service = PaymentService::new(
+            payment_repository.clone(),
+            Arc::new(MockWebhookEventRepository::new()),
+            subscription_repository.clone(),
+            license_repository.clone(),
+            Arc::new(MockRazorpayClient {
+                checkout_result: Err(RazorpayError::NotConfigured(
+                    "not exercised by reconciliation tests".to_string(),
+                )),
+                list_result: razorpay_payments,
+            }),
+        );
+        (
+            service,
+            payment_repository,
+            subscription_repository,
+            license_repository,
+        )
     }
 
     // ── create_checkout_session ─────────────────────────────────────────
@@ -1050,5 +1283,223 @@ mod tests {
         assert!(!key.contains('O'));
         assert!(!key.contains('1'));
         assert!(!key.contains('I'));
+    }
+
+    // ── reconcile_once (PHASE4_DESIGN.md §12) ───────────────────────────
+
+    fn razorpay_payment(id: &str, order_id: Option<&str>, status: &str) -> RazorpayPayment {
+        RazorpayPayment {
+            id: id.to_string(),
+            order_id: order_id.map(str::to_string),
+            status: status.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_heals_a_payment_no_webhook_ever_arrived_for() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, payments, subscriptions, licenses) = service_with_reconciliation(
+            vec![payment],
+            vec![subscription],
+            vec![],
+            vec![razorpay_payment("pay_xyz", Some("order_abc"), "captured")],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            summary,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 1
+            }
+        );
+
+        let stored_payments = payments.payments.lock().unwrap().clone();
+        assert_eq!(stored_payments[0].status, PaymentStatus::Succeeded);
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+
+        let license = licenses.find_latest_by_subscription(10).await.unwrap();
+        assert!(
+            license.is_some(),
+            "reconciliation must have issued a license"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_is_idempotent_across_repeated_calls() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, _payments, _subscriptions, licenses) = service_with_reconciliation(
+            vec![payment],
+            vec![subscription],
+            vec![],
+            vec![razorpay_payment("pay_xyz", Some("order_abc"), "captured")],
+        );
+
+        let first = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            first,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 1
+            }
+        );
+
+        // Same discovered payment, still inside the lookback window on a
+        // second (simulated) run 15 minutes later — must be a pure no-op.
+        let second = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            second,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 0
+            },
+            "a payment already in sync must not be re-processed"
+        );
+
+        // Exactly one license, not two.
+        let license_count = licenses
+            .licenses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.subscription_id == 10)
+            .count();
+        assert_eq!(license_count, 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_does_not_guess_at_an_unmatched_payment() {
+        let (service, _payments, _subscriptions, licenses) = service_with_reconciliation(
+            vec![],
+            vec![],
+            vec![],
+            vec![razorpay_payment(
+                "pay_unknown",
+                Some("order_unknown"),
+                "captured",
+            )],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            summary,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 0
+            }
+        );
+        assert!(
+            licenses.licenses.lock().unwrap().is_empty(),
+            "must not fabricate a license"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_skips_a_razorpay_status_with_no_handler() {
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, payments, _subscriptions, _licenses) = service_with_reconciliation(
+            vec![payment],
+            vec![sample_subscription(10, SubscriptionStatus::PendingPayment)],
+            vec![],
+            vec![razorpay_payment("pay_xyz", Some("order_abc"), "authorized")],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            summary,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 0
+            }
+        );
+
+        let stored_payments = payments.payments.lock().unwrap().clone();
+        assert_eq!(
+            stored_payments[0].status,
+            PaymentStatus::Pending,
+            "an unhandled Razorpay status must not change local state"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_syncs_a_failed_payment_without_activating_the_subscription() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, payments, subscriptions, _licenses) = service_with_reconciliation(
+            vec![payment],
+            vec![subscription],
+            vec![],
+            vec![razorpay_payment("pay_xyz", Some("order_abc"), "failed")],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            summary,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 1
+            }
+        );
+
+        let stored_payments = payments.payments.lock().unwrap().clone();
+        assert_eq!(stored_payments[0].status, PaymentStatus::Failed);
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(
+            subscription.status,
+            SubscriptionStatus::PendingPayment,
+            "a failed payment must never activate a subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_matches_by_payment_id_when_order_id_is_absent() {
+        // Subscription-originated recurring charges typically have no
+        // order_id — the payment's own id is what was stored as
+        // provider_ref at the original checkout.
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_payment(1, 10, "sub_rzp_xyz", PaymentStatus::Pending);
+        let (service, payments, ..) = service_with_reconciliation(
+            vec![payment],
+            vec![subscription],
+            vec![],
+            vec![razorpay_payment("sub_rzp_xyz", None, "captured")],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            summary,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 1
+            }
+        );
+
+        let stored_payments = payments.payments.lock().unwrap().clone();
+        assert_eq!(stored_payments[0].status, PaymentStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_reports_checked_count_even_when_nothing_needs_healing() {
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Succeeded);
+        let (service, ..) = service_with_reconciliation(
+            vec![payment],
+            vec![sample_subscription(10, SubscriptionStatus::Active)],
+            vec![],
+            vec![razorpay_payment("pay_xyz", Some("order_abc"), "captured")],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            summary,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 0
+            }
+        );
     }
 }

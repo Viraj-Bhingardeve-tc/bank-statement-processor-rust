@@ -1,22 +1,23 @@
 //! `license-server` — Phase 4 licensing + payment server.
 //!
-//! **Phase 4F scope** (`PHASE4_DESIGN.md` §13 phase 3): the payment
-//! domain (`domain::payment`/`domain::payment_webhook_event`), a Razorpay
-//! client abstraction (`razorpay`), real checkout-creation and webhook-
-//! processing business logic in `PaymentService` (`service`), and the HTTP
-//! endpoints in front of it (`routes::payment`) — `POST
-//! /create-checkout-session` (protected, reuses Phase 4E's
-//! `require_session` middleware) and `POST /webhooks/razorpay` (public,
-//! HMAC-verified instead — `auth::webhook_signature`). Builds on Phase
-//! 4D/4E's endpoints, all unchanged. No automatic reconciliation job,
-//! background workers, or desktop changes — those land in later,
-//! separately approved phases.
+//! **Phase 4G scope** (`PHASE4_DESIGN.md` §13 phase 5): the payment
+//! reconciliation scheduler (`reconciliation`) — a `tokio::time::interval`
+//! background task, spawned at startup (`main.rs`), that runs
+//! `PaymentService::reconcile_once` every 15 minutes as the pull-based
+//! backstop for webhooks that never arrived (`PHASE4_DESIGN.md` §12).
+//! Reuses the exact same `process_webhook_event` path `routes::payment`'s
+//! webhook handler uses, so there is exactly one code path that ever
+//! mutates payment/subscription/license state from a Razorpay event,
+//! reachable from two triggers. Builds on Phase 4D/4E/4F's endpoints, all
+//! unchanged. No new payment features, no desktop changes — those land in
+//! later, separately approved phases.
 
 pub mod auth;
 pub mod config;
 pub mod db;
 pub mod domain;
 pub mod razorpay;
+pub mod reconciliation;
 pub mod repository;
 pub mod routes;
 pub mod service;
