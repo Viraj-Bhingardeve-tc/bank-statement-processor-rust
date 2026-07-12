@@ -10,7 +10,9 @@
 //! module is only the scheduling wrapper, kept deliberately thin so the
 //! logic itself is testable (§12.4) without a running scheduler.
 
+use crate::service::{PaymentOperationError, ReconciliationSummary};
 use crate::state::AppState;
+use std::future::Future;
 use std::time::Duration;
 
 /// 15 minutes (`PHASE4_DESIGN.md` §14 item 8, confirmed, fixed value) —
@@ -18,6 +20,15 @@ use std::time::Duration;
 /// reasonable customer-support SLA, infrequent enough to stay well clear
 /// of Razorpay's API rate limits."
 const INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Bounds a single `reconcile_once` run (production readiness audit HIGH
+/// finding #5) — without it, a hung Razorpay call inside
+/// `list_payments_since` would block this loop's `.await` forever,
+/// silently disabling the reconciliation backstop with no error, no log,
+/// nothing. A run that doesn't finish within this window is treated as a
+/// failure and retried on the next tick, same as any other reconciliation
+/// error.
+const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Spawns the reconciliation loop and returns its `JoinHandle`. The first
 /// tick fires immediately (`tokio::time::interval`'s default behavior) —
@@ -27,52 +38,134 @@ const INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// is down"), and there's no reason to make a fresh deploy wait to do
 /// that.
 ///
-/// A failed run (e.g. Razorpay unreachable) is logged and the loop
-/// continues to the next tick — reconciliation failing must never affect
-/// the server's ability to keep serving normal traffic.
-///
-/// Phase 4I.2 adds `reconciliation_runs_total`/
-/// `reconciliation_payments_checked_total`/
-/// `reconciliation_payments_healed_total` metrics here, alongside the
-/// logging Phase 4G already established — same information, machine-
-/// readable for an alerting rule (e.g. "no successful run in the last N
-/// hours") rather than only grep-able in logs.
+/// A failed run (e.g. Razorpay unreachable, or the run timing out — see
+/// `run_once_with_timeout`) is logged and the loop continues to the next
+/// tick — reconciliation failing must never affect the server's ability
+/// to keep serving normal traffic.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(INTERVAL);
         loop {
             interval.tick().await;
-            match state.payment_service.reconcile_once().await {
-                Ok(summary) => {
-                    metrics::counter!(
-                        crate::observability::RECONCILIATION_RUNS_TOTAL,
-                        "result" => "success",
-                    )
-                    .increment(1);
-                    metrics::counter!(crate::observability::RECONCILIATION_PAYMENTS_CHECKED_TOTAL)
-                        .increment(summary.checked as u64);
-                    metrics::counter!(crate::observability::RECONCILIATION_PAYMENTS_HEALED_TOTAL)
-                        .increment(summary.healed as u64);
-                }
-                Err(e) => {
-                    metrics::counter!(
-                        crate::observability::RECONCILIATION_RUNS_TOTAL,
-                        "result" => "failure",
-                    )
-                    .increment(1);
-                    tracing::error!(error = %e, "reconciliation run failed; will retry next tick");
-                }
-            }
+            run_once_with_timeout(RUN_TIMEOUT, state.payment_service.reconcile_once()).await;
         }
     })
+}
+
+/// Runs one reconciliation attempt bounded by `timeout_duration`, recording
+/// metrics and logging exactly once per outcome — success, an
+/// application-level failure (`PaymentOperationError`, e.g. Razorpay
+/// unreachable), or a timeout (`reconcile` didn't resolve in time).
+/// Production readiness audit HIGH finding #5: wraps *only* the
+/// reconciliation future itself in `tokio::time::timeout`, exactly as
+/// specified — never panics, never returns an error the caller would need
+/// to propagate, so the `loop` in `spawn` above always proceeds to its
+/// next `interval.tick()` regardless of what happened here. Generic over
+/// the future (rather than taking `&PaymentService` directly) so a test
+/// can drive it with a future that deliberately never resolves, without a
+/// real database or Razorpay account.
+async fn run_once_with_timeout(
+    timeout_duration: Duration,
+    reconcile: impl Future<Output = Result<ReconciliationSummary, PaymentOperationError>>,
+) {
+    match tokio::time::timeout(timeout_duration, reconcile).await {
+        Ok(Ok(summary)) => {
+            metrics::counter!(
+                crate::observability::RECONCILIATION_RUNS_TOTAL,
+                "result" => "success",
+            )
+            .increment(1);
+            metrics::counter!(crate::observability::RECONCILIATION_PAYMENTS_CHECKED_TOTAL)
+                .increment(summary.checked as u64);
+            metrics::counter!(crate::observability::RECONCILIATION_PAYMENTS_HEALED_TOTAL)
+                .increment(summary.healed as u64);
+        }
+        Ok(Err(e)) => {
+            metrics::counter!(
+                crate::observability::RECONCILIATION_RUNS_TOTAL,
+                "result" => "failure",
+            )
+            .increment(1);
+            tracing::error!(error = %e, "reconciliation run failed; will retry next tick");
+        }
+        Err(_elapsed) => {
+            // Counted under the same "failure" label as an application-
+            // level error — both mean "this run did not complete" — but
+            // logged with a distinct message so an operator grepping logs
+            // can tell a hung network call apart from a normal error.
+            metrics::counter!(
+                crate::observability::RECONCILIATION_RUNS_TOTAL,
+                "result" => "failure",
+            )
+            .increment(1);
+            tracing::error!(
+                timeout_secs = timeout_duration.as_secs(),
+                "reconciliation run timed out; will retry next tick"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn interval_matches_the_confirmed_fifteen_minute_design_value() {
         assert_eq!(INTERVAL, Duration::from_secs(900));
+    }
+
+    #[test]
+    fn run_timeout_matches_the_documented_sixty_second_bound() {
+        assert_eq!(RUN_TIMEOUT, Duration::from_secs(60));
+    }
+
+    /// The actual behavior Phase 4J.4 fixes: a reconciliation run that
+    /// never resolves (simulating a hung Razorpay call inside
+    /// `list_payments_since`) must not block `run_once_with_timeout`
+    /// forever — it returns once the timeout elapses. Since `spawn`'s loop
+    /// has no early-return/`?`/`break` around this call, this function
+    /// returning at all is what lets the loop proceed to its next
+    /// `interval.tick()` — i.e. this is also the proof the scheduler
+    /// survives the hang rather than being permanently disabled by it.
+    #[tokio::test]
+    async fn scheduler_survives_a_reconciliation_run_that_never_finishes() {
+        let never_finishes =
+            std::future::pending::<Result<ReconciliationSummary, PaymentOperationError>>();
+
+        let started = Instant::now();
+        run_once_with_timeout(Duration::from_millis(50), never_finishes).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "run_once_with_timeout must return once the timeout elapses, not hang forever \
+             (took {elapsed:?})"
+        );
+    }
+
+    /// A hung run isn't just survived once — a *subsequent* tick still
+    /// works normally afterward, proving nothing about the timeout path
+    /// leaves the scheduler in a bad state.
+    #[tokio::test]
+    async fn a_normal_run_still_succeeds_after_a_previous_run_timed_out() {
+        let never_finishes =
+            std::future::pending::<Result<ReconciliationSummary, PaymentOperationError>>();
+        run_once_with_timeout(Duration::from_millis(50), never_finishes).await;
+
+        let completes_immediately = async {
+            Ok(ReconciliationSummary {
+                checked: 0,
+                healed: 0,
+            })
+        };
+        let started = Instant::now();
+        run_once_with_timeout(Duration::from_millis(50), completes_immediately).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a fast, successful run right after a timeout must not itself be delayed"
+        );
     }
 }

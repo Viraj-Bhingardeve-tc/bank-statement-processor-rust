@@ -28,6 +28,15 @@ use crate::domain::PlanType;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
+
+/// Conservative, production-safe bounds so a single hung Razorpay request
+/// can never block a caller (`POST /create-checkout-session`) or the
+/// reconciliation scheduler forever (production readiness audit HIGH
+/// finding #5). `connect_timeout` bounds the TCP+TLS handshake;
+/// `timeout` bounds the whole request including the response body.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RazorpayError {
@@ -128,7 +137,7 @@ impl HttpRazorpayClient {
         yearly_plan_id: Option<String>,
     ) -> Self {
         HttpRazorpayClient {
-            http: reqwest::Client::new(),
+            http: build_http_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
             key_id,
             key_secret,
             monthly_plan_id,
@@ -156,6 +165,28 @@ impl HttpRazorpayClient {
             RazorpayError::NotConfigured(format!("no Razorpay plan id configured for {plan_type}"))
         })
     }
+}
+
+/// Builds the underlying HTTP client with bounded connect/request
+/// timeouts — factored out of `HttpRazorpayClient::new` so a test can
+/// build one with tiny durations against a local, deliberately-
+/// unresponsive server and prove the bound is actually enforced, without
+/// touching the real production values.
+///
+/// `.expect(...)`: building a `reqwest::Client` only fails on a
+/// catastrophic TLS-backend initialization problem, never on the timeout
+/// values themselves. This runs once at server startup (`AppState::new`),
+/// so failing loudly here — rather than silently falling back to an
+/// unbounded client, which would defeat the entire point of this function
+/// — matches this crate's existing "fail fast at boot" convention
+/// (`main.rs`'s signal-handler installs, `observability::handle`'s
+/// Prometheus recorder install).
+fn build_http_client(connect_timeout: Duration, request_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+        .expect("failed to build the Razorpay HTTP client")
 }
 
 #[derive(Debug, Serialize)]
@@ -324,4 +355,52 @@ struct PaymentListItem {
     id: String,
     order_id: Option<String>,
     status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn timeouts_match_the_documented_conservative_defaults() {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(10));
+    }
+
+    /// The actual behavior Phase 4J.4 fixes: a request to a server that
+    /// accepts the TCP connection but never sends a response must still
+    /// fail within roughly the configured timeout, not hang indefinitely
+    /// (`create_checkout`/`list_payments_since` both call through
+    /// `self.http`, built the same way as `client` here).
+    #[tokio::test]
+    async fn a_request_past_the_configured_timeout_fails_instead_of_hanging_forever() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Accepts the connection and then never responds — simulates a
+        // Razorpay request that hangs forever.
+        tokio::spawn(async move {
+            if let Ok((_socket, _)) = listener.accept().await {
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let client = build_http_client(Duration::from_millis(200), Duration::from_millis(200));
+
+        let started = Instant::now();
+        let result = client.get(format!("http://{addr}/")).send().await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a request to an unresponsive server must fail, not hang until it succeeds"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the request must fail within roughly the configured timeout, not block \
+             indefinitely (took {elapsed:?})"
+        );
+    }
 }
