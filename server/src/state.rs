@@ -10,6 +10,7 @@
 //! existing handler to change.
 
 use crate::config::AppConfig;
+use crate::rate_limit::RateLimiters;
 use crate::razorpay::HttpRazorpayClient;
 use crate::repository::device::PgDeviceRepository;
 use crate::repository::license::PgLicenseRepository;
@@ -37,6 +38,11 @@ pub struct AppState {
     /// `.render()` on it; every other metric call site instruments through
     /// the `metrics` crate's own macros instead of touching this field.
     pub metrics_handle: PrometheusHandle,
+    /// The `/login` (per-IP) and `/validate-license` (per-`device_id`)
+    /// rate limiters (Phase 4J.6) — constructed fresh per `AppState`
+    /// (once per process in production; once per test in the test suite,
+    /// so tests never share rate-limit state with one another).
+    pub rate_limiters: RateLimiters,
 }
 
 impl AppState {
@@ -71,6 +77,7 @@ impl AppState {
             auth_service,
             payment_service,
             metrics_handle: crate::observability::handle(),
+            rate_limiters: RateLimiters::new(),
         }
     }
 }

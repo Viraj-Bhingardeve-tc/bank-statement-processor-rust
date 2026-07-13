@@ -9,6 +9,7 @@
 //! pattern `routes::license` already established.
 
 use crate::domain::Session;
+use crate::rate_limit::login_rate_limit;
 use crate::routes::error::ApiError;
 use crate::state::AppState;
 use axum::extract::{Request, State};
@@ -30,13 +31,14 @@ pub struct AuthenticatedSession(pub Session);
 
 /// Takes `state` directly (unlike every other `routes::*::router()`, which
 /// stay state-agnostic until `lib.rs::build_router`'s final
-/// `.with_state()`) because `/logout` needs `require_session` wired up
-/// with a *concrete* `AppState` at construction time —
+/// `.with_state()`) because `/logout` needs `require_session` — and,
+/// since Phase 4J.6, `/login` needs `rate_limit::login_rate_limit` —
+/// wired up with a *concrete* `AppState` at construction time —
 /// `axum::middleware::from_fn` alone always resolves its state parameter
-/// to `()`, which can't satisfy the middleware's own `State<AppState>`
-/// extractor. `.with_state(state)` here fully resolves the protected
-/// sub-router to `Router<()>`, which axum can then merge into the still-
-/// generic rest of the app (`Router<()>` merges into any `Router<S>`).
+/// to `()`, which can't satisfy either middleware's own `State<AppState>`
+/// extractor. `.with_state(state)` here fully resolves each sub-router to
+/// `Router<()>`, which axum can then merge into the still-generic rest of
+/// the app (`Router<()>` merges into any `Router<S>`).
 pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/logout", post(logout))
@@ -44,9 +46,20 @@ pub fn router(state: AppState) -> Router<AppState> {
             state.clone(),
             require_session,
         ))
+        .with_state(state.clone());
+
+    // `/login` alone gets the per-IP rate limiter — `/logout` needs an
+    // already-valid session to reach at all, so it isn't a brute-force
+    // target the same way.
+    let login_route = Router::new()
+        .route("/login", post(login))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            login_rate_limit,
+        ))
         .with_state(state);
 
-    Router::new().route("/login", post(login)).merge(protected)
+    Router::new().merge(login_route).merge(protected)
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {

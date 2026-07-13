@@ -124,3 +124,13 @@ metrics = "0.24"
 # (`default-features = false` matches this file's existing `sqlx` precedent
 # of trimming unused feature surface).
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
+
+# ── Rate limiting (Phase 4J.6 — production readiness audit) ────────────────
+# The GCRA rate-limiting algorithm/state itself, keyed independently per
+# client IP (`/login`) and per `device_id` (`/validate-license`) —
+# `rate_limit.rs`'s doc comment explains why this is plain `governor`
+# rather than the `tower_governor` axum-integration crate: `tower_governor`
+# 0.8 depends on `axum = "0.8"`, which conflicts with this crate's pinned
+# `axum = "0.7"`. `governor` has no HTTP-framework dependency at all, so it
+# composes cleanly via a small hand-written middleware instead.
+governor = "0.10"

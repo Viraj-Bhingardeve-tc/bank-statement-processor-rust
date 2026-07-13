@@ -35,6 +35,7 @@ pub mod config;
 pub mod db;
 pub mod domain;
 pub mod observability;
+pub mod rate_limit;
 pub mod razorpay;
 pub mod reconciliation;
 pub mod repository;
@@ -65,7 +66,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(routes::health::router())
         .merge(routes::ready::router())
         .merge(routes::metrics::router())
-        .merge(routes::license::router())
+        .merge(routes::license::router(state.clone()))
         .merge(routes::auth::router(state.clone()))
         .merge(routes::payment::router(state.clone()))
         .layer(

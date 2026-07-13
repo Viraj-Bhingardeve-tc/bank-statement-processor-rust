@@ -62,6 +62,13 @@ pub enum ApiError {
     /// Missing, malformed, expired, or revoked bearer token — matches
     /// `API_SPECIFICATION.md`'s `401 UNAUTHORIZED`.
     Unauthorized,
+    /// Too many requests from this caller (`rate_limit::login_rate_limit`
+    /// keyed by client IP on `/login`, `rate_limit::device_rate_limit`
+    /// keyed by `device_id` on `/validate-license`) — matches
+    /// `API_SPECIFICATION.md`'s documented `429 RATE_LIMITED` code, which
+    /// existed in the spec's error table from the start but was
+    /// unreachable until this phase actually implemented rate limiting.
+    RateLimited,
     /// `POST /create-checkout-session` with an unrecognized `plan_type` —
     /// `PHASE4_DESIGN.md` §3's additive `400 INVALID_PLAN_TYPE` code.
     InvalidPlanType,
@@ -84,6 +91,7 @@ impl fmt::Display for ApiError {
             ApiError::DeviceLimitReached(_) => write!(f, "device limit reached for this license"),
             ApiError::InvalidCredentials => write!(f, "invalid credentials"),
             ApiError::Unauthorized => write!(f, "unauthorized"),
+            ApiError::RateLimited => write!(f, "too many requests"),
             ApiError::InvalidPlanType => write!(f, "invalid plan_type"),
             ApiError::ProviderError(msg) => write!(f, "payment provider error: {msg}"),
             ApiError::Server(msg) => write!(f, "internal error: {msg}"),
@@ -146,6 +154,7 @@ impl IntoResponse for ApiError {
                     (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", None)
                 }
                 ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", None),
+                ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED", None),
                 ApiError::InvalidPlanType => (StatusCode::BAD_REQUEST, "INVALID_PLAN_TYPE", None),
                 ApiError::ProviderError(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR", None),
                 ApiError::Server(_) => (StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR", None),

@@ -8,9 +8,11 @@
 //! logic lives in `service::license_service` (`PHASE4_DESIGN.md` §1.2),
 //! not here.
 
+use crate::rate_limit::device_rate_limit;
 use crate::routes::error::ApiError;
 use crate::state::AppState;
 use axum::extract::State;
+use axum::middleware;
 use axum::routing::post;
 use axum::{Json, Router};
 use license_protocol::{
@@ -19,11 +21,33 @@ use license_protocol::{
 };
 use uuid::Uuid;
 
-pub fn router() -> Router<AppState> {
+/// Takes `state` directly (since Phase 4J.6, matching `routes::auth`'s own
+/// established reasoning) because `/validate-license` needs
+/// `rate_limit::device_rate_limit` wired up with a *concrete* `AppState`
+/// at construction time — `axum::middleware::from_fn` alone always
+/// resolves its state parameter to `()`, which can't satisfy the
+/// middleware's own `State<AppState>` extractor. `.with_state(state)`
+/// fully resolves that one route to `Router<()>`, which axum can then
+/// merge into the still-generic rest of the app.
+///
+/// Only `/validate-license` gets the device-keyed limiter here;
+/// `/activate-license` and `/deactivate-license` are unaffected —
+/// production readiness audit rate-limiting requirement is specifically
+/// `/validate-license` (and, once implemented, `/heartbeat`), not every
+/// device-identified endpoint.
+pub fn router(state: AppState) -> Router<AppState> {
+    let validate_route = Router::new()
+        .route("/validate-license", post(validate))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            device_rate_limit,
+        ))
+        .with_state(state);
+
     Router::new()
         .route("/activate-license", post(activate))
-        .route("/validate-license", post(validate))
         .route("/deactivate-license", post(deactivate))
+        .merge(validate_route)
 }
 
 fn parse_device_id(raw: &str) -> Result<Uuid, ApiError> {

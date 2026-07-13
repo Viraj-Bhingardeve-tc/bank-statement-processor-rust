@@ -113,9 +113,19 @@ async fn main() {
 
     tracing::info!(addr = %bind_addr, "license-server ready, accepting connections");
 
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+    // `into_make_service_with_connect_info::<SocketAddr>()` (rather than
+    // passing `app` directly): populates the `ConnectInfo<SocketAddr>`
+    // extension `rate_limit::login_rate_limit` (Phase 4J.6) reads to key
+    // `/login`'s per-IP rate limiter. Without this, that extension would
+    // never be present on real traffic and the limiter would silently
+    // fail open on every request (see that middleware's own doc comment
+    // on why it degrades that way instead of erroring).
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
     {
         tracing::error!(error = %e, "server exited with error");
         std::process::exit(1);
