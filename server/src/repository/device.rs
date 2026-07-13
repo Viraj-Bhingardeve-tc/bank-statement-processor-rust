@@ -46,8 +46,8 @@ pub trait DeviceRepository: Send + Sync {
     async fn count_active_by_license(&self, license_id: i64) -> Result<i64, RepositoryError>;
 
     /// Bumps `last_seen_at` to now — called on every successful
-    /// `/validate-license` (and, later, `/heartbeat`) for an already-
-    /// activated device.
+    /// `/validate-license` and `/heartbeat` for an already-activated
+    /// device.
     async fn touch_last_seen(&self, id: i64) -> Result<(), RepositoryError>;
 
     /// Sets `deactivated_at` — `/deactivate-license`. Soft-delete, never a

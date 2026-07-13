@@ -120,6 +120,20 @@ pub struct SubscriptionSummary {
     pub status: String,
     pub current_period_end: Option<String>,
     pub auto_renew: bool,
+    pub licenses: Vec<LicenseSummary>,
+}
+
+/// One entry in `SubscriptionSummary::licenses` — `GET /subscription`'s
+/// per-license device-usage summary (`API_SPECIFICATION.md`). Added in
+/// Phase 4J.7 alongside the server's first real implementation of that
+/// endpoint; `SubscriptionSummary` itself predates this (Phase 4A) but
+/// never had anywhere to source `licenses` from until now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LicenseSummary {
+    pub license_id: String,
+    pub status: String,
+    pub devices_active: i64,
+    pub max_devices: i64,
 }
 
 /// `POST /deactivate-license` — additive beyond the original 7 endpoints
@@ -257,7 +271,49 @@ mod tests {
             status: "active".to_string(),
             current_period_end: Some("2027-07-09T00:00:00Z".to_string()),
             auto_renew: true,
+            licenses: vec![LicenseSummary {
+                license_id: "lic_456".to_string(),
+                status: "active".to_string(),
+                devices_active: 1,
+                max_devices: 1,
+            }],
         });
+    }
+
+    /// Pins `GET /subscription`'s exact documented response shape
+    /// (`API_SPECIFICATION.md`), including the nested `licenses` array —
+    /// same purpose as `activate_license_request_matches_the_documented_wire_shape`
+    /// below, applied to this endpoint's response instead of a request.
+    #[test]
+    fn subscription_summary_matches_the_documented_wire_shape() {
+        let json = serde_json::to_value(SubscriptionSummary {
+            subscription_id: "sub_321".to_string(),
+            plan_type: "yearly".to_string(),
+            status: "active".to_string(),
+            current_period_end: Some("2027-07-09T00:00:00Z".to_string()),
+            auto_renew: true,
+            licenses: vec![LicenseSummary {
+                license_id: "lic_456".to_string(),
+                status: "active".to_string(),
+                devices_active: 1,
+                max_devices: 1,
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "subscription_id": "sub_321",
+                "plan_type": "yearly",
+                "status": "active",
+                "current_period_end": "2027-07-09T00:00:00Z",
+                "auto_renew": true,
+                "licenses": [
+                    { "license_id": "lic_456", "status": "active", "devices_active": 1, "max_devices": 1 }
+                ]
+            })
+        );
     }
 
     #[test]

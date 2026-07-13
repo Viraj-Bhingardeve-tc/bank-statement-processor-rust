@@ -17,27 +17,32 @@ use axum::routing::post;
 use axum::{Json, Router};
 use license_protocol::{
     ActivateLicenseRequest, ActivateLicenseResponse, DeactivateLicenseRequest,
-    DeactivateLicenseResponse, ValidateLicenseRequest, ValidateLicenseResponse,
+    DeactivateLicenseResponse, HeartbeatRequest, HeartbeatResponse, ValidateLicenseRequest,
+    ValidateLicenseResponse,
 };
 use uuid::Uuid;
 
 /// Takes `state` directly (since Phase 4J.6, matching `routes::auth`'s own
-/// established reasoning) because `/validate-license` needs
-/// `rate_limit::device_rate_limit` wired up with a *concrete* `AppState`
-/// at construction time — `axum::middleware::from_fn` alone always
-/// resolves its state parameter to `()`, which can't satisfy the
+/// established reasoning) because `/validate-license` and `/heartbeat`
+/// need `rate_limit::device_rate_limit` wired up with a *concrete*
+/// `AppState` at construction time — `axum::middleware::from_fn` alone
+/// always resolves its state parameter to `()`, which can't satisfy the
 /// middleware's own `State<AppState>` extractor. `.with_state(state)`
 /// fully resolves that one route to `Router<()>`, which axum can then
 /// merge into the still-generic rest of the app.
 ///
-/// Only `/validate-license` gets the device-keyed limiter here;
-/// `/activate-license` and `/deactivate-license` are unaffected —
-/// production readiness audit rate-limiting requirement is specifically
-/// `/validate-license` (and, once implemented, `/heartbeat`), not every
-/// device-identified endpoint.
+/// Only `/validate-license` and `/heartbeat` get the device-keyed limiter
+/// here, sharing one middleware instance (`rate_limit`'s own doc comment —
+/// the limiter was built endpoint-agnostic from the start specifically for
+/// this) — `/activate-license`, `/deactivate-license`, and
+/// `/refresh-license` are unaffected; the production readiness audit's
+/// rate-limiting requirement (Phase 4J.6) was specifically
+/// `/validate-license` + `/heartbeat`, not every device-identified
+/// endpoint.
 pub fn router(state: AppState) -> Router<AppState> {
-    let validate_route = Router::new()
+    let device_rate_limited_routes = Router::new()
         .route("/validate-license", post(validate))
+        .route("/heartbeat", post(heartbeat))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             device_rate_limit,
@@ -47,7 +52,12 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/activate-license", post(activate))
         .route("/deactivate-license", post(deactivate))
-        .merge(validate_route)
+        // Identical request/response shape and behavior to
+        // `/validate-license` (`API_SPECIFICATION.md`: "Same request/
+        // response shape as /validate-license") — reuses that exact
+        // handler rather than a second copy of the same lookup.
+        .route("/refresh-license", post(validate))
+        .merge(device_rate_limited_routes)
 }
 
 fn parse_device_id(raw: &str) -> Result<Uuid, ApiError> {
@@ -108,6 +118,23 @@ async fn validate(
         grace_period_days: i64::from(outcome.grace_period_days),
         server_time: chrono::Utc::now().to_rfc3339(),
         fingerprint_matched: outcome.fingerprint_matched,
+    }))
+}
+
+async fn heartbeat(
+    State(state): State<AppState>,
+    Json(req): Json<HeartbeatRequest>,
+) -> Result<Json<HeartbeatResponse>, ApiError> {
+    let license_id = parse_license_id(&req.license_id)?;
+    let device_id = parse_device_id(&req.device_id)?;
+
+    let outcome = state
+        .license_service
+        .heartbeat(license_id, device_id)
+        .await?;
+
+    Ok(Json(HeartbeatResponse {
+        status: outcome.status.as_str().to_string(),
     }))
 }
 

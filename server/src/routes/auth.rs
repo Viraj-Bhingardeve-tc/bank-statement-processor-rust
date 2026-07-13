@@ -17,9 +17,9 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use license_protocol::{LoginRequest, LoginResponse};
+use license_protocol::{LicenseSummary, LoginRequest, LoginResponse, SubscriptionSummary};
 use serde::Serialize;
 
 /// Injected into request extensions by `require_session` once a bearer
@@ -42,6 +42,7 @@ pub struct AuthenticatedSession(pub Session);
 pub fn router(state: AppState) -> Router<AppState> {
     let protected = Router::new()
         .route("/logout", post(logout))
+        .route("/subscription", get(subscription))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,
@@ -108,6 +109,42 @@ async fn logout(
 ) -> Result<Json<LogoutResponse>, ApiError> {
     state.auth_service.logout(session.id).await?;
     Ok(Json(LogoutResponse {}))
+}
+
+/// `GET /subscription`. Account-scoped (keyed by the bearer session's
+/// `user_id`), unlike `/validate-license`/`/heartbeat`/`/refresh-license`
+/// which are device-scoped (keyed by `license_id`+`device_id`, no session
+/// at all) — this is why it lives behind `require_session` here rather
+/// than alongside those in `routes::license`.
+async fn subscription(
+    State(state): State<AppState>,
+    axum::Extension(AuthenticatedSession(session)): axum::Extension<AuthenticatedSession>,
+) -> Result<Json<SubscriptionSummary>, ApiError> {
+    let outcome = state
+        .license_service
+        .subscription_summary(session.user_id)
+        .await?;
+
+    Ok(Json(SubscriptionSummary {
+        subscription_id: outcome.subscription.id.to_string(),
+        plan_type: outcome.subscription.plan_type.as_str().to_string(),
+        status: outcome.subscription.status.as_str().to_string(),
+        current_period_end: outcome
+            .subscription
+            .current_period_end
+            .map(|d| d.to_rfc3339()),
+        auto_renew: outcome.subscription.auto_renew,
+        licenses: outcome
+            .licenses
+            .into_iter()
+            .map(|l| LicenseSummary {
+                license_id: l.license_id.to_string(),
+                status: l.status.as_str().to_string(),
+                devices_active: l.devices_active,
+                max_devices: i64::from(l.max_devices),
+            })
+            .collect(),
+    }))
 }
 
 #[cfg(test)]

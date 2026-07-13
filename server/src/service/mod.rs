@@ -19,8 +19,8 @@ pub mod payment_service;
 
 pub use auth_service::{AuthError, AuthService, LoginOutcome};
 pub use license_service::{
-    ActivationOutcome, DeactivationOutcome, LicenseOperationError, LicenseService,
-    ValidationOutcome,
+    ActivationOutcome, DeactivationOutcome, HeartbeatOutcome, LicenseOperationError,
+    LicenseService, LicenseSummaryOutcome, SubscriptionSummaryOutcome, ValidationOutcome,
 };
 pub use payment_service::{
     CheckoutOutcome, PaymentOperationError, PaymentService, ReconciliationSummary,

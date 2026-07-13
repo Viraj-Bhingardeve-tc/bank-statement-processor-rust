@@ -34,7 +34,7 @@ mod common;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use license_protocol::{LoginRequest, ValidateLicenseRequest};
+use license_protocol::{HeartbeatRequest, LoginRequest, ValidateLicenseRequest};
 use license_server::rate_limit::{DEVICE_REQUESTS_PER_MINUTE, LOGIN_REQUESTS_PER_MINUTE};
 use license_server::state::AppState;
 use license_server::{build_router, db};
@@ -171,6 +171,13 @@ fn validate_request(device_id: &str) -> ValidateLicenseRequest {
     }
 }
 
+fn heartbeat_request(device_id: &str) -> HeartbeatRequest {
+    HeartbeatRequest {
+        license_id: "1".to_string(),
+        device_id: device_id.to_string(),
+    }
+}
+
 #[tokio::test]
 async fn login_returns_429_rate_limited_after_the_burst_is_exhausted() {
     let app = app();
@@ -293,6 +300,68 @@ async fn validate_license_for_a_different_device_id_is_unaffected_by_another_dev
         status,
         StatusCode::TOO_MANY_REQUESTS,
         "a different device_id must have its own, untouched budget"
+    );
+
+    for handle in burst {
+        let _ = handle.await.unwrap();
+    }
+}
+
+/// Phase 4J.7: `/heartbeat` was wired onto the exact same
+/// `device_rate_limit` middleware instance `/validate-license` already
+/// used (`routes::license::router`'s `device_rate_limited_routes`
+/// sub-router), not a second, independent limiter — this proves that
+/// sharing holds over real HTTP requests, not just at the `governor` call
+/// level (see `rate_limit.rs`'s own unit test for that lower-level proof).
+#[tokio::test]
+async fn heartbeat_shares_its_rate_limit_budget_with_validate_license() {
+    let app = app();
+    let device_id = Uuid::new_v4().to_string();
+    let peer: SocketAddr = "203.0.113.99:0".parse().unwrap();
+
+    // Exhaust the shared budget entirely through /validate-license...
+    let burst = fire_concurrent_burst(
+        &app,
+        "/validate-license",
+        &validate_request(&device_id),
+        peer,
+        DEVICE_REQUESTS_PER_MINUTE,
+    )
+    .await;
+
+    // ...and confirm /heartbeat, for the exact same device_id, is now
+    // rate-limited too.
+    let (status, body) =
+        post_json_and_parse(&app, "/heartbeat", &heartbeat_request(&device_id)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"]["code"], "RATE_LIMITED");
+
+    for handle in burst {
+        let _ = handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn heartbeat_for_a_fresh_device_id_is_unaffected_by_validate_licenses_exhausted_budget() {
+    let app = app();
+    let exhausted_device = Uuid::new_v4().to_string();
+    let fresh_device = Uuid::new_v4().to_string();
+    let peer: SocketAddr = "203.0.113.99:0".parse().unwrap();
+
+    let burst = fire_concurrent_burst(
+        &app,
+        "/validate-license",
+        &validate_request(&exhausted_device),
+        peer,
+        DEVICE_REQUESTS_PER_MINUTE,
+    )
+    .await;
+
+    let status = post_json(&app, "/heartbeat", &heartbeat_request(&fresh_device)).await;
+    assert_ne!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a fresh device_id's heartbeat must be unaffected by another device's exhausted validate-license budget"
     );
 
     for handle in burst {

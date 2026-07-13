@@ -7,15 +7,15 @@
 //!   only (brute-force protection, `PHASE4_DESIGN.md` §5: "`/login`
 //!   limited per-IP").
 //! - [`device_rate_limit`] — keyed by the `device_id` field in the JSON
-//!   request body, applied to `POST /validate-license`
-//!   (`PHASE4_DESIGN.md` §5: "`/validate-license` and `/heartbeat` limited
-//!   per-`device_id`"). `POST /heartbeat` does not exist as a route yet
-//!   (a separate, not-yet-implemented audit finding) — this middleware
-//!   and the shared [`RateLimiters::device`] instance are already
-//!   endpoint-agnostic (keyed purely on a `device_id` field in the body,
-//!   nothing `/validate-license`-specific), so wiring it onto `/heartbeat`
-//!   later is a one-line `.route_layer(...)` addition reusing the exact
-//!   same limiter — not a new limiter with its own, separate budget.
+//!   request body, applied to `POST /validate-license` and (since Phase
+//!   4J.7) `POST /heartbeat` (`PHASE4_DESIGN.md` §5: "`/validate-license`
+//!   and `/heartbeat` limited per-`device_id`") — this middleware and the
+//!   shared [`RateLimiters::device`] instance were built endpoint-agnostic
+//!   from the start (keyed purely on a `device_id` field in the body,
+//!   nothing `/validate-license`-specific), so wiring `/heartbeat` onto it
+//!   in Phase 4J.7 was a one-line `.route(...)` addition to the same
+//!   already-rate-limited sub-router (`routes::license::router`) — not a
+//!   new limiter with its own, separate budget.
 //!
 //! **Why plain `governor` instead of `tower_governor`:** `tower_governor`
 //! 0.8 depends on `axum = "0.8"`, which conflicts with this crate's pinned
@@ -46,11 +46,11 @@ use std::sync::Arc;
 /// to make a credential-stuffing loop impractical.
 pub const LOGIN_REQUESTS_PER_MINUTE: u32 = 5;
 
-/// `POST /validate-license` (and, once implemented, `POST /heartbeat`) —
-/// keyed by `device_id`, one shared budget across both endpoints
-/// (`PHASE4_DESIGN.md` §5). A single already-activated device calling
-/// `/validate-license` once per app launch, plus an occasional manual
-/// retry, sits far below this; a device flooding either endpoint (or
+/// `POST /validate-license` and `POST /heartbeat` — keyed by `device_id`,
+/// one shared budget across both endpoints (`PHASE4_DESIGN.md` §5). A
+/// single already-activated device calling `/validate-license` once per
+/// app launch, plus an occasional manual retry, sits far below this; a
+/// device flooding either endpoint (or
 /// splitting traffic across both to try to double its effective rate)
 /// hits the same shared limit either way.
 pub const DEVICE_REQUESTS_PER_MINUTE: u32 = 30;
@@ -132,9 +132,9 @@ pub async fn login_rate_limit(
 }
 
 /// `axum::middleware::from_fn_with_state` layer for `POST /validate-license`
-/// (and, once implemented, `POST /heartbeat`) — keyed by the `device_id`
-/// field in the JSON request body. Buffers the body to read `device_id`,
-/// then reconstructs an identical request for the real handler.
+/// and `POST /heartbeat` — keyed by the `device_id` field in the JSON
+/// request body. Buffers the body to read `device_id`, then reconstructs
+/// an identical request for the real handler.
 ///
 /// A body that isn't valid JSON, or has no string `device_id` field, is
 /// passed through unchanged and *not* rate-limited here at all — the
@@ -254,14 +254,14 @@ mod tests {
         );
     }
 
-    /// `POST /heartbeat` doesn't exist as a route yet (a separate,
-    /// not-yet-implemented audit finding — see this module's doc
-    /// comment), so "shares the limiter with validate" is proven at the
-    /// level that actually exists today: two logical callers consuming
-    /// from the *same* `RateLimiters::device` instance share one budget,
-    /// regardless of which one exhausts it. Once `/heartbeat` is wired to
-    /// `device_rate_limit` with this same `AppState`, this is exactly the
-    /// mechanism that makes the two endpoints share a budget over HTTP.
+    /// Proves the underlying mechanism directly at the `governor` level:
+    /// two logical callers consuming from the *same* `RateLimiters::device`
+    /// instance share one budget, regardless of which one exhausts it —
+    /// this is exactly what makes `/validate-license` and `/heartbeat`
+    /// share a budget over HTTP (see `tests/rate_limit_flow.rs`'s
+    /// `heartbeat_shares_its_rate_limit_budget_with_validate_license` for
+    /// the HTTP-level proof of the same thing, now that `/heartbeat` is a
+    /// real route as of Phase 4J.7).
     #[test]
     fn a_shared_device_limiter_instance_pools_budget_across_two_logical_callers() {
         let limiters = RateLimiters::new();

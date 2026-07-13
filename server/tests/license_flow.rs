@@ -14,7 +14,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use license_protocol::{
     ActivateLicenseRequest, ActivateLicenseResponse, DeactivateLicenseRequest,
-    DeactivateLicenseResponse, ValidateLicenseRequest, ValidateLicenseResponse,
+    DeactivateLicenseResponse, HeartbeatRequest, HeartbeatResponse, ValidateLicenseRequest,
+    ValidateLicenseResponse,
 };
 use license_server::state::AppState;
 use license_server::{build_router, db};
@@ -304,6 +305,150 @@ async fn concurrent_activation_for_different_devices_at_the_device_limit_allows_
         active_count, 2,
         "max_devices must never be exceeded, even under concurrent activation"
     );
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+// ── Phase 4J.7: /heartbeat, /refresh-license ─────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn heartbeat_after_activation_reports_the_current_license_status() {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, body) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK, "activate response: {body}");
+    let activate_resp: ActivateLicenseResponse = serde_json::from_value(body).unwrap();
+
+    let heartbeat_req = HeartbeatRequest {
+        license_id: activate_resp.license_id.clone(),
+        device_id,
+    };
+    let (status, body) = post_json(&app, "/heartbeat", &heartbeat_req).await;
+    assert_eq!(status, StatusCode::OK, "heartbeat response: {body}");
+    let heartbeat_resp: HeartbeatResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(heartbeat_resp.status, "active");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn heartbeat_for_a_device_never_activated_returns_404_device_not_activated() {
+    let pool = connected_pool().await;
+    let (_license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+
+    let heartbeat_req = HeartbeatRequest {
+        license_id: license_id.to_string(),
+        device_id: Uuid::new_v4().to_string(),
+    };
+    let (status, body) = post_json(&app, "/heartbeat", &heartbeat_req).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "DEVICE_NOT_ACTIVATED");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+/// `/refresh-license` reuses `/validate-license`'s exact handler
+/// (`routes::license::router`) — this proves it end-to-end over HTTP, not
+/// just via the shared `LicenseService::validate` unit tests.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn refresh_license_after_activation_behaves_identically_to_validate_license() {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, body) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK, "activate response: {body}");
+    let activate_resp: ActivateLicenseResponse = serde_json::from_value(body).unwrap();
+
+    let refresh_req = ValidateLicenseRequest {
+        license_id: activate_resp.license_id.clone(),
+        device_id,
+        machine_fingerprint: "fp-1".to_string(),
+        client_clock: chrono::Utc::now().to_rfc3339(),
+    };
+    let (status, body) = post_json(&app, "/refresh-license", &refresh_req).await;
+    assert_eq!(status, StatusCode::OK, "refresh-license response: {body}");
+    let refresh_resp: ValidateLicenseResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(refresh_resp.status, "active");
+    assert!(refresh_resp.fingerprint_matched);
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+/// Regression coverage for the audit's `/heartbeat` requirement that a
+/// non-active status is returned as data, not an error — seeds a license
+/// that's already `expired` in the database (bypassing `/activate-license`,
+/// which itself rejects an already-expired license — this simulates a
+/// license that expired *after* the device was activated on it, the
+/// realistic path to this state) and confirms both `/heartbeat` and
+/// `/validate-license` report `"expired"` with a normal `200`, never a
+/// `410`.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn heartbeat_and_validate_report_an_expired_license_status_without_erroring() {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    sqlx::query("UPDATE licenses SET status = 'expired' WHERE id = $1")
+        .bind(license_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let heartbeat_req = HeartbeatRequest {
+        license_id: license_id.to_string(),
+        device_id: device_id.clone(),
+    };
+    let (status, body) = post_json(&app, "/heartbeat", &heartbeat_req).await;
+    assert_eq!(status, StatusCode::OK, "heartbeat response: {body}");
+    let heartbeat_resp: HeartbeatResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(heartbeat_resp.status, "expired");
+
+    let validate_req = ValidateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id,
+        machine_fingerprint: "fp-1".to_string(),
+        client_clock: chrono::Utc::now().to_rfc3339(),
+    };
+    let (status, body) = post_json(&app, "/validate-license", &validate_req).await;
+    assert_eq!(status, StatusCode::OK, "validate response: {body}");
+    let validate_resp: ValidateLicenseResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(validate_resp.status, "expired");
 
     cleanup(&pool, license_id, subscription_id, user_id).await;
 }

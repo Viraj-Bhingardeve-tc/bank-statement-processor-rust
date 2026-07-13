@@ -10,7 +10,7 @@
 //! HTTP framework type appears anywhere in this file (`PHASE4_DESIGN.md`
 //! §1.2's "Services... independent of HTTP framework types").
 
-use crate::domain::{Device, License, LicenseRecordStatus, PlanType};
+use crate::domain::{Device, License, LicenseRecordStatus, PlanType, Subscription};
 use crate::repository::device::{DeviceActivationOutcome, DeviceRepository};
 use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
@@ -133,6 +133,53 @@ impl LicenseService {
         device_id: Uuid,
         machine_fingerprint: &str,
     ) -> Result<ValidationOutcome, LicenseOperationError> {
+        let (license, device) = self.find_active_device(license_id, device_id).await?;
+        self.device_repository.touch_last_seen(device.id).await?;
+
+        Ok(ValidationOutcome {
+            status: license.status,
+            expires_at: license.expires_at,
+            grace_period_days: license.grace_period_days,
+            fingerprint_matched: device.machine_fingerprint == machine_fingerprint,
+        })
+    }
+
+    /// `POST /heartbeat`. A lightweight liveness ping meant to be called
+    /// periodically *while the app is running*, not just at startup
+    /// (`API_SPECIFICATION.md`) — reuses [`find_active_device`], the exact
+    /// same "does this device_id have a live activation on this license_id"
+    /// lookup `validate` depends on, since a heartbeat's only job is to
+    /// surface a license that became non-active mid-session sooner than
+    /// the next full validation; it has no fingerprint/expiry payload of
+    /// its own to compute, hence the narrower [`HeartbeatOutcome`].
+    ///
+    /// [`find_active_device`]: Self::find_active_device
+    pub async fn heartbeat(
+        &self,
+        license_id: i64,
+        device_id: Uuid,
+    ) -> Result<HeartbeatOutcome, LicenseOperationError> {
+        let (license, device) = self.find_active_device(license_id, device_id).await?;
+        self.device_repository.touch_last_seen(device.id).await?;
+
+        Ok(HeartbeatOutcome {
+            status: license.status,
+        })
+    }
+
+    /// Shared lookup behind `validate` and `heartbeat`: resolves
+    /// `license_id` to a `License` and confirms `device_id` has a
+    /// still-active (`deactivated_at IS NULL`) row on it, both rejecting
+    /// with the same `DeviceNotActivated` `API_SPECIFICATION.md` documents
+    /// for `/validate-license` ("this device_id was never activated
+    /// against this license") — `/heartbeat`'s own spec says to treat a
+    /// failure the same way, so there's no separate error case to
+    /// distinguish here either.
+    async fn find_active_device(
+        &self,
+        license_id: i64,
+        device_id: Uuid,
+    ) -> Result<(License, Device), LicenseOperationError> {
         let license = self
             .license_repository
             .find_by_id(license_id)
@@ -146,14 +193,7 @@ impl LicenseService {
             .filter(|d| d.deactivated_at.is_none())
             .ok_or(LicenseOperationError::DeviceNotActivated)?;
 
-        self.device_repository.touch_last_seen(device.id).await?;
-
-        Ok(ValidationOutcome {
-            status: license.status,
-            expires_at: license.expires_at,
-            grace_period_days: license.grace_period_days,
-            fingerprint_matched: device.machine_fingerprint == machine_fingerprint,
-        })
+        Ok((license, device))
     }
 
     /// `POST /deactivate-license`. Frees a device slot — the customer-
@@ -187,6 +227,64 @@ impl LicenseService {
 
         Ok(DeactivationOutcome { devices_active })
     }
+
+    /// `GET /subscription`. Fetches the logged-in account's current
+    /// subscription/billing summary (`API_SPECIFICATION.md`) — reuses the
+    /// same three repositories `activate`/`validate` already depend on
+    /// rather than introducing a separate service for this one read-only
+    /// aggregation. `licenses` reuses
+    /// `LicenseRepository::find_latest_by_subscription` — the same "current
+    /// license for this subscription" query `service::payment_service`
+    /// already relies on to decide "extend vs. issue fresh" on a renewal —
+    /// so this needs no new repository query; it's always 0 or 1 entries,
+    /// matching that method's own "most recent non-revoked license" scope,
+    /// never more (avoiding any N+1 device-count query beyond the single
+    /// license this returns).
+    ///
+    /// A user with no currently-`active` subscription row is a state
+    /// `API_SPECIFICATION.md` doesn't document a specific error code for —
+    /// treated the same way `activate`'s "license references a missing
+    /// subscription" already is (an unexpected referential state, not a
+    /// documented client error), rather than inventing a new wire-level
+    /// error code out of scope for this phase.
+    pub async fn subscription_summary(
+        &self,
+        user_id: i64,
+    ) -> Result<SubscriptionSummaryOutcome, LicenseOperationError> {
+        let subscription = self
+            .subscription_repository
+            .find_active_by_user(user_id)
+            .await?
+            .ok_or_else(|| {
+                LicenseOperationError::Repository(RepositoryError::InvalidData(format!(
+                    "user {user_id} has no active subscription"
+                )))
+            })?;
+
+        let license = self
+            .license_repository
+            .find_latest_by_subscription(subscription.id)
+            .await?;
+
+        let mut licenses = Vec::new();
+        if let Some(license) = license {
+            let devices_active = self
+                .device_repository
+                .count_active_by_license(license.id)
+                .await?;
+            licenses.push(LicenseSummaryOutcome {
+                license_id: license.id,
+                status: license.status,
+                devices_active,
+                max_devices: license.max_devices,
+            });
+        }
+
+        Ok(SubscriptionSummaryOutcome {
+            subscription,
+            licenses,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -207,6 +305,25 @@ pub struct ValidationOutcome {
 #[derive(Debug)]
 pub struct DeactivationOutcome {
     pub devices_active: i64,
+}
+
+#[derive(Debug)]
+pub struct HeartbeatOutcome {
+    pub status: LicenseRecordStatus,
+}
+
+#[derive(Debug)]
+pub struct SubscriptionSummaryOutcome {
+    pub subscription: Subscription,
+    pub licenses: Vec<LicenseSummaryOutcome>,
+}
+
+#[derive(Debug)]
+pub struct LicenseSummaryOutcome {
+    pub license_id: i64,
+    pub status: LicenseRecordStatus,
+    pub devices_active: i64,
+    pub max_devices: i32,
 }
 
 #[derive(Debug)]
@@ -301,11 +418,18 @@ mod tests {
 
         async fn find_latest_by_subscription(
             &self,
-            _subscription_id: i64,
+            subscription_id: i64,
         ) -> Result<Option<License>, RepositoryError> {
-            unimplemented!(
-                "not exercised by these tests — see service::payment_service for coverage"
-            )
+            Ok(self
+                .licenses
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| {
+                    l.subscription_id == subscription_id && l.status != LicenseRecordStatus::Revoked
+                })
+                .max_by_key(|l| l.issued_at)
+                .cloned())
         }
 
         async fn insert(
@@ -816,5 +940,130 @@ mod tests {
 
         let err = service.deactivate(1, device_id).await.unwrap_err();
         assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
+    }
+
+    // ── Phase 4J.7: /heartbeat, /refresh-license, /subscription ─────────
+
+    #[tokio::test]
+    async fn heartbeat_reports_the_current_license_status_for_an_active_device() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_reports_an_expired_license_status_without_erroring() {
+        // Same contract as `/validate-license`: a non-active status is
+        // returned as data, never rejected as an error — only a device
+        // that was never activated (or has since been deactivated) is a
+        // `DeviceNotActivated` error.
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Expired, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Expired);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_with_a_device_never_activated_on_this_license_returns_device_not_activated()
+    {
+        let service = service_with(
+            vec![sample_license(LicenseRecordStatus::Active, 1)],
+            vec![],
+            vec![],
+        );
+
+        let err = service.heartbeat(1, Uuid::new_v4()).await.unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_with_an_unknown_license_id_returns_device_not_activated() {
+        let service = service_with(vec![], vec![], vec![]);
+
+        let err = service.heartbeat(999, Uuid::new_v4()).await.unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
+    }
+
+    #[tokio::test]
+    async fn validate_and_heartbeat_agree_on_status_for_the_same_active_device() {
+        // `/refresh-license` reuses `validate` outright (identical
+        // request/response shape per `API_SPECIFICATION.md`), so this also
+        // stands in as proof that `/refresh-license` and `/heartbeat` never
+        // disagree about a device's current license status.
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Suspended, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let validate_outcome = service.validate(1, device_id, "fp").await.unwrap();
+        let heartbeat_outcome = service.heartbeat(1, device_id).await.unwrap();
+        assert_eq!(validate_outcome.status, heartbeat_outcome.status);
+    }
+
+    #[tokio::test]
+    async fn subscription_summary_returns_the_active_subscription_and_its_current_license() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 3);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![sample_subscription()]);
+
+        let outcome = service.subscription_summary(100).await.unwrap();
+        assert_eq!(outcome.subscription.user_id, 100);
+        assert_eq!(outcome.licenses.len(), 1);
+        assert_eq!(outcome.licenses[0].license_id, 1);
+        assert_eq!(outcome.licenses[0].status, LicenseRecordStatus::Active);
+        assert_eq!(outcome.licenses[0].devices_active, 1);
+        assert_eq!(outcome.licenses[0].max_devices, 3);
+    }
+
+    #[tokio::test]
+    async fn subscription_summary_for_a_user_with_no_active_subscription_is_a_repository_error() {
+        let service = service_with(vec![], vec![], vec![]);
+
+        let err = service.subscription_summary(100).await.unwrap_err();
+        assert!(matches!(err, LicenseOperationError::Repository(_)));
     }
 }
