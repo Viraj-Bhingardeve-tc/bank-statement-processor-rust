@@ -24,6 +24,7 @@
 //! already calls out as the one thing automated tests can't substitute
 //! for.**
 
+use crate::config::Secret;
 use crate::domain::PlanType;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -121,18 +122,25 @@ pub trait RazorpayClient: Send + Sync {
 }
 
 /// The real implementation — HTTP calls against `api.razorpay.com`.
+///
+/// Deliberately does not derive `Debug` — even though `key_id`/`key_secret`
+/// are already [`Secret`]-wrapped (redacted regardless), there is no
+/// present need to print this struct, and not deriving `Debug` here is one
+/// more layer keeping a future accidental `{:?}` of the whole client from
+/// ever becoming a question of "did the wrapper actually redact it," since
+/// the derive doesn't exist to answer wrong.
 pub struct HttpRazorpayClient {
     http: reqwest::Client,
-    key_id: Option<String>,
-    key_secret: Option<String>,
+    key_id: Option<Secret<String>>,
+    key_secret: Option<Secret<String>>,
     monthly_plan_id: Option<String>,
     yearly_plan_id: Option<String>,
 }
 
 impl HttpRazorpayClient {
     pub fn new(
-        key_id: Option<String>,
-        key_secret: Option<String>,
+        key_id: Option<Secret<String>>,
+        key_secret: Option<Secret<String>>,
         monthly_plan_id: Option<String>,
         yearly_plan_id: Option<String>,
     ) -> Self {
@@ -146,12 +154,20 @@ impl HttpRazorpayClient {
     }
 
     fn credentials(&self) -> Result<(&str, &str), RazorpayError> {
-        let key_id = self.key_id.as_deref().ok_or_else(|| {
-            RazorpayError::NotConfigured("RAZORPAY_KEY_ID is not set".to_string())
-        })?;
-        let key_secret = self.key_secret.as_deref().ok_or_else(|| {
-            RazorpayError::NotConfigured("RAZORPAY_KEY_SECRET is not set".to_string())
-        })?;
+        let key_id = self
+            .key_id
+            .as_ref()
+            .map(|s| s.expose_secret().as_str())
+            .ok_or_else(|| {
+                RazorpayError::NotConfigured("RAZORPAY_KEY_ID is not set".to_string())
+            })?;
+        let key_secret = self
+            .key_secret
+            .as_ref()
+            .map(|s| s.expose_secret().as_str())
+            .ok_or_else(|| {
+                RazorpayError::NotConfigured("RAZORPAY_KEY_SECRET is not set".to_string())
+            })?;
         Ok((key_id, key_secret))
     }
 

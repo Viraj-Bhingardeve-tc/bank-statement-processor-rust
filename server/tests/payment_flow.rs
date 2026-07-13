@@ -15,6 +15,7 @@ use axum::http::{Request, StatusCode};
 use hmac::{Hmac, Mac};
 use license_protocol::{CreateCheckoutSessionRequest, LoginRequest, LoginResponse};
 use license_server::auth::password::hash_password;
+use license_server::config::{AppConfig, PaymentConfig, Secret};
 use license_server::state::AppState;
 use license_server::{build_router, db};
 use serde_json::json;
@@ -37,7 +38,11 @@ fn sign(secret: &str, body: &[u8]) -> String {
 
 fn app_without_db() -> axum::Router {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     build_router(AppState::new(config, pool))
 }
 
@@ -80,11 +85,18 @@ async fn webhook_with_no_configured_secret_is_unauthorized_even_with_a_signature
 #[tokio::test]
 async fn webhook_with_a_tampered_body_is_unauthorized() {
     let secret = "whsec_test_secret";
-    let config = license_server::config::AppConfig {
-        razorpay_webhook_secret: Some(secret.to_string()),
+    let config = AppConfig {
+        payment: PaymentConfig {
+            razorpay_webhook_secret: Some(Secret::new(secret.to_string())),
+            ..common::test_config().payment
+        },
         ..common::test_config()
     };
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     let app = build_router(AppState::new(config, pool));
 
     let signed_body = br#"{"event":"payment.captured","payload":{}}"#;
@@ -239,8 +251,11 @@ async fn create_checkout_session_without_razorpay_configured_returns_502_provide
 async fn a_valid_webhook_is_processed_and_a_replay_is_idempotent() {
     let pool = connected_pool().await;
     let secret = "whsec_integration_test";
-    let config = license_server::config::AppConfig {
-        razorpay_webhook_secret: Some(secret.to_string()),
+    let config = AppConfig {
+        payment: PaymentConfig {
+            razorpay_webhook_secret: Some(Secret::new(secret.to_string())),
+            ..common::test_config().payment
+        },
         ..common::test_config()
     };
     let app = build_router(AppState::new(config, pool.clone()));
@@ -331,8 +346,11 @@ async fn a_valid_webhook_is_processed_and_a_replay_is_idempotent() {
 async fn concurrent_duplicate_webhook_deliveries_apply_the_mutation_exactly_once() {
     let pool = connected_pool().await;
     let secret = "whsec_integration_test_concurrent";
-    let config = license_server::config::AppConfig {
-        razorpay_webhook_secret: Some(secret.to_string()),
+    let config = AppConfig {
+        payment: PaymentConfig {
+            razorpay_webhook_secret: Some(Secret::new(secret.to_string())),
+            ..common::test_config().payment
+        },
         ..common::test_config()
     };
     let app = build_router(AppState::new(config, pool.clone()));

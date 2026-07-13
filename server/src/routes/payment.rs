@@ -89,7 +89,7 @@ async fn webhook(
         return Err(ApiError::Unauthorized);
     };
 
-    let Some(secret) = state.config.razorpay_webhook_secret.as_deref() else {
+    let Some(secret) = state.config.payment.razorpay_webhook_secret.as_ref() else {
         // A missing secret is a real configuration problem — logged loudly
         // server-side — but the HTTP response to Razorpay stays a plain
         // rejection, same as any other signature failure: whether the
@@ -100,7 +100,9 @@ async fn webhook(
         return Err(ApiError::Unauthorized);
     };
 
-    if !verify_webhook_signature(secret, &body, signature) {
+    // `.expose_secret()`: the one deliberate, explicit read of the actual
+    // secret value — needed here to compute the HMAC, never logged.
+    if !verify_webhook_signature(secret.expose_secret(), &body, signature) {
         tracing::warn!("razorpay webhook signature verification failed; rejecting");
         metrics::counter!(WEBHOOK_REQUESTS_TOTAL, "outcome" => "invalid_signature").increment(1);
         return Err(ApiError::Unauthorized);

@@ -67,20 +67,27 @@ async fn main() {
         std::process::exit(1);
     });
 
-    init_logging(&config.log_filter);
+    init_logging(&config.server.log_filter);
 
-    let bind_addr = config.bind_addr;
+    let bind_addr = config.server.bind_addr;
     tracing::info!(
         addr = %bind_addr,
         version = env!("CARGO_PKG_VERSION"),
         "starting license-server"
     );
 
-    let pool = db::build_pool(&config.database_url, config.database_max_connections)
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "malformed DATABASE_URL");
-            std::process::exit(1);
-        });
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap_or_else(|e| {
+        // `e` (a `sqlx::Error`) is safe to log here: a malformed-URL parse
+        // failure describes *what's wrong* (e.g. "invalid port number"),
+        // never echoes the connection string itself — verified directly
+        // against `sqlx`'s actual error output, not assumed.
+        tracing::error!(error = %e, "malformed DATABASE_URL");
+        std::process::exit(1);
+    });
 
     // Migrations run at startup, before the server accepts traffic — a
     // failed migration must stop the process, not leave it serving against

@@ -14,7 +14,11 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn healthz_returns_200_with_ok_status_body() {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     let app = license_server::build_router(AppState::new(config, pool));
 
     let response = app
@@ -39,7 +43,11 @@ async fn healthz_returns_200_with_ok_status_body() {
 #[tokio::test]
 async fn unknown_route_returns_404_not_500() {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     let app = license_server::build_router(AppState::new(config, pool));
 
     let response = app

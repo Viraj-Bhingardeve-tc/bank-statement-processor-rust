@@ -70,7 +70,11 @@ async fn request_with_auth(
 
 fn app_without_db() -> axum::Router {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     build_router(AppState::new(config, pool))
 }
 

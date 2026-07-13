@@ -57,10 +57,10 @@ impl AppState {
             Arc::new(PgSessionRepository::new(db_pool.clone())),
         ));
         let razorpay_client = Arc::new(HttpRazorpayClient::new(
-            config.razorpay_key_id.clone(),
-            config.razorpay_key_secret.clone(),
-            config.razorpay_monthly_plan_id.clone(),
-            config.razorpay_yearly_plan_id.clone(),
+            config.payment.razorpay_key_id.clone(),
+            config.payment.razorpay_key_secret.clone(),
+            config.payment.razorpay_monthly_plan_id.clone(),
+            config.payment.razorpay_yearly_plan_id.clone(),
         ));
         let payment_service = Arc::new(PaymentService::new(
             Arc::new(PgPaymentRepository::new(db_pool.clone())),

@@ -15,7 +15,11 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn metrics_endpoint_returns_200_with_the_prometheus_content_type() {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     let app = license_server::build_router(AppState::new(config, pool));
 
     let response = app
@@ -44,7 +48,11 @@ async fn metrics_endpoint_returns_200_with_the_prometheus_content_type() {
 #[tokio::test]
 async fn metrics_endpoint_exposes_database_pool_gauges() {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     let app = license_server::build_router(AppState::new(config, pool));
 
     let response = app
@@ -79,7 +87,11 @@ async fn metrics_endpoint_exposes_database_pool_gauges() {
 #[tokio::test]
 async fn metrics_endpoint_exposes_http_request_metrics_after_a_warmup_request() {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     let app = license_server::build_router(AppState::new(config, pool));
 
     let warmup = app
@@ -132,7 +144,11 @@ async fn metrics_endpoint_exposes_http_request_metrics_after_a_warmup_request() 
 #[tokio::test]
 async fn healthz_is_unchanged_by_the_metrics_middleware() {
     let config = common::test_config();
-    let pool = db::build_pool(&config.database_url, config.database_max_connections).unwrap();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
     let app = license_server::build_router(AppState::new(config, pool));
 
     let response = app
