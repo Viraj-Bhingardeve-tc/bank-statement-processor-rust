@@ -52,7 +52,11 @@ if [[ -f server/.env ]]; then
     # shellcheck disable=SC1091
     source server/.env
 fi
-POSTGRES_USER="${POSTGRES_USER:-license_server}"
+# The admin/superuser account (Phase 4J.8 — never the restricted
+# `license_server_app` role `DATABASE_URL` connects as; `pg_dump` needs
+# full read access across the whole database, which that role deliberately
+# doesn't have).
+POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-license_server}"
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"

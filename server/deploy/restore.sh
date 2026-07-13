@@ -40,7 +40,10 @@ if [[ -f server/.env ]]; then
     # shellcheck disable=SC1091
     source server/.env
 fi
-POSTGRES_USER="${POSTGRES_USER:-license_server}"
+# The admin/superuser account (Phase 4J.8 — a restore needs to drop/
+# recreate tables via the `--clean --if-exists` dump, which the restricted
+# `license_server_app` role can't do).
+POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-license_server}"
 
 echo "This will REPLACE the contents of database '$POSTGRES_DB' with:"

@@ -4,12 +4,24 @@
 # Usage:
 #   1. cp server/.env.example server/.env   # fill in real values, never commit
 #   2. export POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB (or put them in
-#      a repository-root .env — docker compose loads that automatically) so
-#      they match the credentials embedded in server/.env's DATABASE_URL
-#   3. Edit Caddyfile: replace the placeholder domain with your real one,
+#      a repository-root .env — docker compose loads that automatically).
+#      POSTGRES_USER is the Postgres *instance superuser* the official
+#      image bootstraps (administration only — running migrations,
+#      `pg_dump`/`psql` in server/deploy/backup.sh|restore.sh, and creating
+#      the restricted application role below); it must NOT be the role
+#      `DATABASE_URL` in server/.env connects as day-to-day.
+#   3. Set APP_DB_USER / APP_DB_PASSWORD (same place as step 2) and run
+#      server/deploy/set-app-db-password.sh once the `postgres` service is
+#      up and migrations have applied — this sets the password for the
+#      restricted `license_server_app` role that migration
+#      0003_least_privilege_app_role.sql creates. Point server/.env's
+#      DATABASE_URL at THIS role, not POSTGRES_USER, once the password is
+#      set (Phase 4J.8 — production readiness audit; see server/README.md's
+#      "Database roles and least privilege" section for the full sequencing).
+#   4. Edit Caddyfile: replace the placeholder domain with your real one,
 #      and point that domain's DNS at this VPS (server/README.md's
 #      "DNS requirements" / "First deployment" sections)
-#   4. docker compose up -d --build
+#   5. docker compose up -d --build
 #
 # Only `caddy` publishes ports to the host (80/443) — `license-server` and
 # `postgres` are reachable only over the internal `licensing` network, never
@@ -46,13 +58,18 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-license_server}
+      # The instance superuser the official image bootstraps on first
+      # init — administration only (see the usage comment at the top of
+      # this file). Defaults to the conventional `postgres` admin name,
+      # not an app-sounding one, so it's never mistaken for the role
+      # `license-server` itself connects as (Phase 4J.8).
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (shell env or a repository-root .env) before starting}
       POSTGRES_DB: ${POSTGRES_DB:-license_server}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-license_server} -d ${POSTGRES_DB:-license_server}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-license_server}"]
       interval: 10s
       timeout: 5s
       retries: 5

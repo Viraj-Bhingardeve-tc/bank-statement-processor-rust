@@ -52,16 +52,23 @@ back.
 
 1. Provision a VPS with Docker + the Docker Compose plugin installed.
 2. Clone this repository onto the VPS.
-3. `cp server/.env.example server/.env` and fill in real values — never commit it.
+3. `cp server/.env.example server/.env` and fill in real values — never commit it. For the first
+   deployment, point `DATABASE_URL` at the **admin** account (`POSTGRES_USER`/`POSTGRES_PASSWORD`
+   below) temporarily — migrations (including the one that creates the restricted role) need to
+   run as admin at least once; see "Database roles and least privilege" below.
 4. Set `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` (shell env, or a repository-root
    `.env` — Docker Compose loads that automatically) matching the credentials embedded in
-   `server/.env`'s `DATABASE_URL`.
+   `server/.env`'s `DATABASE_URL` from the previous step.
 5. Edit `Caddyfile`: replace `license.example.com` with your real domain.
 6. Point that domain's DNS at the VPS (see DNS requirements above) and let it propagate — Caddy
    needs the domain already resolving to this host before its first request, or certificate
    issuance fails.
 7. `docker compose up -d --build`.
 8. Confirm: `curl -f https://<your-domain>/healthz` and `curl -f https://<your-domain>/readyz`.
+9. Set the restricted role's password (`server/deploy/set-app-db-password.sh`, using
+   `APP_DB_USER`/`APP_DB_PASSWORD`), then switch `server/.env`'s `DATABASE_URL` to that role and
+   restart `license-server` — see "Database roles and least privilege" below for exactly why this
+   is safe to do right away, including for the automatic migration step at every future startup.
 
 ### HTTPS certificate generation
 
@@ -141,6 +148,112 @@ aborts immediately instead of silently leaving a partially-restored database. Ru
 `docker` shim (no VPS, containers, or real Postgres needed) — it asserts the flags above are
 actually present and that a simulated dump/restore failure leaves nothing behind.
 
+## Database roles and least privilege
+
+**Phase 4J.8 (production readiness audit):** by default, `POSTGRES_USER` is the Postgres
+*instance superuser* the official `postgres` Docker image bootstraps on first init — full
+`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS` reach, able to run `ALTER SYSTEM`,
+read or modify any database on the instance. Before this phase, `license-server`'s own
+`DATABASE_URL` connected using that exact account — a compromised server process had the same
+reach as a database administrator. It now connects as a separate, narrowly-scoped role instead;
+`postgres`/`POSTGRES_USER` remains for administration only (running migrations, `pg_dump`/`psql`
+in `server/deploy/backup.sh`/`restore.sh`, and creating the restricted role in the first place).
+
+### How the role is created
+
+`server/migrations/0003_least_privilege_app_role.sql` creates `license_server_app` (idempotent —
+safe to run against a fresh database or one that already has it) and grants it exactly:
+
+- `CONNECT` on the database
+- `USAGE` **and `CREATE`** on schema `public` (see "Why `CREATE` on the schema is granted" below —
+  this is the one deliberate exception to an otherwise DML-only role, and it is *not* a general
+  license to create arbitrary objects; it exists for one specific, documented reason)
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE` on every application table (`users`, `subscriptions`,
+  `licenses`, `devices`, `sessions`, `payments`, `payment_webhook_events`) — enumerated
+  explicitly, not `ALL TABLES IN SCHEMA public`, so the grant can never silently widen to some
+  future unrelated table
+- `USAGE`/`SELECT` on each table's `BIGSERIAL` sequence (needed for `INSERT` to work at all)
+- `SELECT`/`INSERT`/`UPDATE` on sqlx's own `_sqlx_migrations` bookkeeping table
+- `ALTER DEFAULT PRIVILEGES` extending the same four table/sequence privileges to anything a
+  *future* migration creates, so later purely-additive migrations don't need their own follow-up
+  grant
+
+Deliberately **never** granted: `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`,
+`BYPASSRLS` (explicitly written into the `CREATE ROLE` statement as `NO...`, not just relying on
+defaults), or anything that would allow `ALTER SYSTEM` (which itself requires `SUPERUSER`, so
+withholding that already withholds it). This migration runs automatically like every other one in
+this directory (`server/src/db.rs`'s `sqlx::migrate!()`, applied at startup by whichever
+connection `DATABASE_URL` currently points at — which must be the admin account the *first* time,
+since creating a role and granting privileges on tables it doesn't own both require elevated
+privilege the restricted role itself will never have).
+
+### Why `CREATE` on the schema is granted
+
+`server/src/main.rs` calls `db::run_migrations(&pool)` unconditionally on every process start,
+using whatever `DATABASE_URL` is configured. sqlx's migrator unconditionally issues `CREATE TABLE
+IF NOT EXISTS _sqlx_migrations (...)` as its first step on **every single run** — Postgres
+requires `CREATE` privilege on the schema to even attempt that statement, regardless of whether
+the table already exists or any new migration is actually pending. Without this grant,
+`license_server_app` could not be used as `DATABASE_URL` at all: the server would fail at startup
+with "permission denied for schema public" before ever reaching a real query, on every restart,
+forever.
+
+This is granted specifically and only for that reason — `CREATE ON SCHEMA public` lets this role
+create objects inside this one schema, in this one database, and nothing more. It does not grant
+`CREATEDB` (create other *databases*), `CREATEROLE` (create other *roles*), `REPLICATION`,
+`BYPASSRLS`, or `SUPERUSER` (and therefore not `ALTER SYSTEM` either, which requires it) — every
+item on the "do not grant" list stays withheld. A compromised `license-server` process can create
+or alter objects in its own schema, which is a real (if narrow) increase in blast radius over pure
+DML — but it still cannot touch another database, mint itself a more powerful role, replicate the
+cluster, bypass row-level security, or rewrite server-wide configuration.
+
+### How passwords are configured
+
+The migration above deliberately never sets a password — a `.sql` file lives in version control,
+and a real secret has no business being in it. Set (and later rotate) it with:
+
+```sh
+APP_DB_USER=license_server_app APP_DB_PASSWORD='a-real-secret' server/deploy/set-app-db-password.sh
+```
+
+(or export `APP_DB_USER`/`APP_DB_PASSWORD`, or put them in `server/.env`, which the script also
+sources, before running it with no arguments). This connects as the admin account
+(`POSTGRES_USER`) and runs `ALTER ROLE license_server_app WITH LOGIN PASSWORD ...` — safe to
+re-run any time, since it simply overwrites the previous password rather than accumulating state.
+Until this has been run at least once, `license_server_app` exists but cannot log in at all.
+
+Once the migration has applied (creating the role) and this script has set its password,
+`server/.env`'s `DATABASE_URL` should be switched to `license_server_app` — **not**
+`POSTGRES_USER` — for normal operation, including the automatic migration step at every future
+startup (see the previous section: the schema-`CREATE` grant means this now works without an
+admin connection). The recommended sequence, in order:
+
+1. Bring up `postgres` (and, for the first deploy, `license-server` pointed at the admin account
+   just long enough to apply migrations — see "First deployment" above).
+2. Confirm migration `0003_least_privilege_app_role.sql` applied (`docker compose logs
+   license-server` shows "database migrations applied").
+3. `server/deploy/set-app-db-password.sh` to set `license_server_app`'s password.
+4. Update `server/.env`'s `DATABASE_URL` to `postgres://license_server_app:<password>@postgres:5432/<db>`.
+5. `docker compose restart license-server`.
+
+### Why least privilege is used
+
+If the `license-server` process itself is ever compromised (a dependency vulnerability, a bug in
+request handling, a leaked container), the blast radius should be limited to reading/writing this
+server's own 7 tables (plus creating objects in its own schema, per the one documented exception
+above) — not creating or dropping arbitrary databases, creating new roles, initiating
+replication, bypassing row-level security, or rewriting the Postgres instance's own configuration
+via `ALTER SYSTEM`. `PHASE4_DESIGN.md` §5 states this requirement directly: "the server's Postgres
+role should have INSERT/SELECT/UPDATE on its own tables and nothing else... a compromised server
+process shouldn't be able to do more damage than the application logic itself already could."
+
+### How to rotate the application password
+
+Run `server/deploy/set-app-db-password.sh` again with a new `APP_DB_PASSWORD`, update
+`server/.env`'s `DATABASE_URL` to match, then `docker compose restart license-server` to pick up
+the new value (`env_file` is only read at container start, not live-reloaded). The old password
+stops working the instant `ALTER ROLE` completes, so restart promptly to avoid a connection gap.
+
 ## Configuration
 
 All configuration is environment variables, read once at startup
@@ -219,3 +332,11 @@ cargo test -p license-server
 Some integration tests require a real Postgres and are marked `#[ignore]` by default
 (`PHASE4_DESIGN.md` §9) — run them explicitly with `cargo test -p license-server -- --ignored`
 against a real database.
+
+`tests/least_privilege_role.rs` (Phase 4J.8) specifically verifies the least-privilege role
+migration against a *real* Postgres, connected as an admin account — it asserts
+`license_server_app` can read/write its own tables, cannot create a table, and has none of
+`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`REPLICATION`/`BYPASSRLS` set. This can't be meaningfully
+faked with a mock connection (permission enforcement happens inside Postgres itself), so — per
+this phase's own instructions — there is deliberately no non-`#[ignore]`d automated coverage for
+it; that is a documented limitation of this test suite, not an oversight.
