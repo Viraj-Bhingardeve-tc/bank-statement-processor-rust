@@ -13,6 +13,11 @@ pub enum PaymentStatus {
     Succeeded,
     Failed,
     Refunded,
+    /// An open Razorpay dispute/chargeback on this payment (Phase 4K.2,
+    /// `migrations/0004_add_payment_dispute_support.sql`) — distinct from
+    /// `Succeeded` (no dispute, or one already resolved for the merchant)
+    /// and `Refunded` (money definitively returned to the customer).
+    Disputed,
 }
 
 impl PaymentStatus {
@@ -22,6 +27,7 @@ impl PaymentStatus {
             PaymentStatus::Succeeded => "succeeded",
             PaymentStatus::Failed => "failed",
             PaymentStatus::Refunded => "refunded",
+            PaymentStatus::Disputed => "disputed",
         }
     }
 }
@@ -41,6 +47,7 @@ impl FromStr for PaymentStatus {
             "succeeded" => Ok(PaymentStatus::Succeeded),
             "failed" => Ok(PaymentStatus::Failed),
             "refunded" => Ok(PaymentStatus::Refunded),
+            "disputed" => Ok(PaymentStatus::Disputed),
             other => Err(format!("unrecognized payment status {other:?}")),
         }
     }
@@ -58,6 +65,12 @@ pub struct Payment {
     /// The gateway's own payment/order/subscription id — how a webhook
     /// event is correlated back to this row (`repository::payment`).
     pub provider_ref: Option<String>,
+    /// The real Razorpay payment id (`payload.payment.entity.id`),
+    /// recorded once known at activation time — the *only* field
+    /// refund/dispute correlation reads (Phase 4K.2), since those webhooks
+    /// never carry `provider_ref`'s checkout-time payment-link/subscription
+    /// id. `None` until an activating webhook supplies it.
+    pub gateway_payment_id: Option<String>,
     pub status: PaymentStatus,
     pub created_at: DateTime<Utc>,
 }
@@ -85,6 +98,7 @@ mod tests {
             PaymentStatus::Succeeded,
             PaymentStatus::Failed,
             PaymentStatus::Refunded,
+            PaymentStatus::Disputed,
         ] {
             assert_eq!(PaymentStatus::from_str(status.as_str()).unwrap(), status);
         }

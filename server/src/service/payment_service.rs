@@ -46,20 +46,35 @@
 //! comment for the id-namespace mismatch this closes. Purely additive:
 //! `payment.captured`/`subscription.*` handling, `extract_entity_ref`,
 //! and the checkout/idempotency/reconciliation paths are unchanged.
+//!
+//! **Phase 4K.2 (refund/chargeback handling):** `refund.created`/
+//! `.processed` and `payment.dispute.created`/`.closed` are now
+//! recognized event types. These webhooks only ever reference the real
+//! Razorpay payment id (`payload.payment.entity.id`), never
+//! `provider_ref`'s checkout-time payment-link/subscription id, so
+//! correlation reads a new, independent column instead:
+//! `payments.gateway_payment_id` (`migrations/0004_add_payment_dispute_support.sql`),
+//! populated by `resolve_activation` whenever an activating webhook's
+//! payload carries one. See `find_payment_and_license`,
+//! `resolve_refund`, `resolve_dispute_created`, and
+//! `resolve_dispute_closed` for the new resolution logic — all funnel
+//! into the same `claim_and_apply` idempotency guarantee every other
+//! mutation already relies on. Never deletes a payment, subscription, or
+//! license row; only transitions their status.
 
 use crate::domain::{
-    NewPayment, NewPaymentWebhookEvent, NewSubscription, PaymentStatus, PlanType,
+    NewPayment, NewPaymentWebhookEvent, NewSubscription, Payment, PaymentStatus, PlanType,
     SubscriptionStatus,
 };
 use crate::razorpay::{
-    extract_entity_ref, CreateCheckoutRequest, RazorpayClient, RazorpayPayment,
-    RazorpayWebhookPayload,
+    extract_dispute_status, extract_entity_id, extract_entity_ref, CreateCheckoutRequest,
+    RazorpayClient, RazorpayPayment, RazorpayWebhookPayload,
 };
 use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
 use crate::repository::payment::PaymentRepository;
 use crate::repository::payment_webhook_event::{
-    LicenseMutation, PaymentWebhookEventRepository, WebhookMutation,
+    AffectedLicense, LicenseMutation, PaymentWebhookEventRepository, WebhookMutation,
 };
 use crate::repository::subscription::SubscriptionRepository;
 use chrono::{Duration, Utc};
@@ -179,6 +194,9 @@ impl PaymentService {
             "subscription.cancelled" | "subscription.halted" => {
                 self.resolve_subscription_inactive(&payload).await?
             }
+            "refund.created" | "refund.processed" => self.resolve_refund(&payload).await?,
+            "payment.dispute.created" => self.resolve_dispute_created(&payload).await?,
+            "payment.dispute.closed" => self.resolve_dispute_closed(&payload).await?,
             other => {
                 tracing::info!(
                     event = other,
@@ -210,7 +228,9 @@ impl PaymentService {
             tracing::warn!("payment.captured webhook missing a usable entity reference; ignoring");
             return Ok(WebhookMutation::None);
         };
-        self.resolve_activation(&provider_ref).await
+        let gateway_payment_id = extract_entity_id(&payload.payload, "payment");
+        self.resolve_activation(&provider_ref, gateway_payment_id)
+            .await
     }
 
     /// `payment_link.paid` — Razorpay's dedicated event for a completed
@@ -239,7 +259,9 @@ impl PaymentService {
             tracing::warn!("payment_link.paid webhook missing a usable entity reference; ignoring");
             return Ok(WebhookMutation::None);
         };
-        self.resolve_activation(&provider_ref).await
+        let gateway_payment_id = extract_entity_id(&payload.payload, "payment");
+        self.resolve_activation(&provider_ref, gateway_payment_id)
+            .await
     }
 
     async fn resolve_payment_failed(
@@ -271,7 +293,9 @@ impl PaymentService {
             tracing::warn!("subscription webhook missing a usable entity reference; ignoring");
             return Ok(WebhookMutation::None);
         };
-        self.resolve_activation(&provider_ref).await
+        let gateway_payment_id = extract_entity_id(&payload.payload, "payment");
+        self.resolve_activation(&provider_ref, gateway_payment_id)
+            .await
     }
 
     async fn resolve_subscription_inactive(
@@ -320,6 +344,7 @@ impl PaymentService {
     async fn resolve_activation(
         &self,
         provider_ref: &str,
+        gateway_payment_id: Option<String>,
     ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(payment) = self
             .payment_repository
@@ -365,6 +390,134 @@ impl PaymentService {
             subscription_id: subscription.id,
             period_end,
             license,
+            gateway_payment_id,
+        })
+    }
+
+    /// Shared by `refund.*`/`payment.dispute.*` resolution (Phase 4K.2):
+    /// locates the payment via `gateway_payment_id` — the real Razorpay
+    /// payment id, the *only* reference these events ever carry (never
+    /// `provider_ref`'s checkout-time payment-link/subscription id, see
+    /// `domain::Payment::gateway_payment_id`'s doc comment) — and its
+    /// current license, if any (`find_latest_by_subscription` already
+    /// excludes an already-`revoked` one, so a refund/dispute on a
+    /// payment whose license was previously revoked, or never issued,
+    /// correctly finds none to further mutate).
+    async fn find_payment_and_license(
+        &self,
+        gateway_payment_id: &str,
+    ) -> Result<Option<(Payment, Option<AffectedLicense>)>, PaymentOperationError> {
+        let Some(payment) = self
+            .payment_repository
+            .find_by_gateway_payment_id(gateway_payment_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let license = self
+            .license_repository
+            .find_latest_by_subscription(payment.subscription_id)
+            .await?
+            .map(|l| AffectedLicense {
+                license_id: l.id,
+                expires_at: l.expires_at,
+            });
+
+        Ok(Some((payment, license)))
+    }
+
+    /// `refund.created` / `refund.processed` (Phase 4K.2). Both events are
+    /// resolved identically — whichever arrives first performs the
+    /// mutation; the other (or a genuine redelivery of either) is an
+    /// idempotent no-op via `claim_and_apply`'s per-`event_id` claim, same
+    /// as `payment.captured`/`subscription.charged` both funneling into
+    /// `resolve_activation`.
+    async fn resolve_refund(
+        &self,
+        payload: &RazorpayWebhookPayload,
+    ) -> Result<WebhookMutation, PaymentOperationError> {
+        let Some(gateway_payment_id) = extract_entity_id(&payload.payload, "payment") else {
+            tracing::warn!("refund webhook missing a usable payment reference; ignoring");
+            return Ok(WebhookMutation::None);
+        };
+        let Some((payment, license)) = self.find_payment_and_license(&gateway_payment_id).await?
+        else {
+            tracing::warn!(gateway_payment_id = %gateway_payment_id, "refund webhook references an unknown payment; ignoring");
+            return Ok(WebhookMutation::None);
+        };
+        Ok(WebhookMutation::RefundPayment {
+            payment_id: payment.id,
+            license,
+        })
+    }
+
+    /// `payment.dispute.created` (Phase 4K.2) — suspends the license
+    /// pending `payment.dispute.closed`; never revokes outright, since a
+    /// dispute can still resolve in the merchant's favor.
+    async fn resolve_dispute_created(
+        &self,
+        payload: &RazorpayWebhookPayload,
+    ) -> Result<WebhookMutation, PaymentOperationError> {
+        let Some(gateway_payment_id) = extract_entity_id(&payload.payload, "payment") else {
+            tracing::warn!(
+                "payment.dispute.created webhook missing a usable payment reference; ignoring"
+            );
+            return Ok(WebhookMutation::None);
+        };
+        let Some((payment, license)) = self.find_payment_and_license(&gateway_payment_id).await?
+        else {
+            tracing::warn!(gateway_payment_id = %gateway_payment_id, "payment.dispute.created webhook references an unknown payment; ignoring");
+            return Ok(WebhookMutation::None);
+        };
+        Ok(WebhookMutation::MarkPaymentDisputed {
+            payment_id: payment.id,
+            license,
+        })
+    }
+
+    /// `payment.dispute.closed` (Phase 4K.2). The outcome comes from
+    /// Razorpay's own `payload.dispute.entity.status` — `"won"` (merchant
+    /// won, restore) or `"lost"` (customer won, payment refunded and
+    /// license stays revoked) — never guessed at: any other status
+    /// (including a still-open dispute closing prematurely, or a
+    /// malformed/missing field) is acknowledged without mutating anything,
+    /// matching this codebase's existing no-guessing posture
+    /// (`PHASE4_DESIGN.md` §12.3).
+    async fn resolve_dispute_closed(
+        &self,
+        payload: &RazorpayWebhookPayload,
+    ) -> Result<WebhookMutation, PaymentOperationError> {
+        let Some(gateway_payment_id) = extract_entity_id(&payload.payload, "payment") else {
+            tracing::warn!(
+                "payment.dispute.closed webhook missing a usable payment reference; ignoring"
+            );
+            return Ok(WebhookMutation::None);
+        };
+        let merchant_won = match extract_dispute_status(&payload.payload).as_deref() {
+            Some("won") => true,
+            Some("lost") => false,
+            Some(other) => {
+                tracing::warn!(
+                    status = other,
+                    "payment.dispute.closed webhook has an unrecognized dispute status; ignoring"
+                );
+                return Ok(WebhookMutation::None);
+            }
+            None => {
+                tracing::warn!("payment.dispute.closed webhook missing a dispute status; ignoring");
+                return Ok(WebhookMutation::None);
+            }
+        };
+        let Some((payment, license)) = self.find_payment_and_license(&gateway_payment_id).await?
+        else {
+            tracing::warn!(gateway_payment_id = %gateway_payment_id, "payment.dispute.closed webhook references an unknown payment; ignoring");
+            return Ok(WebhookMutation::None);
+        };
+        Ok(WebhookMutation::ResolveDispute {
+            payment_id: payment.id,
+            license,
+            merchant_won,
         })
     }
 
@@ -654,6 +807,7 @@ mod tests {
                 currency: new_payment.currency,
                 provider: new_payment.provider,
                 provider_ref: new_payment.provider_ref,
+                gateway_payment_id: None,
                 status: new_payment.status,
                 created_at: Utc::now(),
             };
@@ -674,6 +828,19 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_by_gateway_payment_id(
+            &self,
+            gateway_payment_id: &str,
+        ) -> Result<Option<Payment>, RepositoryError> {
+            Ok(self
+                .payments
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.gateway_payment_id.as_deref() == Some(gateway_payment_id))
+                .cloned())
+        }
+
         async fn update_status(
             &self,
             id: i64,
@@ -687,6 +854,23 @@ mod tests {
                 .find(|p| p.id == id)
             {
                 p.status = status;
+            }
+            Ok(())
+        }
+
+        async fn record_gateway_payment_id(
+            &self,
+            id: i64,
+            gateway_payment_id: &str,
+        ) -> Result<(), RepositoryError> {
+            if let Some(p) = self
+                .payments
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|p| p.id == id)
+            {
+                p.gateway_payment_id = Some(gateway_payment_id.to_string());
             }
             Ok(())
         }
@@ -779,10 +963,16 @@ mod tests {
                     subscription_id,
                     period_end,
                     license,
+                    gateway_payment_id,
                 } => {
                     self.payment_repository
                         .update_status(payment_id, PaymentStatus::Succeeded)
                         .await?;
+                    if let Some(gateway_payment_id) = gateway_payment_id {
+                        self.payment_repository
+                            .record_gateway_payment_id(payment_id, &gateway_payment_id)
+                            .await?;
+                    }
                     self.subscription_repository
                         .update_status(subscription_id, SubscriptionStatus::Active, period_end)
                         .await?;
@@ -808,6 +998,69 @@ mod tests {
                                 })
                                 .await?;
                         }
+                    }
+                }
+                WebhookMutation::RefundPayment {
+                    payment_id,
+                    license,
+                } => {
+                    self.payment_repository
+                        .update_status(payment_id, PaymentStatus::Refunded)
+                        .await?;
+                    if let Some(license) = license {
+                        self.license_repository
+                            .extend(
+                                license.license_id,
+                                LicenseRecordStatus::Revoked,
+                                license.expires_at,
+                            )
+                            .await?;
+                    }
+                }
+                WebhookMutation::MarkPaymentDisputed {
+                    payment_id,
+                    license,
+                } => {
+                    self.payment_repository
+                        .update_status(payment_id, PaymentStatus::Disputed)
+                        .await?;
+                    if let Some(license) = license {
+                        self.license_repository
+                            .extend(
+                                license.license_id,
+                                LicenseRecordStatus::Suspended,
+                                license.expires_at,
+                            )
+                            .await?;
+                    }
+                }
+                WebhookMutation::ResolveDispute {
+                    payment_id,
+                    license,
+                    merchant_won,
+                } => {
+                    self.payment_repository
+                        .update_status(
+                            payment_id,
+                            if merchant_won {
+                                PaymentStatus::Succeeded
+                            } else {
+                                PaymentStatus::Refunded
+                            },
+                        )
+                        .await?;
+                    if let Some(license) = license {
+                        self.license_repository
+                            .extend(
+                                license.license_id,
+                                if merchant_won {
+                                    LicenseRecordStatus::Active
+                                } else {
+                                    LicenseRecordStatus::Revoked
+                                },
+                                license.expires_at,
+                            )
+                            .await?;
                     }
                 }
             }
@@ -1037,8 +1290,41 @@ mod tests {
             currency: "INR".to_string(),
             provider: PROVIDER.to_string(),
             provider_ref: Some(provider_ref.to_string()),
+            gateway_payment_id: None,
             status,
             created_at: Utc::now(),
+        }
+    }
+
+    /// Like `sample_payment`, but with `gateway_payment_id` set — the
+    /// reference refund/dispute correlation reads (Phase 4K.2).
+    /// `provider_ref` is set to an arbitrary, distinct value: refund/
+    /// dispute resolution never reads it, so a real test never needs it to
+    /// coincide with `gateway_payment_id`.
+    fn sample_activated_payment(
+        id: i64,
+        subscription_id: i64,
+        gateway_payment_id: &str,
+        status: PaymentStatus,
+    ) -> Payment {
+        Payment {
+            gateway_payment_id: Some(gateway_payment_id.to_string()),
+            ..sample_payment(id, subscription_id, "sub_checkout_ref", status)
+        }
+    }
+
+    fn sample_license(id: i64, subscription_id: i64, status: LicenseRecordStatus) -> License {
+        License {
+            id,
+            subscription_id,
+            license_key: format!("SAMP-LEKY-{id:04}-0000"),
+            status,
+            expires_at: Some(Utc::now() + Duration::days(30)),
+            max_devices: 1,
+            grace_period_days: 7,
+            issued_at: Utc::now() - Duration::days(1),
+            revoked_at: None,
+            revoked_reason: None,
         }
     }
 
@@ -1667,6 +1953,306 @@ mod tests {
 
         let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
         assert_eq!(subscription.status, SubscriptionStatus::Suspended);
+    }
+
+    // ── refund.*/payment.dispute.* (Phase 4K.2) ─────────────────────────
+
+    fn refund_payload(event: &str, event_payment_id: &str) -> RazorpayWebhookPayload {
+        RazorpayWebhookPayload {
+            event: event.to_string(),
+            payload: json!({
+                "refund": { "entity": { "id": "rfnd_1", "payment_id": event_payment_id } },
+                "payment": { "entity": { "id": event_payment_id, "order_id": "order_xyz" } }
+            }),
+        }
+    }
+
+    fn dispute_created_payload(event_payment_id: &str) -> RazorpayWebhookPayload {
+        RazorpayWebhookPayload {
+            event: "payment.dispute.created".to_string(),
+            payload: json!({
+                "dispute": { "entity": { "id": "disp_1", "payment_id": event_payment_id, "status": "open" } },
+                "payment": { "entity": { "id": event_payment_id, "order_id": "order_xyz" } }
+            }),
+        }
+    }
+
+    fn dispute_closed_payload(event_payment_id: &str, outcome: &str) -> RazorpayWebhookPayload {
+        RazorpayWebhookPayload {
+            event: "payment.dispute.closed".to_string(),
+            payload: json!({
+                "dispute": { "entity": { "id": "disp_1", "payment_id": event_payment_id, "status": outcome } },
+                "payment": { "entity": { "id": event_payment_id, "order_id": "order_xyz" } }
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn refund_created_marks_the_payment_refunded_and_revokes_the_license() {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        service
+            .process_webhook_event(
+                "evt_refund_created",
+                refund_payload("refund.created", "pay_xyz"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Refunded
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn refund_processed_marks_the_payment_refunded_and_revokes_the_license() {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        service
+            .process_webhook_event(
+                "evt_refund_processed",
+                refund_payload("refund.processed", "pay_xyz"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Refunded
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_refund_event_id_does_not_double_revoke_or_corrupt_status() {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        let payload = refund_payload("refund.created", "pay_xyz");
+        service
+            .process_webhook_event("evt_refund", payload.clone())
+            .await
+            .unwrap();
+        service
+            .process_webhook_event("evt_refund", payload)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Refunded,
+            "status must not be corrupted by a repeated delivery"
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn dispute_created_marks_the_payment_disputed_and_suspends_the_license() {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        service
+            .process_webhook_event("evt_dispute_created", dispute_created_payload("pay_xyz"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Disputed
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn dispute_closed_with_merchant_won_restores_the_payment_and_license() {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Disputed);
+        let license = sample_license(50, 10, LicenseRecordStatus::Suspended);
+        let expected_expiry = license.expires_at;
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        service
+            .process_webhook_event(
+                "evt_dispute_closed",
+                dispute_closed_payload("pay_xyz", "won"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Succeeded,
+            "merchant winning must restore the payment, not leave it disputed"
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Active);
+        assert_eq!(
+            license.expires_at, expected_expiry,
+            "restoring must not alter the license's original expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispute_closed_with_customer_won_refunds_the_payment_and_keeps_the_license_revoked() {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Disputed);
+        let license = sample_license(50, 10, LicenseRecordStatus::Suspended);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        service
+            .process_webhook_event(
+                "evt_dispute_closed",
+                dispute_closed_payload("pay_xyz", "lost"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Refunded,
+            "customer winning a chargeback means money left the merchant"
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(
+            license.status,
+            LicenseRecordStatus::Revoked,
+            "customer winning must keep the license revoked, not merely suspended"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispute_closed_with_an_unrecognized_status_is_acknowledged_without_mutating_anything()
+    {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Disputed);
+        let license = sample_license(50, 10, LicenseRecordStatus::Suspended);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        let result = service
+            .process_webhook_event(
+                "evt_dispute_closed",
+                dispute_closed_payload("pay_xyz", "under_review"),
+            )
+            .await;
+
+        assert!(result.is_ok(), "an unrecognized status must not error");
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Disputed,
+            "must not guess at an outcome from a non-terminal status"
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_dispute_created_event_id_does_not_double_suspend_or_corrupt_status() {
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![license], vec![]);
+
+        let payload = dispute_created_payload("pay_xyz");
+        service
+            .process_webhook_event("evt_dispute", payload.clone())
+            .await
+            .unwrap();
+        service
+            .process_webhook_event("evt_dispute", payload)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Disputed,
+            "status must not be corrupted by a repeated delivery"
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn refund_referencing_an_unknown_payment_is_acknowledged_not_errored() {
+        let (service, ..) = service_with(vec![], vec![], vec![], ok_checkout());
+
+        let result = service
+            .process_webhook_event("evt_1", refund_payload("refund.created", "pay_never_seen"))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "an unmatched gateway_payment_id must not fail the webhook call"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispute_created_referencing_an_unknown_payment_is_acknowledged_not_errored() {
+        let (service, ..) = service_with(vec![], vec![], vec![], ok_checkout());
+
+        let result = service
+            .process_webhook_event("evt_1", dispute_created_payload("pay_never_seen"))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "an unmatched gateway_payment_id must not fail the webhook call"
+        );
+    }
+
+    #[tokio::test]
+    async fn refund_missing_the_payment_reference_is_acknowledged_not_errored() {
+        let (service, ..) = service_with(vec![], vec![], vec![], ok_checkout());
+
+        // No `payment` entity at all in the payload.
+        let payload = RazorpayWebhookPayload {
+            event: "refund.created".to_string(),
+            payload: json!({ "refund": { "entity": { "id": "rfnd_1" } } }),
+        };
+        let result = service.process_webhook_event("evt_1", payload).await;
+
+        assert!(
+            result.is_ok(),
+            "a missing payment reference must not fail the webhook call"
+        );
+    }
+
+    #[tokio::test]
+    async fn refund_on_a_payment_with_no_active_license_only_updates_the_payment() {
+        // No license row at all for this subscription — e.g. it was never
+        // issued, or was already revoked by an earlier dispute/refund.
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
+        let (service, payments, _subscriptions, _licenses) =
+            service_with_reconciliation(vec![payment], vec![], vec![], vec![]);
+
+        let result = service
+            .process_webhook_event("evt_1", refund_payload("refund.created", "pay_xyz"))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "a payment with no active license must not error"
+        );
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Refunded,
+            "the payment itself must still be marked refunded"
+        );
     }
 
     // ── license key generation ──────────────────────────────────────────

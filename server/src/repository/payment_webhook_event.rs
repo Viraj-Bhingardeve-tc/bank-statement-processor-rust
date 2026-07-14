@@ -32,12 +32,19 @@ use sqlx::PgPool;
 /// described here run inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebhookMutation {
-    /// `payment.captured` / `subscription.activated`/`.charged`.
+    /// `payment.captured` / `payment_link.paid` / `subscription.activated`/`.charged`.
     ActivateSubscriptionAndLicense {
         payment_id: i64,
         subscription_id: i64,
         period_end: Option<DateTime<Utc>>,
         license: LicenseMutation,
+        /// The real Razorpay payment id, when this activation's payload
+        /// carried one (Phase 4K.2) — recorded on `payments` so a later
+        /// refund/dispute webhook (which never carries `provider_ref`'s
+        /// checkout-time reference) can still be correlated back to this
+        /// row. `None` leaves any previously recorded value untouched
+        /// (never clears a known id back to unknown).
+        gateway_payment_id: Option<String>,
     },
     /// `payment.failed`.
     MarkPaymentFailed { payment_id: i64 },
@@ -46,6 +53,32 @@ pub enum WebhookMutation {
         subscription_id: i64,
         status: SubscriptionStatus,
         current_period_end: Option<DateTime<Utc>>,
+    },
+    /// `refund.created` / `refund.processed` (Phase 4K.2). Marks the
+    /// payment refunded and, if an active-or-suspended license still
+    /// exists for its subscription, revokes it — a refund is a terminal,
+    /// non-reversible outcome, unlike a dispute's `Suspended` interim
+    /// state.
+    RefundPayment {
+        payment_id: i64,
+        license: Option<AffectedLicense>,
+    },
+    /// `payment.dispute.created` (Phase 4K.2). Marks the payment disputed
+    /// and suspends the license, if one exists — reversible, pending
+    /// `payment.dispute.closed`.
+    MarkPaymentDisputed {
+        payment_id: i64,
+        license: Option<AffectedLicense>,
+    },
+    /// `payment.dispute.closed` (Phase 4K.2). `merchant_won` comes from
+    /// Razorpay's own dispute outcome (`"won"` vs `"lost"`), never
+    /// guessed: `true` restores the payment to `succeeded` and the
+    /// license to `active`; `false` marks the payment `refunded` (money
+    /// left the merchant) and leaves the license `revoked`.
+    ResolveDispute {
+        payment_id: i64,
+        license: Option<AffectedLicense>,
+        merchant_won: bool,
     },
     /// Unrecognized event type, a webhook missing a usable entity
     /// reference, or a reference to a payment/subscription this database
@@ -66,6 +99,18 @@ pub enum LicenseMutation {
         max_devices: i32,
         grace_period_days: i32,
     },
+}
+
+/// A license affected by a refund/dispute mutation (Phase 4K.2) — carries
+/// its current `expires_at` through untouched, since the underlying
+/// `UPDATE licenses SET status = $2, expires_at = $3` statement (shared
+/// with `LicenseRepository::extend`'s own query shape) requires it
+/// explicitly, and a status-only transition must never clear a
+/// still-valid expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffectedLicense {
+    pub license_id: i64,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,12 +224,23 @@ impl PaymentWebhookEventRepository for PgPaymentWebhookEventRepository {
                 subscription_id,
                 period_end,
                 license,
+                gateway_payment_id,
             } => {
-                sqlx::query("UPDATE payments SET status = $2 WHERE id = $1")
-                    .bind(payment_id)
-                    .bind(PaymentStatus::Succeeded.as_str())
-                    .execute(&mut *tx)
-                    .await?;
+                // `COALESCE`: a `None` here (an activation payload with no
+                // `payment` entity, e.g. some `subscription.activated`
+                // deliveries) must never clear a `gateway_payment_id`
+                // already recorded by an earlier activation of this same
+                // row (renewals reuse it — `repository::payment`'s doc
+                // comment).
+                sqlx::query(
+                    "UPDATE payments SET status = $2, gateway_payment_id = COALESCE($3, gateway_payment_id) \
+                     WHERE id = $1",
+                )
+                .bind(payment_id)
+                .bind(PaymentStatus::Succeeded.as_str())
+                .bind(&gateway_payment_id)
+                .execute(&mut *tx)
+                .await?;
 
                 sqlx::query(
                     "UPDATE subscriptions SET status = $2, current_period_end = $3, updated_at = now() \
@@ -225,6 +281,74 @@ impl PaymentWebhookEventRepository for PgPaymentWebhookEventRepository {
                         .execute(&mut *tx)
                         .await?;
                     }
+                }
+            }
+            WebhookMutation::RefundPayment {
+                payment_id,
+                license,
+            } => {
+                sqlx::query("UPDATE payments SET status = $2 WHERE id = $1")
+                    .bind(payment_id)
+                    .bind(PaymentStatus::Refunded.as_str())
+                    .execute(&mut *tx)
+                    .await?;
+
+                if let Some(license) = license {
+                    sqlx::query("UPDATE licenses SET status = $2, expires_at = $3 WHERE id = $1")
+                        .bind(license.license_id)
+                        .bind(LicenseRecordStatus::Revoked.as_str())
+                        .bind(license.expires_at)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+            WebhookMutation::MarkPaymentDisputed {
+                payment_id,
+                license,
+            } => {
+                sqlx::query("UPDATE payments SET status = $2 WHERE id = $1")
+                    .bind(payment_id)
+                    .bind(PaymentStatus::Disputed.as_str())
+                    .execute(&mut *tx)
+                    .await?;
+
+                if let Some(license) = license {
+                    sqlx::query("UPDATE licenses SET status = $2, expires_at = $3 WHERE id = $1")
+                        .bind(license.license_id)
+                        .bind(LicenseRecordStatus::Suspended.as_str())
+                        .bind(license.expires_at)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+            WebhookMutation::ResolveDispute {
+                payment_id,
+                license,
+                merchant_won,
+            } => {
+                let payment_status = if merchant_won {
+                    PaymentStatus::Succeeded
+                } else {
+                    PaymentStatus::Refunded
+                };
+                sqlx::query("UPDATE payments SET status = $2 WHERE id = $1")
+                    .bind(payment_id)
+                    .bind(payment_status.as_str())
+                    .execute(&mut *tx)
+                    .await?;
+
+                if let Some(license) = license {
+                    let license_status = if merchant_won {
+                        LicenseRecordStatus::Active
+                    } else {
+                        LicenseRecordStatus::Revoked
+                    };
+                    sqlx::query("UPDATE licenses SET status = $2, expires_at = $3 WHERE id = $1")
+                        .bind(license.license_id)
+                        .bind(license_status.as_str())
+                        .bind(license.expires_at)
+                        .execute(&mut *tx)
+                        .await?;
                 }
             }
         }

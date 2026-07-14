@@ -35,6 +35,37 @@ pub fn extract_entity_ref(payload: &Value, entity_key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Reads `payload.<entity_key>.entity.id` directly — unlike
+/// `extract_entity_ref`, no `order_id` preference. Used where the caller
+/// specifically needs the entity's own id: `payload.payment.entity.id` is
+/// the real Razorpay payment id recorded as `payments.gateway_payment_id`
+/// at activation time (Phase 4K.2), and is the *only* thing a later
+/// `refund.*`/`payment.dispute.*` webhook ever carries to correlate back
+/// to that row — those webhooks never carry `provider_ref`'s checkout-time
+/// payment-link/subscription id.
+pub fn extract_entity_id(payload: &Value, entity_key: &str) -> Option<String> {
+    payload
+        .get(entity_key)?
+        .get("entity")?
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Reads `payload.dispute.entity.status` — Razorpay's own dispute status
+/// string (`"open"`, `"under_review"`, `"won"`, `"lost"`, ...). Only
+/// `"won"`/`"lost"` are terminal outcomes `payment.dispute.closed`
+/// handling recognizes; any other value (including a missing/malformed
+/// field) is treated as unrecognized, never guessed at.
+pub fn extract_dispute_status(payload: &Value) -> Option<String> {
+    payload
+        .get("dispute")?
+        .get("entity")?
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +104,33 @@ mod tests {
         let json = json!({ "event": "payment.captured", "payload": {} });
         let parsed: RazorpayWebhookPayload = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.event, "payment.captured");
+    }
+
+    #[test]
+    fn extract_entity_id_reads_the_entitys_own_id_ignoring_order_id() {
+        let payload = json!({
+            "payment": { "entity": { "id": "pay_123", "order_id": "order_456" } }
+        });
+        assert_eq!(
+            extract_entity_id(&payload, "payment"),
+            Some("pay_123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_entity_id_returns_none_for_a_missing_entity_key() {
+        let payload = json!({ "payment": { "entity": { "id": "pay_123" } } });
+        assert_eq!(extract_entity_id(&payload, "refund"), None);
+    }
+
+    #[test]
+    fn extract_dispute_status_reads_the_dispute_entitys_status() {
+        let payload = json!({ "dispute": { "entity": { "status": "won" } } });
+        assert_eq!(extract_dispute_status(&payload), Some("won".to_string()));
+    }
+
+    #[test]
+    fn extract_dispute_status_returns_none_when_absent() {
+        assert_eq!(extract_dispute_status(&json!({})), None);
     }
 }

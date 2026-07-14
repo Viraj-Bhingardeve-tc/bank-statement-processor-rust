@@ -12,4 +12,6 @@ pub use client::{
     CreateCheckoutRequest, CreateCheckoutResponse, HttpRazorpayClient, RazorpayClient,
     RazorpayError, RazorpayPayment,
 };
-pub use webhook::{extract_entity_ref, RazorpayWebhookPayload};
+pub use webhook::{
+    extract_dispute_status, extract_entity_id, extract_entity_ref, RazorpayWebhookPayload,
+};

@@ -22,14 +22,36 @@ use std::str::FromStr;
 #[async_trait]
 pub trait PaymentRepository: Send + Sync {
     async fn insert(&self, new_payment: NewPayment) -> Result<Payment, RepositoryError>;
-    /// Correlates an inbound webhook event back to the `payments` row it
-    /// concerns — see this module's doc comment for exactly what
-    /// `provider_ref` holds for each plan type.
+    /// Correlates an inbound activation webhook event back to the
+    /// `payments` row it concerns — see this module's doc comment for
+    /// exactly what `provider_ref` holds for each plan type.
     async fn find_by_provider_ref(
         &self,
         provider_ref: &str,
     ) -> Result<Option<Payment>, RepositoryError>;
+    /// Correlates an inbound refund/dispute webhook event back to the
+    /// `payments` row it concerns (Phase 4K.2). `refund.*`/
+    /// `payment.dispute.*` webhooks only ever carry the real Razorpay
+    /// payment id, never `provider_ref`'s checkout-time payment-link/
+    /// subscription id — see `gateway_payment_id`'s doc comment on
+    /// `domain::Payment`.
+    async fn find_by_gateway_payment_id(
+        &self,
+        gateway_payment_id: &str,
+    ) -> Result<Option<Payment>, RepositoryError>;
     async fn update_status(&self, id: i64, status: PaymentStatus) -> Result<(), RepositoryError>;
+    /// Records the real Razorpay payment id once an activating webhook's
+    /// payload supplies one (Phase 4K.2) — not called by
+    /// `PaymentWebhookEventRepository::claim_and_apply`'s real Postgres
+    /// path, which sets it inline within its own transaction for the same
+    /// reason `update_status` isn't called from there either (see that
+    /// trait's doc comment); exists so this repository's contract stays
+    /// complete and independently testable.
+    async fn record_gateway_payment_id(
+        &self,
+        id: i64,
+        gateway_payment_id: &str,
+    ) -> Result<(), RepositoryError>;
 }
 
 pub struct PgPaymentRepository {
@@ -50,6 +72,7 @@ struct PaymentRow {
     currency: String,
     provider: String,
     provider_ref: Option<String>,
+    gateway_payment_id: Option<String>,
     status: String,
     created_at: DateTime<Utc>,
 }
@@ -65,6 +88,7 @@ impl TryFrom<PaymentRow> for Payment {
             currency: row.currency,
             provider: row.provider,
             provider_ref: row.provider_ref,
+            gateway_payment_id: row.gateway_payment_id,
             status: PaymentStatus::from_str(&row.status).map_err(RepositoryError::InvalidData)?,
             created_at: row.created_at,
         })
@@ -77,7 +101,7 @@ impl PaymentRepository for PgPaymentRepository {
         let row = sqlx::query_as::<_, PaymentRow>(
             "INSERT INTO payments (subscription_id, amount_minor, currency, provider, provider_ref, status) \
              VALUES ($1, $2, $3, $4, $5, $6) \
-             RETURNING id, subscription_id, amount_minor, currency, provider, provider_ref, status, created_at",
+             RETURNING id, subscription_id, amount_minor, currency, provider, provider_ref, gateway_payment_id, status, created_at",
         )
         .bind(new_payment.subscription_id)
         .bind(new_payment.amount_minor)
@@ -96,7 +120,7 @@ impl PaymentRepository for PgPaymentRepository {
         provider_ref: &str,
     ) -> Result<Option<Payment>, RepositoryError> {
         let row = sqlx::query_as::<_, PaymentRow>(
-            "SELECT id, subscription_id, amount_minor, currency, provider, provider_ref, status, created_at \
+            "SELECT id, subscription_id, amount_minor, currency, provider, provider_ref, gateway_payment_id, status, created_at \
              FROM payments WHERE provider_ref = $1 \
              ORDER BY created_at DESC LIMIT 1",
         )
@@ -107,10 +131,40 @@ impl PaymentRepository for PgPaymentRepository {
         row.map(Payment::try_from).transpose()
     }
 
+    async fn find_by_gateway_payment_id(
+        &self,
+        gateway_payment_id: &str,
+    ) -> Result<Option<Payment>, RepositoryError> {
+        let row = sqlx::query_as::<_, PaymentRow>(
+            "SELECT id, subscription_id, amount_minor, currency, provider, provider_ref, gateway_payment_id, status, created_at \
+             FROM payments WHERE gateway_payment_id = $1 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(gateway_payment_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(Payment::try_from).transpose()
+    }
+
     async fn update_status(&self, id: i64, status: PaymentStatus) -> Result<(), RepositoryError> {
         sqlx::query("UPDATE payments SET status = $2 WHERE id = $1")
             .bind(id)
             .bind(status.as_str())
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn record_gateway_payment_id(
+        &self,
+        id: i64,
+        gateway_payment_id: &str,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE payments SET gateway_payment_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(gateway_payment_id)
             .execute(&self.pool)
             .await?;
 
