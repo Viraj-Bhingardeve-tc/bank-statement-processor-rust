@@ -37,6 +37,15 @@
 //! *what* should be applied (`repository::payment_webhook_event::
 //! WebhookMutation`) from already-known local state, then hand it to the
 //! repository to claim-and-apply atomically.
+//!
+//! **Phase 4K.1 (production readiness audit, CRITICAL finding #2):**
+//! `payment_link.paid` is now a recognized event type
+//! (`resolve_payment_link_paid`), fixing Payment-Link-based checkouts
+//! (`lifetime`/`trial`) whose real-time webhook could never correlate
+//! back to the `payments` row stored at checkout — see that method's doc
+//! comment for the id-namespace mismatch this closes. Purely additive:
+//! `payment.captured`/`subscription.*` handling, `extract_entity_ref`,
+//! and the checkout/idempotency/reconciliation paths are unchanged.
 
 use crate::domain::{
     NewPayment, NewPaymentWebhookEvent, NewSubscription, PaymentStatus, PlanType,
@@ -162,6 +171,7 @@ impl PaymentService {
     ) -> Result<(), PaymentOperationError> {
         let mutation = match payload.event.as_str() {
             "payment.captured" => self.resolve_payment_captured(&payload).await?,
+            "payment_link.paid" => self.resolve_payment_link_paid(&payload).await?,
             "payment.failed" => self.resolve_payment_failed(&payload).await?,
             "subscription.activated" | "subscription.charged" => {
                 self.resolve_subscription_active(&payload).await?
@@ -198,6 +208,35 @@ impl PaymentService {
     ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(provider_ref) = extract_entity_ref(&payload.payload, "payment") else {
             tracing::warn!("payment.captured webhook missing a usable entity reference; ignoring");
+            return Ok(WebhookMutation::None);
+        };
+        self.resolve_activation(&provider_ref).await
+    }
+
+    /// `payment_link.paid` — Razorpay's dedicated event for a completed
+    /// Payment Link (`PHASE4_DESIGN.md` §2's `lifetime`/`trial` checkout
+    /// path, `razorpay::client`'s `POST /v1/payment_links`). Phase 4K.1
+    /// (production readiness audit CRITICAL finding #2) fix:
+    /// `create_checkout_session` stores the *Payment Link's own* id
+    /// (`payments.provider_ref`, e.g. `plink_...`) at checkout time, but
+    /// `resolve_payment_captured` below only ever reads
+    /// `payload.payment.entity.{order_id,id}` — a different Razorpay id
+    /// namespace (the underlying payment/order, freshly generated per
+    /// attempt) that never equals the stored Payment Link id. `payload
+    /// .payment_link.entity.id` is the one field Razorpay actually sends
+    /// that matches what was stored, so this event — previously
+    /// unhandled and silently dropped into `process_webhook_event`'s
+    /// `other` catch-all — is what correlation must key on for this
+    /// checkout path. `extract_entity_ref` needs no change: called with
+    /// `"payment_link"`, its existing `order_id`-then-`id` fallback
+    /// already returns `entity.id` since a payment_link entity has no
+    /// `order_id` field.
+    async fn resolve_payment_link_paid(
+        &self,
+        payload: &RazorpayWebhookPayload,
+    ) -> Result<WebhookMutation, PaymentOperationError> {
+        let Some(provider_ref) = extract_entity_ref(&payload.payload, "payment_link") else {
+            tracing::warn!("payment_link.paid webhook missing a usable entity reference; ignoring");
             return Ok(WebhookMutation::None);
         };
         self.resolve_activation(&provider_ref).await
@@ -1328,6 +1367,260 @@ mod tests {
         let payload = RazorpayWebhookPayload {
             event: "payment.captured".to_string(),
             payload: json!({ "payment": { "entity": { "id": "pay_xyz", "order_id": "order_never_seen" } } }),
+        };
+        let result = service.process_webhook_event("evt_1", payload).await;
+        assert!(
+            result.is_ok(),
+            "an unmatched reference must not fail the webhook call"
+        );
+    }
+
+    // ── payment_link.paid (Phase 4K.1 regression coverage) ──────────────
+
+    /// Reproduces the exact bug fixed in Phase 4K.1 side-by-side with its
+    /// fix: a `payment.captured` webhook for a Payment-Link-originated
+    /// payment carries only the underlying payment/order id (never stored
+    /// anywhere), so it can never match; the `payment_link.paid` webhook
+    /// for the *same real-world payment* carries the Payment Link id that
+    /// actually was stored at checkout, and does match.
+    #[tokio::test]
+    async fn payment_captured_for_a_payment_link_purchase_does_not_match_while_payment_link_paid_does(
+    ) {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        // Stored at checkout time for a `lifetime`/`trial` purchase —
+        // the Payment Link's own id, per `client.rs`'s `create_checkout`.
+        let payment = sample_payment(1, 10, "plink_abc123", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        // What Razorpay actually sends first: `payment.captured`, whose
+        // payload never carries the Payment Link id — only the freshly
+        // generated payment/order id.
+        let captured_payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({
+                "payment": { "entity": { "id": "pay_freshly_generated", "order_id": "order_freshly_generated" } }
+            }),
+        };
+        service
+            .process_webhook_event("evt_captured", captured_payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(
+            subscription.status,
+            SubscriptionStatus::PendingPayment,
+            "payment.captured alone must not activate a Payment-Link purchase \
+             (its payload never carries the stored Payment Link id)"
+        );
+        assert!(licenses
+            .find_latest_by_subscription(10)
+            .await
+            .unwrap()
+            .is_none());
+
+        // What actually correlates: `payment_link.paid`, whose payload
+        // carries `payment_link.entity.id` — the same id stored at
+        // checkout.
+        let paid_payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({
+                "payment_link": { "entity": { "id": "plink_abc123" } },
+                "payment": { "entity": { "id": "pay_freshly_generated", "order_id": "order_freshly_generated" } }
+            }),
+        };
+        service
+            .process_webhook_event("evt_paid", paid_payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+        let license = licenses.find_latest_by_subscription(10).await.unwrap();
+        assert!(license.is_some(), "payment_link.paid must issue a license");
+        assert_eq!(license.unwrap().status, LicenseRecordStatus::Active);
+    }
+
+    /// End-to-end round trip: `create_checkout_session` for a `lifetime`
+    /// plan persists the Payment Link id Razorpay returned as
+    /// `provider_ref`; the real `payment_link.paid` webhook Razorpay later
+    /// sends for that same link must activate the subscription and issue
+    /// a license using exactly that stored reference.
+    #[tokio::test]
+    async fn lifetime_checkout_followed_by_payment_link_paid_webhook_issues_a_license() {
+        let (service, subscriptions, licenses) = service_with(
+            vec![],
+            vec![],
+            vec![],
+            Ok(CreateCheckoutResponse {
+                checkout_url: "https://rzp.io/l/plink_abc123".to_string(),
+                provider_ref: "plink_abc123".to_string(),
+            }),
+        );
+
+        let outcome = service
+            .create_checkout_session(1, "lifetime")
+            .await
+            .unwrap();
+        assert_eq!(outcome.provider_ref, "plink_abc123");
+
+        let subscription = subscriptions
+            .subscriptions
+            .lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .expect("checkout must have created a subscription row");
+        assert_eq!(subscription.status, SubscriptionStatus::PendingPayment);
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({
+                "payment_link": { "entity": { "id": "plink_abc123" } },
+                "payment": { "entity": { "id": "pay_xyz", "order_id": "order_xyz" } }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions
+            .find_by_id(subscription.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+        let license = licenses
+            .find_latest_by_subscription(subscription.id)
+            .await
+            .unwrap();
+        assert!(license.is_some());
+    }
+
+    #[tokio::test]
+    async fn payment_link_paid_is_idempotent_for_a_repeated_event_id() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "plink_abc123", PaymentStatus::Pending);
+        let (service, _subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({ "payment_link": { "entity": { "id": "plink_abc123" } } }),
+        };
+        service
+            .process_webhook_event("evt_1", payload.clone())
+            .await
+            .unwrap();
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let license_count = licenses
+            .licenses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.subscription_id == 10)
+            .count();
+        assert_eq!(
+            license_count, 1,
+            "a repeated event_id must not issue a second license"
+        );
+    }
+
+    /// Phase 4K.1 concurrency regression, mirroring
+    /// `concurrent_duplicate_webhook_deliveries_apply_the_mutation_exactly_once`
+    /// for the new `payment_link.paid` path: two concurrent deliveries of
+    /// the same event must still issue exactly one license.
+    #[tokio::test]
+    async fn concurrent_payment_link_paid_deliveries_issue_the_mutation_exactly_once() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "plink_abc123", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+        let service = Arc::new(service);
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({ "payment_link": { "entity": { "id": "plink_abc123" } } }),
+        };
+
+        let service_a = Arc::clone(&service);
+        let payload_a = payload.clone();
+        let task_a =
+            tokio::spawn(
+                async move { service_a.process_webhook_event("evt_race", payload_a).await },
+            );
+
+        let service_b = Arc::clone(&service);
+        let task_b =
+            tokio::spawn(async move { service_b.process_webhook_event("evt_race", payload).await });
+
+        let (result_a, result_b) = tokio::join!(task_a, task_b);
+        result_a.unwrap().unwrap();
+        result_b.unwrap().unwrap();
+
+        let license_count = licenses
+            .licenses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.subscription_id == 10)
+            .count();
+        assert_eq!(
+            license_count, 1,
+            "two concurrent deliveries of the same event must issue exactly one license, not two"
+        );
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn payment_link_paid_missing_the_entity_reference_is_acknowledged_not_errored() {
+        let (service, ..) = service_with(vec![], vec![], vec![], ok_checkout());
+
+        // No `payment_link` key at all in the payload — e.g. a malformed
+        // or unexpected delivery shape.
+        let payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({ "payment": { "entity": { "id": "pay_xyz" } } }),
+        };
+        let result = service.process_webhook_event("evt_1", payload).await;
+        assert!(
+            result.is_ok(),
+            "a missing provider reference must not fail the webhook call"
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_link_paid_with_a_non_string_id_is_treated_as_missing() {
+        let (service, ..) = service_with(vec![], vec![], vec![], ok_checkout());
+
+        // `id` present but the wrong JSON type — `extract_entity_ref`
+        // requires a string and must not panic or coerce it.
+        let payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({ "payment_link": { "entity": { "id": 12345 } } }),
+        };
+        let result = service.process_webhook_event("evt_1", payload).await;
+        assert!(
+            result.is_ok(),
+            "an invalid reference must not fail the webhook call"
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_link_paid_referencing_an_unknown_payment_is_acknowledged_not_errored() {
+        let (service, ..) = service_with(vec![], vec![], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({ "payment_link": { "entity": { "id": "plink_never_seen" } } }),
         };
         let result = service.process_webhook_event("evt_1", payload).await;
         assert!(
