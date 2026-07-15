@@ -4,6 +4,7 @@
 
 use crate::parser::{Transaction, TransactionStatus, VoucherType};
 use crate::db::ClassificationRule;
+use crate::text_safety::{find_ascii_ci, floor_char_boundary, safe_prefix};
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
@@ -344,8 +345,21 @@ pub fn detect_gst(narration: &str, reference: &str) -> Option<String> {
     // GSTIN pattern: 15-char alphanumeric starting with 2 digits
     let bytes = n.as_bytes();
     for i in 0..bytes.len().saturating_sub(15) {
+        // `n` is uppercased narration/reference text, not guaranteed ASCII
+        // (₹, accented names, ...) — a valid GSTIN is always pure ASCII, so
+        // any `i`/`i+15` that isn't already a char boundary can't possibly
+        // be the start of one anyway; skip it instead of panicking on
+        // `&n[i..i+15]` (Phase 4L.2.2).
+        if !n.is_char_boundary(i) || !n.is_char_boundary(i + 15) {
+            continue;
+        }
         let chunk = &n[i..i+15];
+        // `i`/`i+15` landing on boundaries only guarantees `chunk` itself is
+        // a valid &str — it says nothing about the *internal* cut points
+        // (2, 7, 11) the sub-slices below need, which can still fall
+        // mid-character even then (Phase 4L.2.2).
         if chunk.len() == 15
+            && chunk.is_char_boundary(2) && chunk.is_char_boundary(7) && chunk.is_char_boundary(11)
             && chunk[..2].chars().all(|c| c.is_ascii_digit())
             && chunk[2..7].chars().all(|c| c.is_ascii_alphabetic())
             && chunk[7..11].chars().all(|c| c.is_ascii_digit())
@@ -407,7 +421,12 @@ pub fn extract_party_name(narration: &str) -> String {
         if s.chars().all(|c| c.is_ascii_digit()) { return true; }
         if s.contains('@') { return true; }
         // IFSC code pattern: 4 alpha + 0 + 6 alphanumeric
-        if s.len() == 11 && s[..4].chars().all(|c| c.is_ascii_alphabetic()) && s.chars().nth(4) == Some('0') { return true; }
+        // `s.is_char_boundary(4)`: `s` is a raw narration token, not
+        // guaranteed ASCII — a real IFSC code's first 4 chars always are,
+        // so a non-boundary at byte 4 already means this isn't one; guards
+        // `&s[..4]` from panicking on a token containing a multi-byte
+        // character in its first 4 bytes (Phase 4L.2.2).
+        if s.len() == 11 && s.is_char_boundary(4) && s[..4].chars().all(|c| c.is_ascii_alphabetic()) && s.chars().nth(4) == Some('0') { return true; }
         if s.len() >= 14 && s.chars().all(|c| c.is_ascii_alphanumeric()) { return true; }
         if s.len() <= 2 && s.chars().all(|c| c.is_ascii_alphabetic()) { return true; }
         false
@@ -458,15 +477,28 @@ pub fn extract_party_name(narration: &str) -> String {
 
 fn normalize_vendor_name(name: &str) -> String {
     let mut s = name.trim().to_string();
-    // Remove PDF artifacts "Page N"
-    if let Some(pos) = s.to_lowercase().find("page ") {
-        if pos > 0 { s = s[..pos].trim().to_string(); }
+    // Remove PDF artifacts "Page N". `find_ascii_ci` (Phase 4L.2.2
+    // follow-up) searches `s` itself, not a `.to_lowercase()` copy — the
+    // returned offset is always both correct *and* boundary-safe in `s`,
+    // closing a narrow gap the original `s.to_lowercase().find("page ")`
+    // + `floor_char_boundary` version left open: a length-changing
+    // Unicode lowercase mapping before the match could shift `pos` off
+    // its true position in `s`, and `floor_char_boundary` alone only
+    // prevented that from panicking — it didn't guarantee the resulting
+    // cut was still at the real "Page " boundary.
+    if let Some(pos) = find_ascii_ci(&s, "page ") {
+        if pos > 0 {
+            s = s[..pos].trim().to_string();
+        }
     }
     // Remove trailing "L PROP", "PROPR", "PROPRIETOR"
     for suffix in &["L PROP","PROPR","PROPRIETOR"] {
         let lower = s.to_lowercase();
         if let Some(pos) = lower.rfind(suffix) {
-            if pos > 2 { s = s[..pos].trim().to_string(); }
+            if pos > 2 {
+                let pos = floor_char_boundary(&s, pos);
+                s = s[..pos].trim().to_string();
+            }
         }
     }
     // Remove trailing 1-2 uppercase letters (OCR noise)
@@ -487,7 +519,7 @@ fn normalize_vendor_name(name: &str) -> String {
     }
     // Collapse and cap length
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if s.len() > 40 { s[..40].trim().to_string() } else { s }
+    if s.len() > 40 { safe_prefix(&s, 40).trim().to_string() } else { s }
 }
 
 /// Smart duplicate detection — 3 passes (exact hash, ref+amount, similarity).
@@ -643,5 +675,68 @@ mod tests {
         t.debit = Some(999.0);
         classify_one(&mut t, "Bank Ledger", &[], true, true);
         assert_eq!(t.account_head, "Internet Charges");
+    }
+
+    // ── UTF-8 crash hardening (Phase 4L.2.2) ────────────────────────────────
+
+    /// `detect_gst`'s GSTIN scan used to byte-index every position of the
+    /// (uppercased) narration+reference string looking for a 15-char GSTIN,
+    /// which panicked on any narration containing a multi-byte character
+    /// (₹, accented names, Devanagari, ...) at least 15 bytes long. Must not
+    /// panic, and must still find a genuine ASCII GSTIN elsewhere in the
+    /// same string.
+    #[test]
+    fn detect_gst_does_not_panic_on_multibyte_narration_and_still_finds_a_real_gstin() {
+        let narration = "पेमेंट Café Münchën ₹4,999 GSTIN 27ABCDE1234F1Z5 charge";
+        assert_eq!(detect_gst(narration, ""), Some("GST".to_string()));
+    }
+
+    #[test]
+    fn detect_gst_does_not_panic_on_pure_multibyte_narration_with_no_gstin() {
+        let narration = "पेमेंट भुगतान चालान ₹₹₹ शुल्क विवरण नारायण मूल्य श्रेणी";
+        assert_eq!(detect_gst(narration, ""), None);
+    }
+
+    /// `extract_party_name`'s `is_junk` IFSC-code check used to byte-slice
+    /// the first 4 bytes of an 11-*byte* token without checking it was also
+    /// 11 *characters* — panicking on a multi-byte token. Must not panic on
+    /// any narration shape, regardless of what (if anything) it extracts.
+    #[test]
+    fn extract_party_name_does_not_panic_on_multibyte_tokens() {
+        let samples = [
+            "मुंबई शाखा UPI/CR/12345/RAMESH KUMAR",
+            "café-münchën-üö-payment-1234567",
+            "₹₹₹₹₹₹₹₹₹₹₹ NEFT TRANSFER TO VENDOR",
+        ];
+        for s in samples {
+            let _ = extract_party_name(s); // must not panic
+        }
+    }
+
+    /// `normalize_vendor_name`'s final 40-byte truncation used to panic on
+    /// any extracted party name longer than 40 bytes containing a
+    /// multi-byte character at the cut point.
+    #[test]
+    fn extract_party_name_does_not_panic_when_truncating_a_long_multibyte_name() {
+        let narration = "NEFT-N123456789012-राजेश कुमार शर्मा एंड संस प्राइवेट लिमिटेड-REF001";
+        let name = extract_party_name(narration);
+        assert!(name.len() <= 40, "must be truncated to at most 40 bytes: {name:?}");
+    }
+
+    /// Phase 4L.2.2 follow-up: `normalize_vendor_name`'s "Page N" strip
+    /// used to find the cut position in a `.to_lowercase()` *copy* of the
+    /// name, then apply that byte offset to the *original* — silently
+    /// wrong (not just unsafe) whenever a length-changing Unicode
+    /// lowercase mapping (e.g. `İ` U+0130, 2 bytes → `i̇`, 3 bytes)
+    /// appears before the match, shifting every position after it out of
+    /// alignment. `floor_char_boundary` alone only prevented a panic —
+    /// byte 8 here is already a valid boundary in the *original* string,
+    /// so the old code would have silently cut mid-word ("İCafe P")
+    /// instead of at the real "Page " boundary, with no panic and no
+    /// warning. Must now produce the *correct* result.
+    #[test]
+    fn normalize_vendor_name_finds_page_marker_correctly_past_a_length_changing_unicode_char() {
+        let name = normalize_vendor_name("\u{0130}Cafe Page 2 more text");
+        assert_eq!(name, "İCafe", "must cut right before \"Page\", not mid-word");
     }
 }

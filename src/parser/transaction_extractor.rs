@@ -15,14 +15,33 @@ use crate::parser::{
     excel_parser::{compute_prev_balances, prepend_opening_balance_row},
     noise_filter::is_noise_row,
 };
+use crate::text_safety::floor_char_boundary;
 
 // ── Shared regex constants ────────────────────────────────────────────────────
 
 // ── Constants used only in legacy/dead paths — kept for documentation ─────────
 // These describe the fixed-width patterns; the active parsers use inline regexes.
 
-/// Check if a string starts with a DD-MM-YYYY / DD/MM/YYYY date.
-fn starts_with_date(s: &str) -> Option<String> {
+/// Check if a string starts with a DD-MM-YYYY / DD/MM/YYYY date. Returns
+/// the display string ("DD-MM-YYYY", always exactly 10 ASCII bytes) *and*
+/// the actual byte length of that date pattern in `s` itself.
+///
+/// The two can differ for the *second* separator (between MM and YYYY):
+/// `date_str` is always rebuilt with a 1-byte ASCII `-`, but `s` may use
+/// a typographic dash there (minus sign U+2212 or en-dash U+2013 — both
+/// 3 bytes, and both `.replace()`d to `-` in `normalized` below, so they
+/// still produce a matching `Some` here). The *first* separator can't
+/// diverge this way — `bytes[3]`/`bytes[4]` below must already be ASCII
+/// digits for `m1` to pass, which is only possible if `bytes[2]` (the
+/// first separator) is exactly 1 byte. A caller that reused
+/// `date_str.len()` to locate where the date ends *in `s`* (Phase
+/// 4L.2.2's crash-safety pass did exactly that) would undershoot by up
+/// to 2 bytes when the second separator is typographic —
+/// `floor_char_boundary` made that panic-safe, but it could still land a
+/// couple of bytes short of the true end, leaking a trailing date digit
+/// into whatever text is read after it. Returning the real length here
+/// (Phase 4L.2.2 follow-up) closes that gap at the source instead.
+fn starts_with_date(s: &str) -> Option<(String, usize)> {
     let s = s.trim();
     if s.len() < 10 { return None; }
     // First 10 chars: DD[-/]MM[-/]YYYY
@@ -33,12 +52,44 @@ fn starts_with_date(s: &str) -> Option<String> {
     if !d1 || !sep1 || !m1 { return None; }
     // Find separator positions allowing em-dash (3 bytes)
     let normalized = s.replace('\u{2212}', "-").replace('\u{2013}', "-");
-    let parts: Vec<&str> = normalized[..10.min(normalized.len())].split(|c| c == '-' || c == '/').collect();
+    // `\u{2014}` (em-dash) isn't replaced above, so it — or any other
+    // stray multi-byte character in this heuristically-detected date
+    // region — can still be present here; `floor_char_boundary` keeps
+    // this byte-10 cut from panicking on it (Phase 4L.2.2). Note this
+    // means an em-dash-separated date already fails to match below (the
+    // `.split` predicate only recognizes ASCII `-`/`/`, so an
+    // un-replaced em-dash leaves `parts.len() < 3`) — safely rejected,
+    // not silently mis-parsed.
+    let cut = floor_char_boundary(&normalized, 10.min(normalized.len()));
+    let parts: Vec<&str> = normalized[..cut].split(|c| c == '-' || c == '/').collect();
     if parts.len() < 3 { return None; }
     if parts[0].len() == 2 && parts[1].len() == 2 && parts[2].len() == 4 {
-        return Some(format!("{}-{}-{}", parts[0], parts[1], parts[2]));
+        let date_str = format!("{}-{}-{}", parts[0], parts[1], parts[2]);
+        // Walk `s`'s own bytes for the real separator widths, rather
+        // than assuming `date_str.len()` (always 10) matches them.
+        let sep1_len = separator_byte_len(s, 2)?;
+        let sep2_len = separator_byte_len(s, 2 + sep1_len + 2)?;
+        let orig_len = (2 + sep1_len + 2 + sep2_len + 4).min(s.len());
+        return Some((date_str, orig_len));
     }
     None
+}
+
+/// Byte width of the date-separator character at `s`'s byte offset
+/// `at`: 1 for ASCII `-`/`/`, 3 for a typographic dash (minus sign,
+/// en-dash, or em-dash — the only multi-byte separators this parser
+/// recognizes, matching `starts_with_date`'s own `bytes[2] == 0xE2`
+/// check). `None` if `at` doesn't hold a recognized separator at all —
+/// should not happen once `starts_with_date` has already matched the
+/// date pattern via `parts`, but never guessed at (Phase 4L.2.2).
+fn separator_byte_len(s: &str, at: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if at >= bytes.len() { return None; }
+    match bytes[at] {
+        b'-' | b'/' => Some(1),
+        0xE2 if at + 3 <= bytes.len() && s.is_char_boundary(at + 3) => Some(3),
+        _ => None,
+    }
 }
 
 /// Extract all decimal amounts from a string.
@@ -196,7 +247,7 @@ pub fn extract_fw_transactions(
         if line.is_empty() || line.chars().all(|c| c == '-' || c == '=' || c == ' ') { continue; }
 
         // Require a date at the start of the line
-        let date_str = match starts_with_date(line) {
+        let (date_str, date_orig_len) = match starts_with_date(line) {
             Some(d) => d,
             None    => continue,
         };
@@ -209,8 +260,17 @@ pub fn extract_fw_transactions(
             None    => continue,
         };
 
-        // The portion between date and balance
-        let date_part_len = date_str.len() + 1; // +1 for trailing space
+        // The portion between date and balance. `date_orig_len` is the
+        // date pattern's real byte length *in `line`* (from
+        // `starts_with_date`, Phase 4L.2.2 follow-up) — using
+        // `date_str.len()` here instead would undershoot on a
+        // typographic-dash date, leaking trailing date bytes into
+        // `narration`/`middle` below (not just an unsafe slice — a wrong
+        // one). `floor_char_boundary` still guards the `+1` for the
+        // trailing space, which `date_orig_len` doesn't account for.
+        // `bal_start` is always boundary-safe already (found via `rfind`
+        // on a same-offset-aligned substring).
+        let date_part_len = floor_char_boundary(line, date_orig_len + 1);
         let after_date = if date_part_len < line.len() { &line[date_part_len..] } else { "" };
         let middle = if bal_start > date_part_len {
             &line[date_part_len..bal_start]
@@ -421,7 +481,7 @@ pub fn extract_cosmos_transactions(
         if line.is_empty() || line.chars().all(|c| c == '-' || c == '=' || c == ' ') { continue; }
 
         // Date at start
-        let date_str = match starts_with_date(&line) {
+        let (date_str, date_orig_len) = match starts_with_date(&line) {
             Some(d) => d,
             None    => continue,
         };
@@ -434,7 +494,12 @@ pub fn extract_cosmos_transactions(
             None    => continue,
         };
 
-        let date_part_len = date_str.len() + 1;
+        // See the equivalent comment in extract_fw_transactions above —
+        // `date_orig_len` is the date pattern's real byte length in
+        // `line` (Phase 4L.2.2 follow-up); `date_str.len()` alone would
+        // undershoot on a typographic-dash date and leak trailing date
+        // bytes into `middle`, not just risk an unsafe slice.
+        let date_part_len = floor_char_boundary(&line, date_orig_len + 1);
         let middle = if bal_raw_start > date_part_len {
             line[date_part_len..bal_raw_start].trim().to_string()
         } else {
@@ -622,6 +687,22 @@ mod tests {
         assert!(starts_with_date("SALARY PAYMENT").is_none());
     }
 
+    /// Phase 4L.2.2: a typographic em-dash (U+2014, 3 bytes) as a date
+    /// separator — a realistic PDF/copy-paste artifact this parser already
+    /// special-cases (`bytes[2] == 0xE2` in `starts_with_date`) — used to
+    /// panic when the resulting `normalized[..10]` byte-index cut landed
+    /// mid-character. Must not panic, whatever it returns.
+    #[test]
+    fn date_with_em_dash_separator_does_not_panic() {
+        let _ = starts_with_date("01—01—2024 SALARY"); // must not panic
+    }
+
+    #[test]
+    fn date_with_mixed_ascii_and_em_dash_separators_does_not_panic() {
+        let _ = starts_with_date("01-01—2024 SALARY"); // must not panic
+        let _ = starts_with_date("01—01-2024 SALARY"); // must not panic
+    }
+
     // ── extract_amounts ───────────────────────────────────────────────────────
 
     #[test]
@@ -739,6 +820,64 @@ mod tests {
         let atm = txns.iter().find(|t| t.narration.to_lowercase().contains("atm")
             || t.narration.to_lowercase().contains("upi-dr")).expect("UPI-DR row");
         assert!(atm.debit.is_some(), "UPI-DR row should be debit");
+    }
+
+    /// Phase 4L.2.2: `date_part_len` (derived from `starts_with_date`'s
+    /// ASCII-normalized reconstruction) used to be applied directly as a
+    /// byte offset into the *original*, un-normalized `line` — panicking
+    /// whenever a row's actual date separator was a multi-byte character
+    /// (em-dash, en-dash, minus sign). The whole fixed-width extraction
+    /// pipeline must survive such a row without panicking, and must still
+    /// process the other, normally-separated rows around it.
+    #[test]
+    fn fw_extraction_survives_a_row_with_em_dash_date_separators() {
+        let rows = vec![
+            row_of("Date         Particulars                    Amount    Balance"),
+            row_of("01—01—2024   UPI-CR/305561/SALARY           50000.00 1,50,000.00Cr"),
+            row_of("02-01-2024   UPI-DR/105561/ATM WDL          10000.00 1,40,000.00Cr"),
+        ];
+        let result = extract_fw_transactions(&rows, "test.pdf"); // must not panic
+        if let Some((txns, _, _)) = result {
+            assert!(
+                txns.iter().any(|t| t.narration.to_lowercase().contains("atm")),
+                "the normally-separated row should still be extracted"
+            );
+        }
+    }
+
+    /// Phase 4L.2.2 follow-up: a minus sign (U+2212) as the *second* date
+    /// separator (between MM and YYYY) *is* recognized by
+    /// `starts_with_date` — it's `.replace()`d to ASCII before the split,
+    /// so `Some` is returned, unlike an em-dash. (The *first* separator
+    /// can't be 3 bytes and still reach `Some` at all — see
+    /// `starts_with_date`'s own doc comment — so this is the one
+    /// realistically reachable shape.) This is the actual live
+    /// corruption path the crash-safety pass's `floor_char_boundary`
+    /// alone didn't close: it prevented a panic, but `date_part_len`
+    /// still undershot the real end of the date by 2 bytes (a 3-byte
+    /// separator vs. the reconstructed "DD-MM-YYYY"'s 1-byte one),
+    /// leaking the last digit of "2024" into the extracted narration as
+    /// a stray "4" prefix. Must now produce the *correct* narration, not
+    /// just avoid panicking.
+    #[test]
+    fn fw_minus_sign_date_separator_does_not_leak_into_narration() {
+        let rows = vec![
+            row_of("Date         Particulars                    Amount    Balance"),
+            row_of("01-01\u{2212}2024   SALARY CREDIT                 50000.00 1,50,000.00Cr"),
+        ];
+        let (txns, _, _) = extract_fw_transactions(&rows, "test.pdf")
+            .expect("a minus-sign-separated date must still be extracted, not just survive without panicking");
+        let t = txns.first().expect("one transaction");
+        assert!(
+            t.narration.to_uppercase().starts_with("SALARY"),
+            "narration must start with the real text, not a leaked date fragment: {:?}",
+            t.narration
+        );
+        assert!(
+            !t.narration.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "narration must not start with a stray digit leaked from the date: {:?}",
+            t.narration
+        );
     }
 
     #[test]

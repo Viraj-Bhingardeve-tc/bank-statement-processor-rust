@@ -27,6 +27,8 @@ use calamine::{open_workbook_auto, Data, Reader};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::text_safety::safe_prefix;
+
 use super::amount_parser::{parse_amount, parse_amount_str, CellValue};
 use super::bank_detection::{detect, DetectOptions};
 use super::column_detector::detect_excel_cols;
@@ -326,7 +328,7 @@ pub fn compute_prev_balances(
                 let diff = (expected - stated).abs();
                 if diff > 1.0 {
                     log::warn!("[BSP Opening Balance] MISMATCH exp={:.2} got={:.2} Δ={:.2}  \"{}\"",
-                        expected, stated, diff, &t.narration[..t.narration.len().min(35)]);
+                        expected, stated, diff, safe_prefix(&t.narration, 35));
                 }
                 run_bal = Some(stated); // re-anchor so errors don't compound
             } else {
@@ -367,14 +369,14 @@ pub fn correct_debit_credit_by_balance(txns: &mut Vec<Transaction>) {
                 t.credit = Some(dr);
                 t.debit  = None;
                 log::debug!("[BSP Correct] debit→credit  Δbal={:+.2}  amt={:.2}  \"{}\"",
-                    diff, dr, &t.narration[..t.narration.len().min(40)]);
+                    diff, dr, safe_prefix(&t.narration, 40));
             }
             (None, Some(cr)) if (diff + cr).abs() < tol(cr) => {
                 // Balance went DOWN by ~credit amount → must be debit
                 t.debit  = Some(cr);
                 t.credit = None;
                 log::debug!("[BSP Correct] credit→debit  Δbal={:+.2}  amt={:.2}  \"{}\"",
-                    diff, cr, &t.narration[..t.narration.len().min(40)]);
+                    diff, cr, safe_prefix(&t.narration, 40));
             }
             _ => {}
         }
@@ -408,7 +410,7 @@ pub fn deduplicate_txns(txns: Vec<Transaction>) -> Vec<Transaction> {
         if seen.insert(key) {
             out.push(t);
         } else {
-            log::debug!("[BSP Dedup] removed: {} \"{}\"", t.date, &t.narration[..t.narration.len().min(30)]);
+            log::debug!("[BSP Dedup] removed: {} \"{}\"", t.date, safe_prefix(&t.narration, 30));
         }
     }
     out
@@ -453,7 +455,7 @@ pub fn validate_balances(
             mismatch_count += 1;
             t.balance_ok = Some(false);
             log::warn!("[BSP Bal] MISMATCH \"{}\" | {} | \"{}\" | prev={:.2} → exp={:.2} got={:.2} Δ={:.2}",
-                source_name, t.date, &t.narration[..t.narration.len().min(35)],
+                source_name, t.date, safe_prefix(&t.narration, 35),
                 pb, expected, actual, diff);
         } else {
             ok_count += 1;

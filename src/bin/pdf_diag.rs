@@ -45,7 +45,7 @@ fn main() {
         // Show first 3 parsed transactions
         for (i, t) in real_b.iter().take(3).enumerate() {
             println!("  T{}: date={} narr='{}' dr={:?} cr={:?} bal={:?}",
-                i, t.date, &t.narration[..t.narration.len().min(40)],
+                i, t.date, bank_statement_processor::text_safety::safe_prefix(&t.narration, 40),
                 t.debit, t.credit, t.balance);
         }
         if real_a.len() == 0 && real_b.len() == 0 {

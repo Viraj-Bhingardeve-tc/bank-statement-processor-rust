@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use crate::parser::Transaction;
+use crate::text_safety::safe_prefix;
 
 const BATCH_SIZE: usize = 15;
 
@@ -198,7 +199,7 @@ fn call_openai(
     let status = resp.status();
     let text = resp.text().context("openai response text")?;
     if !status.is_success() {
-        return Err(anyhow!("OpenAI HTTP {}: {}", status, &text[..text.len().min(200)]));
+        return Err(anyhow!("OpenAI HTTP {}: {}", status, safe_prefix(&text, 200)));
     }
 
     let json: serde_json::Value = serde_json::from_str(&text).context("parse openai json")?;
@@ -235,7 +236,7 @@ fn call_claude(
     let status = resp.status();
     let text = resp.text().context("claude response text")?;
     if !status.is_success() {
-        return Err(anyhow!("Claude HTTP {}: {}", status, &text[..text.len().min(200)]));
+        return Err(anyhow!("Claude HTTP {}: {}", status, safe_prefix(&text, 200)));
     }
 
     let json: serde_json::Value = serde_json::from_str(&text).context("parse claude json")?;
@@ -272,7 +273,7 @@ fn call_gemini(
     let status = resp.status();
     let text = resp.text().context("gemini response text")?;
     if !status.is_success() {
-        return Err(anyhow!("Gemini HTTP {}: {}", status, &text[..text.len().min(200)]));
+        return Err(anyhow!("Gemini HTTP {}: {}", status, safe_prefix(&text, 200)));
     }
 
     let json: serde_json::Value = serde_json::from_str(&text).context("parse gemini json")?;

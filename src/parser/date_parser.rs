@@ -65,8 +65,17 @@ static RE_ISO: Lazy<Regex> = Lazy::new(||
 );
 
 /// Exactly 8 consecutive digits — YYYYMMDD compact.
+///
+/// `[0-9]`, not the Unicode-aware `\d` (Phase 4L.2.2): `\d` also matches
+/// non-ASCII Unicode decimal digits (Devanagari ०-९, fullwidth ０-９,
+/// Arabic-Indic ٠-٩, ...), which OCR/PDF-extracted Indian financial text
+/// can plausibly contain. `s[0..4]`/`s[4..6]`/`s[6..8]` below assume 8
+/// single-byte ASCII characters — with a bare `\d`, an 8-*character* match
+/// made of multi-byte digits would be far more than 8 *bytes* long, and
+/// those fixed byte offsets could land mid-character and panic. `[0-9]`
+/// makes that assumption an invariant the regex itself enforces.
 static RE_COMPACT8: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"^\d{8}$").unwrap()
+    Regex::new(r"^[0-9]{8}$").unwrap()
 );
 
 /// Separator characters used by `repair_ocr_chars`: runs of `/`, `-`, `.`, whitespace.
@@ -418,6 +427,19 @@ mod tests {
     #[test]
     fn yyyymmdd_compact() {
         assert_date("20240115", "15/01/2024");
+    }
+
+    /// Phase 4L.2.2: `RE_COMPACT8` used to be `^\d{8}$` — the Unicode-aware
+    /// `\d` also matches non-ASCII Unicode decimal digits (Devanagari,
+    /// fullwidth, ...), which OCR/PDF-extracted Indian financial text can
+    /// plausibly contain. An 8-*character*-but-many-*byte* match then
+    /// panicked on the fixed `s[0..4]`/`s[4..6]`/`s[6..8]` byte slices.
+    /// `[0-9]` closes that; this must not panic (and correctly fails to
+    /// parse, since these aren't real dates either way).
+    #[test]
+    fn compact8_does_not_panic_on_unicode_digits() {
+        assert_invalid("२०२४०११५"); // Devanagari digits for "20240115"
+        assert_invalid("２０２４０１１５"); // fullwidth digits for "20240115"
     }
 
     #[test]
