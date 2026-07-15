@@ -125,13 +125,12 @@ restart, no blue/green machinery this phase. `server/deploy/deploy.sh` wraps thi
 
 ### Backup location
 
-Nightly `pg_dump`, written by `server/deploy/backup.sh` to `/var/backups/license-server` on the
-VPS (outside every Docker volume, so a `docker compose down -v` or `pgdata` volume loss can't
-take backups with it) — split into `daily/` (14 kept) and `weekly/` (8 kept, Sunday's daily dump)
-subdirectories, per `PHASE4_DESIGN.md` §8.2/§14 item 10. That directory should also be synced
-off-VPS (object storage, another host, etc.); `backup.sh` has a marked `TODO` hook for this since
-the design doc doesn't fix a specific destination. `server/deploy/restore.sh` restores from a
-dump it produced.
+Nightly `pg_dump`, written by `server/deploy/backup.sh` to `/var/backups/license-server` (override
+with `BACKUP_DIR`) on the VPS (outside every Docker volume, so a `docker compose down -v` or
+`pgdata` volume loss can't take backups with it) — split into `daily/` (`DAILY_RETENTION`, default
+14) and `weekly/` (`WEEKLY_RETENTION`, default 8, Sunday's daily dump) subdirectories, per
+`PHASE4_DESIGN.md` §8.2/§14 item 10. `server/deploy/restore.sh` restores from a dump it produced;
+`server/deploy/verify-backup.sh` checks one without restoring anything.
 
 **Restore-safety and corruption protection (Phase 4J.2):** `pg_dump` runs with `--clean
 --if-exists`, so a dump can be restored straight into an already-populated database — `DROP ...
@@ -139,14 +138,71 @@ IF EXISTS` before each `CREATE` — instead of erroring on "already exists" or s
 duplicate rows via `COPY` into tables nothing dropped first. `backup.sh` writes to a `.partial`
 temp file, verifies it with `gzip -t`, and only then renames it into `daily/`/`weekly/` — a failed
 or truncated dump never leaves a corrupt or half-written file at a path `restore.sh` or the
-retention pruning would treat as a real backup (any `.partial` left by a hard kill mid-run is
-swept up at the start of the next scheduled run). `restore.sh` mirrors this on the way in: it
-runs `gzip -t` on the given file before touching Docker at all, and restores via
-`psql -v ON_ERROR_STOP=1`, so a corrupt input file or any SQL error during the restore itself
-aborts immediately instead of silently leaving a partially-restored database. Run
-`bash server/deploy/test-backup-restore.sh` to exercise both scripts offline against a fake
-`docker` shim (no VPS, containers, or real Postgres needed) — it asserts the flags above are
-actually present and that a simulated dump/restore failure leaves nothing behind.
+retention pruning would treat as a real backup (any leftover temp file from a hard kill mid-run is
+swept up at the start of the next scheduled run).
+
+**Encryption, integrity, and off-site replication (Phase 4L.2.1 — closes the last Critical finding
+in `FINAL_PRODUCTION_VALIDATION_REPORT.md`):**
+
+- **Integrity, unconditionally:** every dump gets a `<dump>.sha256` and `<dump>.meta.json` sidecar
+  (database name, Postgres server version, size, SHA-256, an `encrypted` flag, and a
+  `backup_version` for future format changes). This is independent of `gzip -t`'s own stream
+  check — it detects bit-rot or tampering *after* the file was written (e.g. during off-site
+  transfer or while sitting on disk), which a bare `gzip -t` cannot. Fully backward compatible: a
+  backup made before this phase simply has no sidecars, and `restore.sh`/`verify-backup.sh` treat
+  that as a warning, not a failure.
+- **Encryption at rest, opt-in:** set `BACKUP_ENCRYPTION_KEY` (a passphrase) and every subsequent
+  backup is AES-256-CBC-encrypted (`openssl enc -pbkdf2`), producing `<dump>.sql.gz.enc` instead of
+  `<dump>.sql.gz`. Unset (the default) is byte-for-byte the same unencrypted output as before.
+  `restore.sh`/`verify-backup.sh` auto-detect encryption from the metadata sidecar (or the `.enc`
+  extension, if the sidecar is ever lost) and decrypt transparently — the same
+  `BACKUP_ENCRYPTION_KEY` must be set in the environment they run in.
+- **Off-site replication, opt-in:** set `OFFSITE_SYNC_CMD` to any shell command your operations
+  already use — it's run after a successful local backup, with `BACKUP_DIR` exported for it to
+  reference. This repo doesn't hardcode or depend on a specific tool; pick whichever you already
+  operate (examples below). Unset (the default) means backups still exist only on this host, now
+  with an explicit reminder printed instead of a silent gap:
+  ```sh
+  # rclone to any rclone-supported remote
+  OFFSITE_SYNC_CMD='rclone sync "$BACKUP_DIR" remote:license-server-backups'
+  # AWS S3 (or an S3-compatible provider)
+  OFFSITE_SYNC_CMD='aws s3 sync "$BACKUP_DIR" s3://your-bucket/license-server-backups'
+  # a second host over SSH
+  OFFSITE_SYNC_CMD='rsync -az "$BACKUP_DIR"/ backup-host:/backups/license-server/'
+  ```
+  A failed off-site sync makes `backup.sh` itself exit non-zero (so cron/monitoring notices) even
+  though the local backup already succeeded and is safe — the failure message distinguishes the
+  two so this isn't mistaken for a failed backup.
+- **Safer restores:** `restore.sh` verifies the backup's checksum (if present), decrypts it (if
+  encrypted), and runs `gzip -t` — in that order, before touching Docker at all — then restores via
+  `psql -v ON_ERROR_STOP=1 --single-transaction`. The single-transaction wrap means a failure
+  partway through a restore now rolls back cleanly instead of leaving a half-dropped,
+  half-restored database (`pg_dump --clean --if-exists`'s DDL is fully transactional in Postgres,
+  so this changes nothing about a successful restore).
+- **Dry-run / standalone verification:** `restore.sh --verify-only <file>` runs every check above
+  and exits without prompting, stopping the server, or touching the database — or use
+  `server/deploy/verify-backup.sh <file>` directly, which needs no Docker/Postgres at all. Good for
+  a scheduled DR drill or for checking an off-site copy before trusting it.
+
+Run `bash server/deploy/test-backup-restore.sh` to exercise all of the above offline against a
+fake `docker` shim (no VPS, containers, or real Postgres needed) — it asserts the flags/behavior
+described above and that a simulated dump/restore/checksum/encryption failure leaves nothing
+behind or is rejected before anything destructive happens.
+
+### Operator checklist
+
+- [ ] `server/deploy/backup.sh` runs nightly via cron (`REPO_DIR=/opt/license-server
+      /opt/license-server/server/deploy/backup.sh`) and its log/exit code is monitored.
+- [ ] `BACKUP_ENCRYPTION_KEY` is set to a real secret (stored outside this repo, e.g. in the host's
+      cron environment or a secrets manager) and backed up itself — a lost key makes every
+      encrypted backup permanently unreadable.
+- [ ] `OFFSITE_SYNC_CMD` is configured and its target verified reachable from the VPS.
+- [ ] `bash server/deploy/test-backup-restore.sh` passes (CI or a pre-deploy check).
+- [ ] `server/deploy/verify-backup.sh` (or `restore.sh --verify-only`) has been run at least once
+      against a real, current production backup — not just the offline test fixtures.
+- [ ] A full restore drill (`restore.sh` against a real backup, into a disposable/staging Postgres)
+      has been performed at least once and its result documented.
+- [ ] `DAILY_RETENTION`/`WEEKLY_RETENTION` match your actual recovery-point-objective needs.
 
 ## Database roles and least privilege
 
