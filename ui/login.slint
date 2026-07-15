@@ -19,6 +19,19 @@ export component LoginScreen inherits Rectangle {
     in-out property <string> email-val: "";
     in-out property <string> pwd-val:   "";
 
+    // ── License enforcement (Phase 4K.3) ──────────────────────────────────────
+    // When license-blocked is true, this screen shows the license-key form
+    // below instead of the password form — reusing the same properties/
+    // callback the Settings screen's license section already exposes
+    // (`app.slint`'s `license-status-text`/`license-key-input`/
+    // `license-activate-result`/`do-license-activate`), just wired to a
+    // second place they're shown from.
+    in property <bool>       license-blocked:         false;
+    in property <string>     license-status-text:      "";
+    in-out property <string> license-key-input:        "";
+    in property <string>     license-activate-result:  "";
+    callback license-activate();
+
     background: #1565C0;
 
     card := Rectangle {
@@ -56,6 +69,12 @@ export component LoginScreen inherits Rectangle {
             // ── Divider + gap ─────────────────────────────────────────────────
             Rectangle { height: 1px; background: #BBDEFB; }
             Rectangle { height: 24px; }  // margin: 0 0 24px
+
+            // ── Password login form (hidden while license-blocked) ─────────────
+            if !root.license-blocked : VerticalBox {
+            padding: 0px;
+            spacing: 0px;
+            init => { email-ti.focus(); }
 
             // ── Email group ───────────────────────────────────────────────────
             Text {
@@ -152,16 +171,95 @@ export component LoginScreen inherits Rectangle {
                     wrap: word-wrap;
                 }
             }
+            } // if !root.license-blocked
+
+            // ── License-required form (Phase 4K.3) ───────────────────────────
+            // Shown instead of the password form when the currently
+            // activated license is missing, expired, revoked, or has failed
+            // offline-grace validation — reuses the same license-key input
+            // and activation callback the Settings screen's license section
+            // already provides.
+            if root.license-blocked : VerticalBox {
+            padding: 0px;
+            spacing: 0px;
+
+            Text {
+                text: "LICENSE REQUIRED"; font-size: 11px; font-weight: 600;
+                color: #37474F; letter-spacing: 0.5px;
+            }
+            Rectangle { height: 5px; }
+            Rectangle {
+                height: 40px; background: #FFF3E0;
+                border-radius: 5px; border-width: 1px; border-color: #FFCC80;
+                Text {
+                    x: 12px; width: parent.width - 24px; height: parent.height;
+                    text: root.license-status-text == "" ? "A valid license is required to continue." : root.license-status-text;
+                    color: #E65100; font-size: 12px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+            Rectangle { height: 16px; }
+
+            Text {
+                text: "LICENSE KEY"; font-size: 11px; font-weight: 600;
+                color: #37474F; letter-spacing: 0.5px;
+            }
+            Rectangle { height: 5px; }
+            license-key-box := Rectangle {
+                height: 36px; border-radius: 5px;
+                border-width: 1px; border-color: license-key-ti.has-focus ? #1565C0 : #90CAF9;
+                background: #FFFFFF;
+                if root.license-key-input == "" && !license-key-ti.has-focus : Text {
+                    x: 13px; width: parent.width - 26px; height: parent.height;
+                    text: "XXXX-XXXX-XXXX-XXXX";
+                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
+                }
+                license-key-ti := TextInput {
+                    x: 12px; width: parent.width - 24px; height: parent.height;
+                    font-size: 13px; color: #0A1929;
+                    vertical-alignment: center;
+                    text <=> root.license-key-input;
+                    accessible-label: "License key";
+                    accepted => { root.license-activate(); }
+                }
+            }
+            Rectangle { height: 4px; }
+
+            Rectangle {
+                height:        40px;
+                background:    #1565C0;
+                border-radius: 5px;
+                accessible-role: button;
+                accessible-label: "Activate license";
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.license-activate(); }
+                }
+                Text {
+                    text: "Activate";
+                    font-size: 14px; font-weight: 600; color: #FFFFFF;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+            }
+
+            if root.license-activate-result != "" : Rectangle { height: 14px; }
+            if root.license-activate-result != "" : Text {
+                text: root.license-activate-result;
+                font-size: 12px; color: #37474F;
+                horizontal-alignment: center; wrap: word-wrap;
+            }
+            } // if root.license-blocked
 
             // ── Footer note (margin-top:22px) ─────────────────────────────────
             Rectangle { height: 22px; }
             Text {
-                text: "Password is valid for this month only.\nContact your administrator for access.";
+                text: root.license-blocked
+                    ? "Need a license? Contact your administrator or renew your subscription."
+                    : "Password is valid for this month only.\nContact your administrator for access.";
                 font-size: 11px; color: #90A4AE;
                 horizontal-alignment: center; wrap: word-wrap;
             }
         }
     }
-
-    init => { email-ti.focus(); }
 }

@@ -17,6 +17,13 @@ export component AppWindow inherits Window {
     in-out property <bool>   login-loading:    false;
     in-out property <bool>   login-closing:    false;
     in-out property <bool>   start-dashboard:  false;
+    // License enforcement (Phase 4K.3) — set instead of logged-in when a
+    // successful monthly-password login is blocked by an invalid/expired/
+    // revoked/missing license, or when the 24-hour periodic revalidation
+    // timer finds the license no longer valid mid-session. LoginScreen
+    // shows the license-key form (below) instead of the password form
+    // while this is true.
+    in-out property <bool>   license-blocked:  false;
 
     // ── File / bank status (set by Rust after parse) ──────────────────────────
     in property <string> status-bank: "";
@@ -295,6 +302,11 @@ export component AppWindow inherits Window {
         is-loading:    root.login-loading;
         is-closing:    root.login-closing;
         attempt-login(email, password) => { root.do-login(email, password); }
+        license-blocked:          root.license-blocked;
+        license-status-text:      root.license-status-text;
+        license-key-input      <=> root.license-key-input;
+        license-activate-result:  root.license-activate-result;
+        license-activate       => { root.do-license-activate(); }
     }
 
     // ── Main screen ───────────────────────────────────────────────────────────

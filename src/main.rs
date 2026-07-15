@@ -39,6 +39,30 @@ use slint::{SharedString, Model as _};
 #[cfg(feature = "slint-ui")]
 slint::include_modules!();
 
+// ── License client (Phase 4K.3) ───────────────────────────────────────────────
+
+/// Builds the `LicenseApiClient` every enforcement check in this process
+/// uses (the post-login startup gate, license activation, and the 24-hour
+/// periodic revalidation timer) — one shared instance, not one per call,
+/// so the underlying HTTP connection pool is reused rather than rebuilt on
+/// every check. `LICENSE_SERVER_URL` unset (or empty, or the `ai` feature
+/// disabled, e.g. a `--no-default-features` build) means `OfflineClient` —
+/// the same honest "nothing to call" behavior this module has always had,
+/// now just reachable from a real deployment that hasn't set the variable
+/// yet, not only from a build with no HTTP client compiled in at all.
+fn build_license_client() -> Arc<dyn license::LicenseApiClient + Send + Sync> {
+    #[cfg(feature = "ai")]
+    {
+        if let Ok(url) = std::env::var("LICENSE_SERVER_URL") {
+            let url = url.trim();
+            if !url.is_empty() {
+                return Arc::new(license::HttpLicenseClient::new(url));
+            }
+        }
+    }
+    Arc::new(license::OfflineClient)
+}
+
 // ── Login attempt tracker ─────────────────────────────────────────────────────
 
 struct LoginState {
@@ -1523,22 +1547,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     ));
 
-    // ── Phase 3A licensing status (non-blocking — see LICENSE_SYSTEM_DESIGN.md
-    // §7 for why this is deliberately not a startup gate yet: no real server
-    // or payment path exists for `license::should_enforce()` to safely flip
-    // on). Logged on every launch so the machinery is exercised and visible
-    // in support logs well before it becomes load-bearing. Computed exactly
-    // once here — the resulting display string is reused below to populate
-    // the Settings screen rather than calling `check_status` a second time
-    // (which would double-log `license_validation_log` and, once a real
-    // `HttpLicenseClient` exists, double the network calls on every launch).
+    // ── Phase 4K.3 licensing client + status ────────────────────────────────
+    // One shared client for every enforcement check this process makes
+    // (`build_license_client`'s doc comment). Computed exactly once here —
+    // the resulting display string is reused below to populate the
+    // Settings screen rather than calling `check_status` a second time
+    // (which would double-log `license_validation_log` and double the
+    // network call on every launch). This does NOT gate anything by
+    // itself — see the `do-login` handler below for the actual startup
+    // enforcement gate, which must run *after* the monthly-password check
+    // succeeds (there's no user identity to gate on before that).
+    let license_client = build_license_client();
     let license_status_display = {
         let db = db_conn.lock().unwrap();
         match db.as_ref() {
             Some(conn) => {
-                let status = license::check_status(conn, &license::OfflineClient);
+                let status = license::check_status(conn, license_client.as_ref());
                 log::info!(
-                    "[license] status={:?} enforce={} (see LICENSE_SYSTEM_DESIGN.md §7)",
+                    "[license] status={:?} enforce={}",
                     status,
                     license::should_enforce()
                 );
@@ -1607,8 +1633,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // ── Login ─────────────────────────────────────────────────────────────
         {
-            let handle      = app.as_weak();
-            let login_state = Arc::new(Mutex::new(LoginState::new()));
+            let handle         = app.as_weak();
+            let login_state    = Arc::new(Mutex::new(LoginState::new()));
+            let db_ref         = db_conn.clone();
+            let license_client = license_client.clone();
 
             app.on_do_login(move |email: SharedString, password: SharedString| {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
@@ -1626,8 +1654,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 h.set_login_loading(false);
                 if ok {
                     log::info!("Login successful for {}", email);
-                    h.set_logged_in(true);
-                    h.set_login_error("".into());
+                    // Phase 4K.3 startup enforcement gate — the only place
+                    // `logged_in` is ever set `true` (see this phase's
+                    // audit: every path into the full application goes
+                    // through this one callback), so gating here alone
+                    // closes every bypass.
+                    let db = db_ref.lock().unwrap();
+                    match db.as_ref() {
+                        Some(conn) => match license::enforce(conn, license_client.as_ref()) {
+                            license::EnforcementOutcome::Allowed => {
+                                h.set_logged_in(true);
+                                h.set_license_blocked(false);
+                                h.set_login_error("".into());
+                            }
+                            license::EnforcementOutcome::Blocked { reason, revoked } => {
+                                log::warn!(
+                                    "[license] blocking login (revoked={revoked}): {reason}"
+                                );
+                                h.set_logged_in(false);
+                                h.set_license_blocked(true);
+                                h.set_license_status_text(SharedString::from(reason.as_str()));
+                                h.set_login_error("".into());
+                            }
+                        },
+                        None => {
+                            // No database open at all — can't evaluate
+                            // license state. Fail closed rather than
+                            // silently granting access
+                            // (LICENSE_SECURITY_REVIEW.md §6).
+                            log::error!("[license] cannot enforce — database is not open");
+                            h.set_logged_in(false);
+                            h.set_license_blocked(true);
+                            h.set_license_status_text(SharedString::from(
+                                "License status unavailable — database is not open.",
+                            ));
+                        }
+                    }
                 } else {
                     ls.record_failure();
                     let remaining = ls.remaining();
@@ -3711,16 +3773,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        // ── License Activation (Phase 3A — see LICENSE_SYSTEM_DESIGN.md §9) ────
-        // `OfflineClient` is the only `LicenseApiClient` in this phase and
-        // always returns `NoServerConfigured` — this wires the real flow
-        // end-to-end (UI → license::activate → LicenseApiClient trait call →
-        // persisted result) against that honest, predictable error, so the
-        // whole path is exercised and ready for a drop-in `HttpLicenseClient`
-        // later with no call-site change here.
+        // ── License Activation (Phase 3A; re-checks enforcement since 4K.3) ────
+        // Reachable from two places: the Settings screen (already logged
+        // in — see app.slint's MainScreen block) and the license-blocked
+        // form on LoginScreen itself (Phase 4K.3, not yet logged in) —
+        // both bind to this exact same callback, so a successful
+        // activation from either place re-runs `license::enforce` and
+        // unlocks into the full application immediately if the license is
+        // now valid, with no special-casing for which screen triggered it
+        // (setting `logged_in`/`license_blocked` to what they already were
+        // is a harmless no-op from the Settings-screen call site).
         {
-            let handle = app.as_weak();
-            let db_ref = db_conn.clone();
+            let handle         = app.as_weak();
+            let db_ref         = db_conn.clone();
+            let license_client = license_client.clone();
             app.on_do_license_activate(move || {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 let key = h.get_license_key_input().to_string();
@@ -3736,19 +3802,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                     return;
                 };
-                match license::activate(conn, &license::OfflineClient, key) {
+                match license::activate(conn, license_client.as_ref(), key) {
                     Ok(status) => {
-                        let record = license::storage::load_local_license(conn).ok().flatten();
-                        h.set_license_status_text(SharedString::from(
-                            license::describe(status, record.as_ref()).as_str(),
-                        ));
                         h.set_license_activate_result(SharedString::from("License activated."));
                         h.set_license_key_input(SharedString::from(""));
+
+                        match license::enforce(conn, license_client.as_ref()) {
+                            license::EnforcementOutcome::Allowed => {
+                                let record = license::storage::load_local_license(conn).ok().flatten();
+                                h.set_license_status_text(SharedString::from(
+                                    license::describe(status, record.as_ref()).as_str(),
+                                ));
+                                h.set_logged_in(true);
+                                h.set_license_blocked(false);
+                            }
+                            license::EnforcementOutcome::Blocked { reason, .. } => {
+                                // A freshly activated license that still
+                                // doesn't pass enforcement (e.g. the server
+                                // considers it suspended) — stay blocked
+                                // and show why, rather than a bare
+                                // "License activated." with no explanation
+                                // for why the app is still locked.
+                                h.set_license_status_text(SharedString::from(reason.as_str()));
+                            }
+                        }
                     }
                     Err(license::ApiError::NoServerConfigured) => {
                         log::info!("[license] activation attempted with no server configured yet");
                         h.set_license_activate_result(SharedString::from(
-                            "No licensing server is configured yet — activation will be available in a future update.",
+                            "No licensing server is configured — set LICENSE_SERVER_URL and restart.",
                         ));
                     }
                     Err(e) => {
@@ -4670,6 +4752,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 push_dashboard(&h, &filtered_txns, opening);
                 log::info!("[DashFilter] filtered to {} txns", filtered_txns.len());
             });
+        }
+
+        // ── Periodic license revalidation (Phase 4K.3, every 24h) ────────────
+        // A `Repeated` slint::Timer — same free-function family as the
+        // single-shot timer already used above for the login-lockout
+        // countdown. Unlike `Timer::single_shot`, `Timer::start` requires
+        // the `Timer` instance itself to stay alive for the interval to
+        // keep firing, so it's bound here, in the same scope `app` lives
+        // in until `app.run()` returns just below.
+        let revalidation_timer = slint::Timer::default();
+        {
+            let handle         = app.as_weak();
+            let db_ref         = db_conn.clone();
+            let license_client = license_client.clone();
+            revalidation_timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_secs(24 * 60 * 60),
+                move || {
+                    let Some(h) = handle.upgrade() else { return };
+                    // Only a logged-in session has anything to revalidate —
+                    // never runs (and never touches the network) while the
+                    // login/license-blocked screen is already showing.
+                    if !h.get_logged_in() {
+                        return;
+                    }
+
+                    let handle_for_result = handle.clone();
+                    let db_ref            = db_ref.clone();
+                    let license_client    = license_client.clone();
+                    // Off the UI thread — same background-thread +
+                    // invoke_from_event_loop pattern this file already
+                    // uses for OCR/AI calls, so this 24h check never blocks
+                    // the UI while the network request is in flight.
+                    std::thread::spawn(move || {
+                        let outcome = {
+                            let db = db_ref.lock().unwrap();
+                            db.as_ref()
+                                .map(|conn| license::enforce(conn, license_client.as_ref()))
+                        };
+                        let Some(outcome) = outcome else { return };
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(h) = handle_for_result.upgrade() else { return };
+                            match outcome {
+                                license::EnforcementOutcome::Allowed => {
+                                    log::info!("[license] periodic revalidation: still licensed");
+                                }
+                                license::EnforcementOutcome::Blocked { reason, revoked } => {
+                                    log::warn!(
+                                        "[license] periodic revalidation blocked the app (revoked={revoked}): {reason}"
+                                    );
+                                    // No restart required — flips the same
+                                    // properties the startup gate does,
+                                    // sending a running session straight
+                                    // back to the license-blocked screen.
+                                    h.set_logged_in(false);
+                                    h.set_license_blocked(true);
+                                    h.set_license_status_text(SharedString::from(reason.as_str()));
+                                }
+                            }
+                        });
+                    });
+                },
+            );
         }
 
         log::info!("Slint event loop starting…");

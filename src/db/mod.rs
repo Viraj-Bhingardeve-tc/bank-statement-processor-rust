@@ -807,6 +807,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
              detail     TEXT
          );
          CREATE INDEX IF NOT EXISTS idx_license_validation_log_time ON license_validation_log(checked_at DESC);"),
+    // Phase 4K.3 desktop enforcement — local tamper-evidence for the cached
+    // license row (license/storage.rs's `compute_integrity_hmac`).
+    // Nullable and additive: a pre-existing row from before this migration
+    // simply has NULL here, which `load_local_license` treats as "not yet
+    // signed" rather than "tampered" — it gets backfilled on the next
+    // `save_local_license` call rather than falsely locking out an
+    // already-legitimately-activated installation.
+    (7, "ALTER TABLE local_license ADD COLUMN integrity_hmac TEXT;"),
 ];
 
 /// The highest migration version every database created by a pre-migration-
