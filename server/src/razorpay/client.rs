@@ -46,8 +46,26 @@ pub enum RazorpayError {
     /// `NoServerConfigured` sentinel, same "honest, not a fake success"
     /// principle carried over from Phase 3).
     NotConfigured(String),
-    /// The HTTP call itself failed, or Razorpay returned a non-2xx.
+    /// The HTTP call itself failed, or Razorpay returned a non-2xx. Kept
+    /// as-is for `create_checkout` (unchanged — checkout is out of scope
+    /// for Phase 4K.4); `list_payments_since` now constructs the two more
+    /// specific variants below instead, so the reconciliation job can
+    /// classify what happened without re-parsing this string.
     Http(String),
+    /// (Phase 4K.4) `list_payments_since` failed in a way a later retry
+    /// can reasonably be expected to fix on its own — a connect/timeout
+    /// error, or Razorpay returning HTTP 5xx. Reconciliation already
+    /// retries the whole run on the next scheduled tick; this variant just
+    /// makes that "safe to retry" judgment explicit in logs/metrics
+    /// instead of implicit in a generic error string.
+    Transient(String),
+    /// (Phase 4K.4) `list_payments_since` failed in a way that retrying
+    /// the identical request will not fix — a well-formed non-5xx error
+    /// response, or a response body that doesn't parse as the documented
+    /// shape. Still surfaced as a failed run (there's no partial list to
+    /// fall back to), but classified distinctly so an operator doesn't
+    /// mistake a real integration problem for ordinary network flakiness.
+    Permanent(String),
 }
 
 impl fmt::Display for RazorpayError {
@@ -55,7 +73,25 @@ impl fmt::Display for RazorpayError {
         match self {
             RazorpayError::NotConfigured(msg) => write!(f, "razorpay not configured: {msg}"),
             RazorpayError::Http(msg) => write!(f, "razorpay request failed: {msg}"),
+            RazorpayError::Transient(msg) => {
+                write!(f, "razorpay request failed (transient, will retry): {msg}")
+            }
+            RazorpayError::Permanent(msg) => {
+                write!(f, "razorpay request failed (permanent): {msg}")
+            }
         }
+    }
+}
+
+impl RazorpayError {
+    /// Whether a caller should expect an identical retry to have a real
+    /// chance of succeeding (Phase 4K.4) — `NotConfigured`/`Http` (the
+    /// pre-existing, `create_checkout`-only variants) default to `true`,
+    /// preserving today's "always retry next tick" reconciliation
+    /// behavior for any call site that hasn't been updated to construct
+    /// the more specific variants.
+    pub fn is_recoverable(&self) -> bool {
+        !matches!(self, RazorpayError::Permanent(_))
     }
 }
 
@@ -135,6 +171,10 @@ pub struct HttpRazorpayClient {
     key_secret: Option<Secret<String>>,
     monthly_plan_id: Option<String>,
     yearly_plan_id: Option<String>,
+    /// `RECONCILIATION_BATCH_SIZE` (Phase 4K.4, `config::ReconciliationConfig`)
+    /// — the `count` query param `list_payments_since` sends Razorpay.
+    /// Previously hardcoded to `100`; that's still the default when unset.
+    reconciliation_batch_size: u32,
 }
 
 impl HttpRazorpayClient {
@@ -143,6 +183,7 @@ impl HttpRazorpayClient {
         key_secret: Option<Secret<String>>,
         monthly_plan_id: Option<String>,
         yearly_plan_id: Option<String>,
+        reconciliation_batch_size: u32,
     ) -> Self {
         HttpRazorpayClient {
             http: build_http_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
@@ -150,6 +191,7 @@ impl HttpRazorpayClient {
             key_secret,
             monthly_plan_id,
             yearly_plan_id,
+            reconciliation_batch_size,
         }
     }
 
@@ -329,25 +371,22 @@ impl RazorpayClient for HttpRazorpayClient {
             .http
             .get("https://api.razorpay.com/v1/payments")
             .basic_auth(key_id, Some(key_secret))
-            .query(&[
-                ("from", since.timestamp().to_string()),
-                ("count", "100".to_string()),
-            ])
+            .query(&list_payments_query_params(
+                since,
+                self.reconciliation_batch_size,
+            ))
             .send()
             .await
-            .map_err(|e| RazorpayError::Http(e.to_string()))?;
+            .map_err(|e| classify_send_error(&e))?;
 
         if !response.status().is_success() {
-            return Err(RazorpayError::Http(format!(
-                "payments list returned {}",
-                response.status()
-            )));
+            return Err(classify_status_error(response.status()));
         }
 
         let parsed: ListPaymentsResponse = response
             .json()
             .await
-            .map_err(|e| RazorpayError::Http(e.to_string()))?;
+            .map_err(|e| RazorpayError::Permanent(e.to_string()))?;
 
         Ok(parsed
             .items
@@ -358,6 +397,44 @@ impl RazorpayClient for HttpRazorpayClient {
                 status: item.status,
             })
             .collect())
+    }
+}
+
+/// The `from`/`count` query params `list_payments_since` sends Razorpay —
+/// factored out of the method body (Phase 4K.4) so the now-configurable
+/// `count` (previously always `"100"`) is testable without a network call.
+fn list_payments_query_params(
+    since: DateTime<Utc>,
+    batch_size: u32,
+) -> [(&'static str, String); 2] {
+    [
+        ("from", since.timestamp().to_string()),
+        ("count", batch_size.to_string()),
+    ]
+}
+
+/// Classifies a `reqwest::Error` from `list_payments_since`'s `.send()`
+/// call (Phase 4K.4) — a connect/timeout failure is worth retrying next
+/// scheduled tick (`Transient`); anything else (a malformed request, a
+/// redirect failure, ...) will fail identically on retry (`Permanent`).
+fn classify_send_error(e: &reqwest::Error) -> RazorpayError {
+    if e.is_timeout() || e.is_connect() {
+        RazorpayError::Transient(e.to_string())
+    } else {
+        RazorpayError::Permanent(e.to_string())
+    }
+}
+
+/// Classifies a non-2xx `list_payments_since` response status (Phase
+/// 4K.4) — a 5xx is Razorpay's own transient failure (worth retrying);
+/// anything else (4xx, ...) is a well-formed rejection an identical retry
+/// will not fix.
+fn classify_status_error(status: reqwest::StatusCode) -> RazorpayError {
+    let msg = format!("payments list returned {status}");
+    if status.is_server_error() {
+        RazorpayError::Transient(msg)
+    } else {
+        RazorpayError::Permanent(msg)
     }
 }
 
@@ -418,5 +495,107 @@ mod tests {
             "the request must fail within roughly the configured timeout, not block \
              indefinitely (took {elapsed:?})"
         );
+    }
+
+    // ── Reconciliation batch size (Phase 4K.4) ──────────────────────────
+
+    #[test]
+    fn list_payments_query_params_uses_the_configured_batch_size() {
+        let params = list_payments_query_params(Utc::now(), 25);
+        assert_eq!(params[1], ("count", "25".to_string()));
+    }
+
+    #[test]
+    fn list_payments_query_params_defaults_match_the_previously_hardcoded_count() {
+        let params = list_payments_query_params(Utc::now(), 100);
+        assert_eq!(params[1], ("count", "100".to_string()));
+    }
+
+    #[test]
+    fn list_payments_query_params_sends_since_as_a_unix_timestamp() {
+        let since = Utc::now();
+        let params = list_payments_query_params(since, 100);
+        assert_eq!(params[0], ("from", since.timestamp().to_string()));
+    }
+
+    #[test]
+    fn http_razorpay_client_stores_the_configured_reconciliation_batch_size() {
+        let client = HttpRazorpayClient::new(None, None, None, None, 42);
+        assert_eq!(client.reconciliation_batch_size, 42);
+    }
+
+    // ── Transient/Permanent error classification (Phase 4K.4) ───────────
+
+    #[test]
+    fn classify_status_error_treats_5xx_as_transient() {
+        assert!(matches!(
+            classify_status_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            RazorpayError::Transient(_)
+        ));
+        assert!(matches!(
+            classify_status_error(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+            RazorpayError::Transient(_)
+        ));
+    }
+
+    #[test]
+    fn classify_status_error_treats_non_5xx_as_permanent() {
+        assert!(matches!(
+            classify_status_error(reqwest::StatusCode::BAD_REQUEST),
+            RazorpayError::Permanent(_)
+        ));
+        assert!(matches!(
+            classify_status_error(reqwest::StatusCode::UNAUTHORIZED),
+            RazorpayError::Permanent(_)
+        ));
+        assert!(matches!(
+            classify_status_error(reqwest::StatusCode::NOT_FOUND),
+            RazorpayError::Permanent(_)
+        ));
+    }
+
+    /// Same connect/timeout distinction the existing timeout test above
+    /// proves at the transport layer — here proving `classify_send_error`
+    /// maps that kind of `reqwest::Error` to `Transient`.
+    #[tokio::test]
+    async fn classify_send_error_treats_a_connect_timeout_as_transient() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((_socket, _)) = listener.accept().await {
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let client = build_http_client(Duration::from_millis(100), Duration::from_millis(100));
+        let err = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            classify_send_error(&err),
+            RazorpayError::Transient(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_send_error_treats_a_malformed_request_as_permanent() {
+        let client = build_http_client(CONNECT_TIMEOUT, REQUEST_TIMEOUT);
+        let err = client.get("not a valid url").send().await.unwrap_err();
+
+        assert!(matches!(
+            classify_send_error(&err),
+            RazorpayError::Permanent(_)
+        ));
+    }
+
+    #[test]
+    fn is_recoverable_is_true_for_every_variant_except_permanent() {
+        assert!(RazorpayError::NotConfigured("x".to_string()).is_recoverable());
+        assert!(RazorpayError::Http("x".to_string()).is_recoverable());
+        assert!(RazorpayError::Transient("x".to_string()).is_recoverable());
+        assert!(!RazorpayError::Permanent("x".to_string()).is_recoverable());
     }
 }

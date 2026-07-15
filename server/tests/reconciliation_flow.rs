@@ -71,6 +71,7 @@ fn payment_service_with(pool: PgPool, razorpay_payments: Vec<RazorpayPayment>) -
         Arc::new(MockRazorpayClient {
             payments: razorpay_payments,
         }),
+        2, // matches config::ReconciliationConfig's default max_age_hours
     )
 }
 

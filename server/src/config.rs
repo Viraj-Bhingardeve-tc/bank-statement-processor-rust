@@ -133,11 +133,28 @@ pub struct PaymentConfig {
     pub razorpay_yearly_plan_id: Option<String>,
 }
 
+/// `RECONCILIATION_INTERVAL_SECS`/`RECONCILIATION_BATCH_SIZE`/
+/// `RECONCILIATION_MAX_AGE_HOURS` (Phase 4K.4) — all three previously
+/// fixed constants (`reconciliation::INTERVAL`, the Razorpay payments-list
+/// `count=100` query param, `service::payment_service::
+/// RECONCILIATION_LOOKBACK_HOURS`). Nothing secret here. Every default
+/// below matches the value each was fixed at before this phase, so an
+/// operator who sets none of these three variables gets byte-for-byte the
+/// same scheduling/lookback behavior as before — this is a configurability
+/// addition, not a behavior change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationConfig {
+    pub interval_secs: u64,
+    pub batch_size: u32,
+    pub max_age_hours: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub payment: PaymentConfig,
+    pub reconciliation: ReconciliationConfig,
 }
 
 impl AppConfig {
@@ -211,6 +228,25 @@ impl AppConfig {
             return Err(ConfigError::IncompleteRazorpayCredentials);
         }
 
+        let reconciliation_interval_secs = match get("RECONCILIATION_INTERVAL_SECS") {
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|_| ConfigError::InvalidReconciliationInterval(v))?,
+            None => 15 * 60,
+        };
+        let reconciliation_batch_size = match get("RECONCILIATION_BATCH_SIZE") {
+            Some(v) => v
+                .parse::<u32>()
+                .map_err(|_| ConfigError::InvalidReconciliationBatchSize(v))?,
+            None => 100,
+        };
+        let reconciliation_max_age_hours = match get("RECONCILIATION_MAX_AGE_HOURS") {
+            Some(v) => v
+                .parse::<i64>()
+                .map_err(|_| ConfigError::InvalidReconciliationMaxAge(v))?,
+            None => 2,
+        };
+
         Ok(AppConfig {
             server: ServerConfig {
                 bind_addr: SocketAddr::new(host, port),
@@ -226,6 +262,11 @@ impl AppConfig {
                 razorpay_webhook_secret: get("RAZORPAY_WEBHOOK_SECRET").map(Secret::new),
                 razorpay_monthly_plan_id: get("RAZORPAY_MONTHLY_PLAN_ID"),
                 razorpay_yearly_plan_id: get("RAZORPAY_YEARLY_PLAN_ID"),
+            },
+            reconciliation: ReconciliationConfig {
+                interval_secs: reconciliation_interval_secs,
+                batch_size: reconciliation_batch_size,
+                max_age_hours: reconciliation_max_age_hours,
             },
         })
     }
@@ -248,6 +289,15 @@ pub enum ConfigError {
     /// both unset. No message payload for the same reason as
     /// `InvalidDatabaseUrl` — whichever *is* set could be a real secret.
     IncompleteRazorpayCredentials,
+    /// (Phase 4K.4) `RECONCILIATION_INTERVAL_SECS` set but not a valid
+    /// non-negative integer.
+    InvalidReconciliationInterval(String),
+    /// (Phase 4K.4) `RECONCILIATION_BATCH_SIZE` set but not a valid
+    /// non-negative integer.
+    InvalidReconciliationBatchSize(String),
+    /// (Phase 4K.4) `RECONCILIATION_MAX_AGE_HOURS` set but not a valid
+    /// integer.
+    InvalidReconciliationMaxAge(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -280,6 +330,18 @@ impl fmt::Display for ConfigError {
                 f,
                 "RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must both be set, or both left unset \
                  (values are not logged, since either may be a real secret)"
+            ),
+            ConfigError::InvalidReconciliationInterval(v) => write!(
+                f,
+                "invalid RECONCILIATION_INTERVAL_SECS value {v:?} (expected a non-negative number of seconds)"
+            ),
+            ConfigError::InvalidReconciliationBatchSize(v) => write!(
+                f,
+                "invalid RECONCILIATION_BATCH_SIZE value {v:?} (expected a positive number)"
+            ),
+            ConfigError::InvalidReconciliationMaxAge(v) => write!(
+                f,
+                "invalid RECONCILIATION_MAX_AGE_HOURS value {v:?} (expected a number of hours)"
             ),
         }
     }
@@ -541,6 +603,66 @@ mod tests {
         assert!(!debug_output.contains("rzp_live_realkeyid"));
         assert!(!debug_output.contains("reallysecretvalue"));
         assert!(!debug_output.contains("reallysecretwebhook"));
+    }
+
+    // ── Reconciliation config (Phase 4K.4) ──────────────────────────────
+
+    #[test]
+    fn reconciliation_defaults_match_the_values_every_call_site_used_to_hardcode() {
+        let config = AppConfig::from_vars(vars(&[("DATABASE_URL", DB_URL)])).unwrap();
+        assert_eq!(config.reconciliation.interval_secs, 15 * 60);
+        assert_eq!(config.reconciliation.batch_size, 100);
+        assert_eq!(config.reconciliation.max_age_hours, 2);
+    }
+
+    #[test]
+    fn explicit_reconciliation_settings_are_honored() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RECONCILIATION_INTERVAL_SECS", "60"),
+            ("RECONCILIATION_BATCH_SIZE", "25"),
+            ("RECONCILIATION_MAX_AGE_HOURS", "6"),
+        ]))
+        .unwrap();
+        assert_eq!(config.reconciliation.interval_secs, 60);
+        assert_eq!(config.reconciliation.batch_size, 25);
+        assert_eq!(config.reconciliation.max_age_hours, 6);
+    }
+
+    #[test]
+    fn invalid_reconciliation_interval_is_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RECONCILIATION_INTERVAL_SECS", "not-a-number"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidReconciliationInterval("not-a-number".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_reconciliation_batch_size_is_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RECONCILIATION_BATCH_SIZE", "not-a-number"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidReconciliationBatchSize("not-a-number".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_reconciliation_max_age_is_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RECONCILIATION_MAX_AGE_HOURS", "not-a-number"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidReconciliationMaxAge("not-a-number".to_string())
+        );
     }
 
     #[test]

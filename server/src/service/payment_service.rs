@@ -91,6 +91,12 @@ pub struct PaymentService {
     subscription_repository: Arc<dyn SubscriptionRepository>,
     license_repository: Arc<dyn LicenseRepository>,
     razorpay_client: Arc<dyn RazorpayClient>,
+    /// `RECONCILIATION_MAX_AGE_HOURS` (Phase 4K.4,
+    /// `config::ReconciliationConfig`) — how far back `reconcile_once`
+    /// asks Razorpay to list payments from. Previously a fixed
+    /// `RECONCILIATION_LOOKBACK_HOURS` constant; `2` is still the default
+    /// when the variable is unset.
+    reconciliation_lookback_hours: i64,
 }
 
 impl PaymentService {
@@ -100,6 +106,7 @@ impl PaymentService {
         subscription_repository: Arc<dyn SubscriptionRepository>,
         license_repository: Arc<dyn LicenseRepository>,
         razorpay_client: Arc<dyn RazorpayClient>,
+        reconciliation_lookback_hours: i64,
     ) -> Self {
         PaymentService {
             payment_repository,
@@ -107,6 +114,7 @@ impl PaymentService {
             subscription_repository,
             license_repository,
             razorpay_client,
+            reconciliation_lookback_hours,
         }
     }
 
@@ -533,12 +541,27 @@ impl PaymentService {
     /// detected via payment-status comparison rather than a synthesized
     /// event-id lookup.
     pub async fn reconcile_once(&self) -> Result<ReconciliationSummary, PaymentOperationError> {
-        let since = Utc::now() - Duration::hours(RECONCILIATION_LOOKBACK_HOURS);
+        let since = Utc::now() - Duration::hours(self.reconciliation_lookback_hours);
         let payments = self
             .razorpay_client
             .list_payments_since(since)
             .await
-            .map_err(|e| PaymentOperationError::ProviderError(e.to_string()))?;
+            .map_err(|e| {
+                // Phase 4K.4: `RazorpayError::is_recoverable()` distinguishes
+                // a `Transient` failure (worth retrying next tick — a
+                // connect/timeout error, or a Razorpay 5xx) from a
+                // `Permanent` one (retrying the identical request won't
+                // help) so an operator grepping logs doesn't mistake a real
+                // integration problem for ordinary network flakiness. The
+                // returned `PaymentOperationError` shape is unchanged —
+                // this only affects what gets logged.
+                tracing::warn!(
+                    recoverable = e.is_recoverable(),
+                    error = %e,
+                    "reconciliation: list_payments_since failed"
+                );
+                PaymentOperationError::ProviderError(e.to_string())
+            })?;
 
         let checked = payments.len();
         let mut healed = 0usize;
@@ -564,7 +587,7 @@ impl PaymentService {
         tracing::info!(
             checked,
             healed,
-            lookback_hours = RECONCILIATION_LOOKBACK_HOURS,
+            lookback_hours = self.reconciliation_lookback_hours,
             "reconciliation run complete"
         );
 
@@ -662,9 +685,10 @@ impl PaymentService {
     }
 }
 
-/// `PHASE4_DESIGN.md` §14 item 8/9 (confirmed, fixed values).
+/// `PHASE4_DESIGN.md` §14 item 8/9 (confirmed, fixed value; the scheduler
+/// interval counterpart, `RECONCILIATION_INTERVAL_SECS`, is now
+/// configurable — see `reconciliation::interval_from_config`).
 pub const RECONCILIATION_INTERVAL_MINUTES: i64 = 15;
-const RECONCILIATION_LOOKBACK_HOURS: i64 = 2;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReconciliationSummary {
@@ -1261,6 +1285,64 @@ mod tests {
         }
     }
 
+    /// Records every `since` it's called with (Phase 4K.4) — unlike
+    /// `MockRazorpayClient` above, which discards it, this is specifically
+    /// for asserting `reconcile_once` actually derives `since` from
+    /// `PaymentService`'s configured lookback rather than a hardcoded
+    /// value.
+    struct RecordingRazorpayClient {
+        since_calls: Arc<Mutex<Vec<chrono::DateTime<Utc>>>>,
+    }
+
+    #[async_trait]
+    impl RazorpayClient for RecordingRazorpayClient {
+        async fn create_checkout(
+            &self,
+            _req: CreateCheckoutRequest,
+        ) -> Result<CreateCheckoutResponse, RazorpayError> {
+            Err(RazorpayError::NotConfigured(
+                "not exercised by lookback tests".to_string(),
+            ))
+        }
+
+        async fn list_payments_since(
+            &self,
+            since: chrono::DateTime<Utc>,
+        ) -> Result<Vec<RazorpayPayment>, RazorpayError> {
+            self.since_calls.lock().unwrap().push(since);
+            Ok(vec![])
+        }
+    }
+
+    /// Builds a `PaymentService` with a given `reconciliation_lookback_hours`
+    /// and a `RecordingRazorpayClient`, returning the shared handle used to
+    /// inspect what `since` `reconcile_once` actually passed (Phase 4K.4).
+    fn service_with_lookback(
+        lookback_hours: i64,
+    ) -> (PaymentService, Arc<Mutex<Vec<chrono::DateTime<Utc>>>>) {
+        let since_calls = Arc::new(Mutex::new(Vec::new()));
+        let payment_repository: Arc<dyn PaymentRepository> =
+            Arc::new(MockPaymentRepository::with(vec![]));
+        let subscription_repository = Arc::new(MockSubscriptionRepository::with(vec![]));
+        let license_repository = Arc::new(MockLicenseRepository::with(vec![]));
+        let webhook_event_repository = Arc::new(MockWebhookEventRepository::new(
+            payment_repository.clone(),
+            subscription_repository.clone(),
+            license_repository.clone(),
+        ));
+        let service = PaymentService::new(
+            payment_repository,
+            webhook_event_repository,
+            subscription_repository,
+            license_repository,
+            Arc::new(RecordingRazorpayClient {
+                since_calls: since_calls.clone(),
+            }),
+            lookback_hours,
+        );
+        (service, since_calls)
+    }
+
     // ── Fixtures ─────────────────────────────────────────────────────────
 
     fn sample_subscription(id: i64, status: SubscriptionStatus) -> Subscription {
@@ -1362,6 +1444,7 @@ mod tests {
                 checkout_result: razorpay_result,
                 list_result: vec![],
             }),
+            2, // matches config::ReconciliationConfig's default max_age_hours
         );
         (service, subscription_repository, license_repository)
     }
@@ -1409,6 +1492,7 @@ mod tests {
                 )),
                 list_result: razorpay_payments,
             }),
+            2, // matches config::ReconciliationConfig's default max_age_hours
         );
         (
             service,
@@ -2299,6 +2383,35 @@ mod tests {
             order_id: order_id.map(str::to_string),
             status: status.to_string(),
         }
+    }
+
+    /// Phase 4K.4: `reconcile_once` must derive `since` from
+    /// `PaymentService`'s configured `reconciliation_lookback_hours`
+    /// (`RECONCILIATION_MAX_AGE_HOURS`), not a hardcoded constant — proven
+    /// here with a non-default value (6, not the old fixed `2`) so a
+    /// regression back to the constant would fail this assertion.
+    #[tokio::test]
+    async fn reconcile_once_uses_the_configured_lookback_window() {
+        let (service, since_calls) = service_with_lookback(6);
+
+        let before = Utc::now();
+        service.reconcile_once().await.unwrap();
+        let after = Utc::now();
+
+        let calls = since_calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "expected exactly one list_payments_since call"
+        );
+        let expected_earliest = before - Duration::hours(6);
+        let expected_latest = after - Duration::hours(6);
+        assert!(
+            calls[0] >= expected_earliest && calls[0] <= expected_latest,
+            "since ({:?}) was not derived from the configured 6-hour lookback \
+             (expected between {expected_earliest:?} and {expected_latest:?})",
+            calls[0],
+        );
     }
 
     #[tokio::test]

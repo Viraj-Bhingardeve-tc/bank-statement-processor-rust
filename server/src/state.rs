@@ -61,6 +61,7 @@ impl AppState {
             config.payment.razorpay_key_secret.clone(),
             config.payment.razorpay_monthly_plan_id.clone(),
             config.payment.razorpay_yearly_plan_id.clone(),
+            config.reconciliation.batch_size,
         ));
         let payment_service = Arc::new(PaymentService::new(
             Arc::new(PgPaymentRepository::new(db_pool.clone())),
@@ -68,6 +69,7 @@ impl AppState {
             Arc::new(PgSubscriptionRepository::new(db_pool.clone())),
             Arc::new(PgLicenseRepository::new(db_pool.clone())),
             razorpay_client,
+            config.reconciliation.max_age_hours,
         ));
 
         AppState {

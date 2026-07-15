@@ -2,7 +2,9 @@
 //! `tests/common/` (not `tests/common.rs`) specifically so `cargo test`
 //! doesn't treat it as its own top-level test binary.
 
-use license_server::config::{AppConfig, DatabaseConfig, PaymentConfig, Secret, ServerConfig};
+use license_server::config::{
+    AppConfig, DatabaseConfig, PaymentConfig, ReconciliationConfig, Secret, ServerConfig,
+};
 
 /// A config pointing `DATABASE_URL` at a loopback address nothing listens
 /// on — `db::build_pool` (lazy) accepts it without any network attempt, and
@@ -29,6 +31,11 @@ pub fn test_config() -> AppConfig {
             razorpay_webhook_secret: None,
             razorpay_monthly_plan_id: None,
             razorpay_yearly_plan_id: None,
+        },
+        reconciliation: ReconciliationConfig {
+            interval_secs: 15 * 60,
+            batch_size: 100,
+            max_age_hours: 2,
         },
     }
 }

@@ -10,16 +10,23 @@
 //! module is only the scheduling wrapper, kept deliberately thin so the
 //! logic itself is testable (§12.4) without a running scheduler.
 
+use crate::config::ReconciliationConfig;
 use crate::service::{PaymentOperationError, ReconciliationSummary};
 use crate::state::AppState;
 use std::future::Future;
 use std::time::Duration;
 
-/// 15 minutes (`PHASE4_DESIGN.md` §14 item 8, confirmed, fixed value) —
+/// The scheduler tick interval, from `RECONCILIATION_INTERVAL_SECS`
+/// (`config::ReconciliationConfig`, Phase 4K.4) — previously a fixed
+/// `INTERVAL` constant of 15 minutes (`PHASE4_DESIGN.md` §14 item 8:
 /// "frequent enough that a lost webhook is caught well within any
 /// reasonable customer-support SLA, infrequent enough to stay well clear
-/// of Razorpay's API rate limits."
-const INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// of Razorpay's API rate limits"). That value is still the default when
+/// the variable is unset; factored into its own function so the mapping
+/// is testable without a running scheduler or a real `AppState`/database.
+fn interval_from_config(config: &ReconciliationConfig) -> Duration {
+    Duration::from_secs(config.interval_secs)
+}
 
 /// Bounds a single `reconcile_once` run (production readiness audit HIGH
 /// finding #5) — without it, a hung Razorpay call inside
@@ -44,7 +51,8 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 /// to keep serving normal traffic.
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(INTERVAL);
+        let mut interval =
+            tokio::time::interval(interval_from_config(&state.config.reconciliation));
         loop {
             interval.tick().await;
             run_once_with_timeout(RUN_TIMEOUT, state.payment_service.reconcile_once()).await;
@@ -112,8 +120,23 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn interval_matches_the_confirmed_fifteen_minute_design_value() {
-        assert_eq!(INTERVAL, Duration::from_secs(900));
+    fn interval_defaults_still_match_the_previously_hardcoded_fifteen_minutes() {
+        let config = ReconciliationConfig {
+            interval_secs: 15 * 60,
+            batch_size: 100,
+            max_age_hours: 2,
+        };
+        assert_eq!(interval_from_config(&config), Duration::from_secs(900));
+    }
+
+    #[test]
+    fn interval_uses_the_configured_reconciliation_interval_seconds() {
+        let config = ReconciliationConfig {
+            interval_secs: 42,
+            batch_size: 100,
+            max_age_hours: 2,
+        };
+        assert_eq!(interval_from_config(&config), Duration::from_secs(42));
     }
 
     #[test]
