@@ -44,6 +44,48 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateE
     MIGRATOR.run(pool).await
 }
 
+/// Whether `e` is a Postgres "insufficient privilege" error (SQLSTATE
+/// `42501`) — e.g. `ALTER TABLE` failing under a role that isn't the
+/// table's owner (Phase 4L.3, production validation, CRITICAL). Used only
+/// to decide whether to print an actionable hint alongside the raw error;
+/// never changes whether `run_migrations` itself fails.
+pub fn is_insufficient_privilege_error(e: &sqlx::migrate::MigrateError) -> bool {
+    match e {
+        sqlx::migrate::MigrateError::Execute(inner) => {
+            is_insufficient_privilege_error_from_sqlx(inner)
+        }
+        _ => false,
+    }
+}
+
+/// The actual SQLSTATE check `is_insufficient_privilege_error` delegates
+/// to — a separate `pub` function (rather than folded inline) so it's
+/// directly testable against a real Postgres error from a plain failed
+/// query (`server/tests/least_privilege_role.rs`), without needing to
+/// construct a synthetic `sqlx::migrate::Migrator` just to get a
+/// `MigrateError`.
+pub fn is_insufficient_privilege_error_from_sqlx(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::Database(db_err) => db_err.code().as_deref() == Some("42501"),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod privilege_error_tests {
+    use super::is_insufficient_privilege_error_from_sqlx;
+
+    #[test]
+    fn non_database_errors_are_never_treated_as_insufficient_privilege() {
+        // `sqlx::Error::PoolTimedOut` needs no live connection to construct
+        // — proves the non-Database branch stays `false` rather than
+        // panicking or guessing.
+        assert!(!is_insufficient_privilege_error_from_sqlx(
+            &sqlx::Error::PoolTimedOut
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

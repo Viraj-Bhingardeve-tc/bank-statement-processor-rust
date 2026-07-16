@@ -97,6 +97,26 @@ async fn main() {
     // level, not silently skipped here.
     if let Err(e) = db::run_migrations(&pool).await {
         tracing::error!(error = %e, "database migration failed");
+        // Phase 4L.3 (production validation, CRITICAL): a schema-altering
+        // migration (e.g. migrations/0004_add_payment_dispute_support.sql's
+        // `ALTER TABLE`) requires table *ownership*, which the restricted
+        // `license_server_app` role (migrations/0003_least_privilege_app_role.sql)
+        // deliberately never has — by design, not an oversight; granting it
+        // would undo the whole point of that migration. An operator who
+        // already switched `DATABASE_URL` to that role (the documented,
+        // recommended sequence) hits exactly this the moment they deploy a
+        // build containing a new ALTER-shaped migration: the raw Postgres
+        // "permission denied for table ..." error above is accurate but not
+        // self-explanatory, so it's paired with the actual remediation here
+        // rather than leaving an operator to rediscover it during an outage.
+        if db::is_insufficient_privilege_error(&e) {
+            tracing::error!(
+                "this looks like a schema-altering migration failing against the restricted \
+                 least-privilege role — see server/README.md's \"Database roles and least \
+                 privilege\" section: temporarily point DATABASE_URL at the admin/superuser \
+                 account, redeploy once to apply pending migrations, then switch back"
+            );
+        }
         std::process::exit(1);
     }
     tracing::info!("database migrations applied");

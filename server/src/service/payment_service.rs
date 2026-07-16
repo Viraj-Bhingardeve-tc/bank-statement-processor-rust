@@ -288,6 +288,25 @@ impl PaymentService {
             tracing::warn!(provider_ref = %provider_ref, "payment.failed webhook references an unknown payment; ignoring");
             return Ok(WebhookMutation::None);
         };
+        // Phase 4L.3 (production validation, CRITICAL): a genuine "this
+        // attempt failed" transition only ever makes sense from `Pending`.
+        // Razorpay can redeliver/reorder webhooks — a `payment.failed`
+        // arriving *after* the same payment's `payment.captured` (network
+        // reordering, a retried delivery) previously overwrote
+        // `payments.status` back to `failed` unconditionally, silently
+        // forking the stored status away from reality (subscription/
+        // license stayed untouched, so support/finance would see a
+        // "failed" payment that actually funded an active license). Any
+        // other current status means this event is stale/out of order —
+        // ignored, not applied.
+        if payment.status != PaymentStatus::Pending {
+            tracing::warn!(
+                provider_ref = %provider_ref,
+                current_status = %payment.status,
+                "payment.failed webhook arrived for a payment no longer Pending; ignoring as out-of-order rather than overwriting its status"
+            );
+            return Ok(WebhookMutation::None);
+        }
         Ok(WebhookMutation::MarkPaymentFailed {
             payment_id: payment.id,
         })
@@ -362,6 +381,35 @@ impl PaymentService {
             tracing::warn!(provider_ref = %provider_ref, "webhook references an unknown payment; ignoring (no local record)");
             return Ok(WebhookMutation::None);
         };
+
+        // Phase 4L.3 (production validation, CRITICAL): `payment.captured`/
+        // `payment_link.paid`/`subscription.activated`/`.charged` can all
+        // redeliver or arrive out of order. Without this guard, a
+        // redelivery landing *after* `refund.created` or a lost dispute
+        // (`payment.dispute.closed`, merchant lost) unconditionally
+        // reactivated the subscription and license — silently reviving
+        // access for a payment that was refunded or lost its dispute, an
+        // idempotency-key check alone can't catch since a genuine Razorpay
+        // redelivery carries a *different* event_id than the original.
+        // `Refunded`/`Disputed` are only ever left by `resolve_refund`/
+        // `resolve_dispute_created`, both deliberate terminal-or-interim
+        // outcomes — the only legitimate way out of `Disputed` is
+        // `resolve_dispute_closed` (merchant won), never a re-activation
+        // event. Every other current status (`Pending`, `Failed`,
+        // `Succeeded`) still activates normally, including the ordinary
+        // "failed attempt, customer retried, this one succeeded" and
+        // renewal-extends-an-existing-license cases below.
+        if matches!(
+            payment.status,
+            PaymentStatus::Refunded | PaymentStatus::Disputed
+        ) {
+            tracing::warn!(
+                provider_ref = %provider_ref,
+                current_status = %payment.status,
+                "activation-shaped webhook arrived for a payment already refunded or disputed; ignoring as out-of-order rather than reviving it"
+            );
+            return Ok(WebhookMutation::None);
+        }
 
         let Some(subscription) = self
             .subscription_repository
@@ -604,9 +652,7 @@ impl PaymentService {
     ) -> Result<bool, PaymentOperationError> {
         let Some(razorpay_status) = map_razorpay_payment_status(&razorpay_payment.status) else {
             // An unrecognized-or-unhandled Razorpay status (e.g.
-            // "authorized", "refunded" — the latter has no corresponding
-            // webhook handler in this phase either, see PHASE4_DESIGN.md
-            // §4's event list). Nothing to heal against.
+            // "authorized") — nothing to heal against.
             return Ok(false);
         };
 
@@ -652,8 +698,20 @@ impl PaymentService {
         let event_type = match razorpay_status {
             PaymentStatus::Succeeded => "payment.captured",
             PaymentStatus::Failed => "payment.failed",
-            // Only captured/failed are reachable here — see
-            // `map_razorpay_payment_status`.
+            // Phase 4L.3 (production validation, HIGH): a lost
+            // `refund.created`/`.processed` webhook previously had no
+            // reconciliation backstop at all — `map_razorpay_payment_status`
+            // dropped "refunded" entirely, so a payment refunded at
+            // Razorpay while this server's webhook never arrived (or
+            // failed) stayed `Succeeded`/license `Active` forever, with
+            // no self-healing path. `resolve_refund` reads
+            // `payload.payment.entity.id` (`extract_entity_id`) — already
+            // exactly what the synthetic payload below provides, so no
+            // payload-shape change is needed for this to work.
+            PaymentStatus::Refunded => "refund.created",
+            // `Pending`/`Disputed` have no corresponding Razorpay payments-
+            // list status this maps to (see `map_razorpay_payment_status`),
+            // so are unreachable here.
             _ => return Ok(false),
         };
         let event_id = format!(
@@ -700,12 +758,21 @@ pub struct ReconciliationSummary {
 /// implies, for the statuses reconciliation actually knows how to heal
 /// against (matching `process_webhook_event`'s own handled event types —
 /// see this module's doc comment). Any other Razorpay status (e.g.
-/// `"authorized"`, `"refunded"`) has no corresponding webhook handler in
-/// this phase, so reconciliation deliberately doesn't attempt one either.
+/// `"authorized"`) has no corresponding webhook handler in this phase, so
+/// reconciliation deliberately doesn't attempt one either.
+///
+/// `"refunded"` (Phase 4L.3, production validation, HIGH) was previously
+/// dropped here — a lost `refund.*` webhook had no reconciliation
+/// backstop at all, unlike every other event type. `payment.dispute.*`
+/// still has none: Razorpay's payments-list API (what reconciliation
+/// calls) reports payment status, not dispute status, so an open/lost
+/// dispute isn't observable from this endpoint at all — only a real
+/// `payment.dispute.*` webhook can heal that gap.
 fn map_razorpay_payment_status(status: &str) -> Option<PaymentStatus> {
     match status {
         "captured" => Some(PaymentStatus::Succeeded),
         "failed" => Some(PaymentStatus::Failed),
+        "refunded" => Some(PaymentStatus::Refunded),
         _ => None,
     }
 }
@@ -1718,6 +1785,35 @@ mod tests {
         );
     }
 
+    /// Phase 4L.3 (production validation, CRITICAL): Razorpay can redeliver
+    /// or reorder webhooks — a `payment.failed` arriving *after* the same
+    /// payment already succeeded (network reordering, a retried delivery)
+    /// must not overwrite `payments.status` back to `failed`. `event_id`
+    /// idempotency alone doesn't catch this: a genuine redelivery carries a
+    /// different `event_id` than the original `payment.captured`.
+    #[tokio::test]
+    async fn payment_failed_arriving_after_the_payment_already_succeeded_is_ignored() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Succeeded);
+        let (service, payments, _subscriptions, _licenses) =
+            service_with_reconciliation(vec![payment], vec![subscription], vec![], vec![]);
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.failed".to_string(),
+            payload: json!({ "payment": { "entity": { "id": "pay_xyz", "order_id": "order_abc" } } }),
+        };
+        service
+            .process_webhook_event("evt_late_failed", payload)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Succeeded,
+            "an out-of-order payment.failed must not downgrade an already-succeeded payment"
+        );
+    }
+
     #[tokio::test]
     async fn an_unrecognized_event_type_is_acknowledged_without_error_or_action() {
         let (service, ..) = service_with(vec![], vec![], vec![], ok_checkout());
@@ -2143,6 +2239,79 @@ mod tests {
         assert_eq!(license.status, LicenseRecordStatus::Revoked);
     }
 
+    /// Phase 4L.3 (production validation, CRITICAL): a `payment.captured`/
+    /// `payment_link.paid`/`subscription.activated`/`.charged` redelivery
+    /// arriving *after* `refund.created` already ran must not silently
+    /// revive the refunded payment or the revoked license. `event_id`
+    /// idempotency doesn't catch this — a genuine Razorpay redelivery of
+    /// the original capture carries a *different* event_id than the
+    /// refund, so `claim_and_apply` sees it as a brand-new event to apply.
+    #[tokio::test]
+    async fn payment_captured_redelivered_after_a_refund_does_not_revive_the_payment_or_license() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Refunded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Revoked);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![subscription], vec![license], vec![]);
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({ "payment": { "entity": { "id": "pay_xyz", "order_id": "order_abc" } } }),
+        };
+        service
+            .process_webhook_event("evt_redelivered_capture", payload)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Refunded,
+            "a redelivered capture must not revive an already-refunded payment"
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(
+            license.status,
+            LicenseRecordStatus::Revoked,
+            "the license must stay revoked"
+        );
+    }
+
+    /// Same guard, from the `Disputed` side: a redelivered activation must
+    /// not silently clear an open dispute — only `resolve_dispute_closed`
+    /// (a real merchant-won resolution) may do that.
+    #[tokio::test]
+    async fn subscription_charged_redelivered_during_an_open_dispute_does_not_clear_it() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_payment(1, 10, "sub_abc", PaymentStatus::Disputed);
+        let license = sample_license(50, 10, LicenseRecordStatus::Suspended);
+        let (service, payments, _subscriptions, licenses) =
+            service_with_reconciliation(vec![payment], vec![subscription], vec![license], vec![]);
+
+        let payload = RazorpayWebhookPayload {
+            event: "subscription.charged".to_string(),
+            payload: json!({
+                "subscription": { "entity": { "id": "sub_abc" } },
+                "payment": { "entity": { "id": "pay_xyz" } }
+            }),
+        };
+        service
+            .process_webhook_event("evt_redelivered_charge", payload)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payments.payments.lock().unwrap()[0].status,
+            PaymentStatus::Disputed,
+            "a redelivered activation must not clear an open dispute"
+        );
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(
+            license.status,
+            LicenseRecordStatus::Suspended,
+            "the license must stay suspended while the dispute is open"
+        );
+    }
+
     #[tokio::test]
     async fn dispute_created_marks_the_payment_disputed_and_suspends_the_license() {
         let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
@@ -2444,6 +2613,49 @@ mod tests {
         assert!(
             license.is_some(),
             "reconciliation must have issued a license"
+        );
+    }
+
+    /// Phase 4L.3 (production validation, HIGH): a lost `refund.created`/
+    /// `.processed` webhook previously had no reconciliation backstop —
+    /// `map_razorpay_payment_status` dropped `"refunded"` entirely, so a
+    /// payment refunded at Razorpay while the webhook never arrived (or
+    /// failed) stayed `Succeeded`, license `Active`, forever. Proves
+    /// reconciliation now heals this the same way it already healed a
+    /// lost `payment.captured`/`.failed`.
+    #[tokio::test]
+    async fn reconcile_once_heals_a_refund_no_webhook_ever_arrived_for() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_activated_payment(1, 10, "pay_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, payments, _subscriptions, licenses) = service_with_reconciliation(
+            vec![payment],
+            vec![subscription],
+            vec![license],
+            vec![razorpay_payment(
+                "pay_xyz",
+                Some("sub_checkout_ref"),
+                "refunded",
+            )],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(
+            summary,
+            ReconciliationSummary {
+                checked: 1,
+                healed: 1
+            }
+        );
+
+        let stored_payments = payments.payments.lock().unwrap().clone();
+        assert_eq!(stored_payments[0].status, PaymentStatus::Refunded);
+
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(
+            license.status,
+            LicenseRecordStatus::Revoked,
+            "reconciliation must have revoked the license, same as a real refund.created webhook would"
         );
     }
 

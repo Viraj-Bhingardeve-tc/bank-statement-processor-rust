@@ -26,6 +26,34 @@ pub struct LicenseService {
     subscription_repository: Arc<dyn SubscriptionRepository>,
 }
 
+/// The license's status as it should be *reported*, correcting for a
+/// natural time-based expiry the stored `licenses.status` column was
+/// never updated to reflect (Phase 4L.3, production validation, HIGH).
+///
+/// Nothing in this codebase proactively flips `status` to `Expired` when
+/// `expires_at` passes — only an explicit webhook-driven transition
+/// (revoke/refund/dispute) or a fresh `Insert`/`Extend` at activation-time
+/// ever writes `licenses.status`. If a subscription's renewal webhooks
+/// simply stop arriving (Razorpay outage, a cancelled auto-renew with no
+/// further billing, ...), a license stored as `Active` would otherwise be
+/// reported `Active` by `/validate-license`/`/heartbeat` forever, even
+/// though `expires_at` — already computed, already stored, already
+/// returned in the response — says otherwise. Only overrides the `Active`
+/// case: `Suspended`/`Revoked`/an already-stored `Expired` are already
+/// correctly non-active for their own reasons and must not be
+/// second-guessed here. Read-only — never writes `licenses.status` itself,
+/// so this can't race with or duplicate a webhook's own transition.
+fn effective_status(license: &License) -> LicenseRecordStatus {
+    if license.status == LicenseRecordStatus::Active {
+        if let Some(expires_at) = license.expires_at {
+            if expires_at <= Utc::now() {
+                return LicenseRecordStatus::Expired;
+            }
+        }
+    }
+    license.status
+}
+
 impl LicenseService {
     pub fn new(
         license_repository: Arc<dyn LicenseRepository>,
@@ -76,7 +104,7 @@ impl LicenseService {
             .await?
             .ok_or(LicenseOperationError::LicenseNotFound)?;
 
-        match license.status {
+        match effective_status(&license) {
             LicenseRecordStatus::Revoked => return Err(LicenseOperationError::LicenseRevoked),
             LicenseRecordStatus::Expired => return Err(LicenseOperationError::LicenseExpired),
             // A suspended license may still be activated — validate-license
@@ -137,7 +165,7 @@ impl LicenseService {
         self.device_repository.touch_last_seen(device.id).await?;
 
         Ok(ValidationOutcome {
-            status: license.status,
+            status: effective_status(&license),
             expires_at: license.expires_at,
             grace_period_days: license.grace_period_days,
             fingerprint_matched: device.machine_fingerprint == machine_fingerprint,
@@ -163,7 +191,7 @@ impl LicenseService {
         self.device_repository.touch_last_seen(device.id).await?;
 
         Ok(HeartbeatOutcome {
-            status: license.status,
+            status: effective_status(&license),
         })
     }
 
@@ -749,6 +777,27 @@ mod tests {
         assert!(matches!(err, LicenseOperationError::LicenseExpired));
     }
 
+    /// Phase 4L.3 (production validation, HIGH): same `effective_status`
+    /// correction as `/validate-license`/`/heartbeat` — a *new* device
+    /// activation must also be rejected once `expires_at` has passed, not
+    /// only once some other process has gotten around to writing
+    /// `status = Expired`.
+    #[tokio::test]
+    async fn activate_a_license_whose_expires_at_has_passed_is_rejected_even_though_stored_status_is_still_active(
+    ) {
+        let license = License {
+            expires_at: Some(Utc::now() - chrono::Duration::days(1)),
+            ..sample_license(LicenseRecordStatus::Active, 1)
+        };
+        let service = service_with(vec![license], vec![], vec![]);
+
+        let err = service
+            .activate("TEST-KEY", Uuid::new_v4(), "fp", "label")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::LicenseExpired));
+    }
+
     #[tokio::test]
     async fn activate_a_fresh_device_succeeds_and_returns_subscription_terms() {
         let service = service_with(
@@ -962,6 +1011,112 @@ mod tests {
 
         let outcome = service.heartbeat(1, device_id).await.unwrap();
         assert_eq!(outcome.status, LicenseRecordStatus::Active);
+    }
+
+    /// Phase 4L.3 (production validation, HIGH): nothing else in this
+    /// codebase ever flips a license's stored `status` from `Active` to
+    /// `Expired` when `expires_at` passes on its own — only an explicit
+    /// webhook-driven transition or a fresh activation ever writes
+    /// `licenses.status`. If a subscription's renewal webhooks simply stop
+    /// arriving, this proves `/heartbeat` (and `/validate-license`, same
+    /// `effective_status` helper) still correctly reports `Expired` by
+    /// comparing `expires_at` against now, rather than trusting the stale
+    /// stored `Active` status forever.
+    #[tokio::test]
+    async fn heartbeat_reports_expired_when_expires_at_has_passed_even_though_stored_status_is_still_active(
+    ) {
+        let device_id = Uuid::new_v4();
+        let license = License {
+            expires_at: Some(Utc::now() - chrono::Duration::days(1)),
+            ..sample_license(LicenseRecordStatus::Active, 1)
+        };
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Expired);
+    }
+
+    #[tokio::test]
+    async fn validate_reports_expired_when_expires_at_has_passed_even_though_stored_status_is_still_active(
+    ) {
+        let device_id = Uuid::new_v4();
+        let license = License {
+            expires_at: Some(Utc::now() - chrono::Duration::days(1)),
+            ..sample_license(LicenseRecordStatus::Active, 1)
+        };
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let outcome = service.validate(1, device_id, "fp").await.unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Expired);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_still_reports_active_when_expires_at_is_in_the_future() {
+        let device_id = Uuid::new_v4();
+        let license = License {
+            expires_at: Some(Utc::now() + chrono::Duration::days(30)),
+            ..sample_license(LicenseRecordStatus::Active, 1)
+        };
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_does_not_override_a_suspended_license_even_if_expires_at_has_passed() {
+        // A dispute-suspended license shouldn't be reclassified as merely
+        // "expired" — Suspended already correctly signals non-active for
+        // its own (different, more urgent) reason.
+        let device_id = Uuid::new_v4();
+        let license = License {
+            expires_at: Some(Utc::now() - chrono::Duration::days(1)),
+            ..sample_license(LicenseRecordStatus::Suspended, 1)
+        };
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Suspended);
     }
 
     #[tokio::test]

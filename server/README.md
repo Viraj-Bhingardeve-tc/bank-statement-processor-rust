@@ -310,6 +310,30 @@ Run `server/deploy/set-app-db-password.sh` again with a new `APP_DB_PASSWORD`, u
 the new value (`env_file` is only read at container start, not live-reloaded). The old password
 stops working the instant `ALTER ROLE` completes, so restart promptly to avoid a connection gap.
 
+### Deploying a schema-altering migration (Phase 4L.3)
+
+`license_server_app` deliberately has no `ALTER`/ownership on the tables it uses (see "Why least
+privilege is used" above) — only DML plus the one documented `CREATE ON SCHEMA public` exception.
+A future migration that runs `ALTER TABLE` (adding/dropping a column or constraint — e.g.
+`migrations/0004_add_payment_dispute_support.sql` was the first to do this) **will fail** with a
+Postgres "permission denied" (SQLSTATE `42501`) error if `DATABASE_URL` is already pointed at
+`license_server_app` when it runs — `db::run_migrations` (called unconditionally at every startup)
+has no way around this, by design; granting the role table ownership would undo the whole point of
+this section. `license-server` detects this specific case at startup and logs an actionable hint
+alongside the raw Postgres error, but the safe deploy sequence for any release containing a new
+`ALTER TABLE`-shaped migration is:
+
+1. Temporarily point `server/.env`'s `DATABASE_URL` back at the admin/superuser account (same
+   value used in "First deployment" step 3 above).
+2. Deploy/restart `license-server` once — this applies the pending migration(s) while still
+   connected as an account that owns the tables.
+3. Confirm the logs show "database migrations applied" with no error.
+4. Switch `DATABASE_URL` back to `license_server_app` and restart again.
+
+A purely additive migration (new table, new column-less-DEFAULT-only-via-a-separate-`UPDATE`
+pattern, etc.) does not need this — only `ALTER TABLE`/`DROP`/constraint changes on existing,
+already-owned-by-the-admin-account tables do.
+
 ## Configuration
 
 All configuration is environment variables, read once at startup

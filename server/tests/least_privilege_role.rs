@@ -180,3 +180,34 @@ async fn app_role_has_no_dangerous_instance_level_privileges() {
         "license_server_app must never be able to BYPASSRLS"
     );
 }
+
+/// Phase 4L.3 (production validation, CRITICAL): reproduces the exact
+/// production failure — a schema-altering migration (an `ALTER TABLE`,
+/// like `migrations/0004_add_payment_dispute_support.sql`'s) running
+/// under `license_server_app` after `DATABASE_URL` has already been
+/// switched to it, per the documented deploy sequence. Confirms both that
+/// this genuinely fails under the restricted role (proving the
+/// ownership-gap finding is real, not theoretical) and that
+/// `db::is_insufficient_privilege_error` correctly recognizes the
+/// resulting error, so the actionable hint in `main.rs` actually fires
+/// for it.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres, connected as an admin account — see PHASE4_DESIGN.md §9"]
+async fn altering_a_table_under_the_app_role_fails_with_insufficient_privilege() {
+    let (_admin_pool, admin_database_url) = admin_pool_with_role_ready().await;
+    let app_url = app_role_database_url(&admin_database_url, TEST_APP_PASSWORD);
+    let app_pool = db::build_pool(&app_url, 5).expect("app role DATABASE_URL must be well-formed");
+
+    let result = sqlx::query("ALTER TABLE users ADD COLUMN least_privilege_probe TEXT")
+        .execute(&app_pool)
+        .await;
+
+    let err = result.expect_err(
+        "license_server_app must NOT be able to ALTER TABLE — if this now succeeds, the role has \
+         somehow gained ownership/ALTER privilege, which defeats the least-privilege design",
+    );
+    assert!(
+        db::is_insufficient_privilege_error_from_sqlx(&err),
+        "expected a SQLSTATE 42501 insufficient-privilege error, got: {err:?}"
+    );
+}
