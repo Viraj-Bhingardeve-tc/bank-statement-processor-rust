@@ -77,6 +77,18 @@ impl LoginState {
     fn exhausted(&self) -> bool { self.attempts >= self.max }
 }
 
+/// Result of a backgrounded `license::activate` + re-`enforce` pass
+/// (Phase 4K.3), computed on a worker thread while the DB lock is held,
+/// then applied to the UI afterward via `invoke_from_event_loop` — plain
+/// data only, so the lock never needs to cross that hop.
+enum LicenseActivateOutcome {
+    Activated { status_text: String },
+    ActivatedButBlocked { reason: String },
+    NoDatabase,
+    NoServer,
+    Failed(String),
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "slint-ui")]
@@ -1649,47 +1661,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
 
-                h.set_login_loading(true);
                 let ok = auth::validate_credentials(&email, &password);
-                h.set_login_loading(false);
                 if ok {
                     log::info!("Login successful for {}", email);
+                    h.set_login_error("".into());
                     // Phase 4K.3 startup enforcement gate — the only place
                     // `logged_in` is ever set `true` (see this phase's
                     // audit: every path into the full application goes
                     // through this one callback), so gating here alone
-                    // closes every bypass.
-                    let db = db_ref.lock().unwrap();
-                    match db.as_ref() {
-                        Some(conn) => match license::enforce(conn, license_client.as_ref()) {
-                            license::EnforcementOutcome::Allowed => {
-                                h.set_logged_in(true);
-                                h.set_license_blocked(false);
-                                h.set_login_error("".into());
+                    // closes every bypass. `license::enforce` may need a
+                    // network round trip (`HttpLicenseClient`), so it's
+                    // backgrounded off the UI thread — same
+                    // `thread::spawn` + `invoke_from_event_loop` pattern
+                    // the periodic revalidation timer already uses below —
+                    // rather than blocking the whole UI for however long
+                    // that takes. `login_loading` now spans the network
+                    // wait instead of just the (instant) password check.
+                    h.set_login_loading(true);
+                    let handle_for_result = handle.clone();
+                    let db_ref            = db_ref.clone();
+                    let license_client    = license_client.clone();
+                    std::thread::spawn(move || {
+                        let outcome = {
+                            let db = db_ref.lock().unwrap();
+                            db.as_ref()
+                                .map(|conn| license::enforce(conn, license_client.as_ref()))
+                        };
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(h) = handle_for_result.upgrade() else { return };
+                            h.set_login_loading(false);
+                            match outcome {
+                                Some(license::EnforcementOutcome::Allowed) => {
+                                    h.set_logged_in(true);
+                                    h.set_license_blocked(false);
+                                }
+                                Some(license::EnforcementOutcome::Blocked { reason, revoked }) => {
+                                    log::warn!(
+                                        "[license] blocking login (revoked={revoked}): {reason}"
+                                    );
+                                    h.set_logged_in(false);
+                                    h.set_license_blocked(true);
+                                    h.set_license_status_text(SharedString::from(reason.as_str()));
+                                }
+                                None => {
+                                    // No database open at all — can't
+                                    // evaluate license state. Fail closed
+                                    // rather than silently granting access
+                                    // (LICENSE_SECURITY_REVIEW.md §6).
+                                    log::error!(
+                                        "[license] cannot enforce — database is not open"
+                                    );
+                                    h.set_logged_in(false);
+                                    h.set_license_blocked(true);
+                                    h.set_license_status_text(SharedString::from(
+                                        "License status unavailable — database is not open.",
+                                    ));
+                                }
                             }
-                            license::EnforcementOutcome::Blocked { reason, revoked } => {
-                                log::warn!(
-                                    "[license] blocking login (revoked={revoked}): {reason}"
-                                );
-                                h.set_logged_in(false);
-                                h.set_license_blocked(true);
-                                h.set_license_status_text(SharedString::from(reason.as_str()));
-                                h.set_login_error("".into());
-                            }
-                        },
-                        None => {
-                            // No database open at all — can't evaluate
-                            // license state. Fail closed rather than
-                            // silently granting access
-                            // (LICENSE_SECURITY_REVIEW.md §6).
-                            log::error!("[license] cannot enforce — database is not open");
-                            h.set_logged_in(false);
-                            h.set_license_blocked(true);
-                            h.set_license_status_text(SharedString::from(
-                                "License status unavailable — database is not open.",
-                            ));
-                        }
-                    }
+                        });
+                    });
                 } else {
                     ls.record_failure();
                     let remaining = ls.remaining();
@@ -3790,56 +3820,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.on_do_license_activate(move || {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 let key = h.get_license_key_input().to_string();
-                let key = key.trim();
+                let key = key.trim().to_string();
                 if key.is_empty() {
                     h.set_license_activate_result(SharedString::from("Enter a license key first."));
                     return;
                 }
-                let db = db_ref.lock().unwrap();
-                let Some(conn) = db.as_ref() else {
-                    h.set_license_activate_result(SharedString::from(
-                        "Activation unavailable — database is not open.",
-                    ));
-                    return;
-                };
-                match license::activate(conn, license_client.as_ref(), key) {
-                    Ok(status) => {
-                        h.set_license_activate_result(SharedString::from("License activated."));
-                        h.set_license_key_input(SharedString::from(""));
 
-                        match license::enforce(conn, license_client.as_ref()) {
-                            license::EnforcementOutcome::Allowed => {
-                                let record = license::storage::load_local_license(conn).ok().flatten();
-                                h.set_license_status_text(SharedString::from(
-                                    license::describe(status, record.as_ref()).as_str(),
-                                ));
-                                h.set_logged_in(true);
-                                h.set_license_blocked(false);
-                            }
-                            license::EnforcementOutcome::Blocked { reason, .. } => {
+                // `license::activate`/`enforce` both need the real
+                // licensing server round trip (`HttpLicenseClient`), so
+                // this whole lookup is backgrounded off the UI thread —
+                // same `thread::spawn` + `invoke_from_event_loop` pattern
+                // as the login gate above and the periodic revalidation
+                // timer below — computing one `LicenseActivateOutcome`
+                // inside the locked DB scope, then applying it to the UI
+                // afterward, so the DB lock is never held across the
+                // `invoke_from_event_loop` hop.
+                let handle_for_result = handle.clone();
+                let db_ref            = db_ref.clone();
+                let license_client    = license_client.clone();
+                std::thread::spawn(move || {
+                    let db = db_ref.lock().unwrap();
+                    let outcome = match db.as_ref() {
+                        None => LicenseActivateOutcome::NoDatabase,
+                        Some(conn) => match license::activate(conn, license_client.as_ref(), &key) {
+                            Ok(status) => match license::enforce(conn, license_client.as_ref()) {
+                                license::EnforcementOutcome::Allowed => {
+                                    let record =
+                                        license::storage::load_local_license(conn).ok().flatten();
+                                    LicenseActivateOutcome::Activated {
+                                        status_text: license::describe(status, record.as_ref()),
+                                    }
+                                }
                                 // A freshly activated license that still
                                 // doesn't pass enforcement (e.g. the server
                                 // considers it suspended) — stay blocked
                                 // and show why, rather than a bare
                                 // "License activated." with no explanation
                                 // for why the app is still locked.
+                                license::EnforcementOutcome::Blocked { reason, .. } => {
+                                    LicenseActivateOutcome::ActivatedButBlocked { reason }
+                                }
+                            },
+                            Err(license::ApiError::NoServerConfigured) => {
+                                LicenseActivateOutcome::NoServer
+                            }
+                            Err(e) => LicenseActivateOutcome::Failed(format!("{e:?}")),
+                        },
+                    };
+                    drop(db);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(h) = handle_for_result.upgrade() else { return };
+                        match outcome {
+                            LicenseActivateOutcome::Activated { status_text } => {
+                                h.set_license_activate_result(SharedString::from(
+                                    "License activated successfully.",
+                                ));
+                                h.set_license_key_input(SharedString::from(""));
+                                h.set_license_status_text(SharedString::from(status_text.as_str()));
+                                h.set_logged_in(true);
+                                h.set_license_blocked(false);
+                            }
+                            LicenseActivateOutcome::ActivatedButBlocked { reason } => {
+                                h.set_license_activate_result(SharedString::from(
+                                    "License activated successfully.",
+                                ));
+                                h.set_license_key_input(SharedString::from(""));
                                 h.set_license_status_text(SharedString::from(reason.as_str()));
                             }
+                            LicenseActivateOutcome::NoDatabase => {
+                                h.set_license_activate_result(SharedString::from(
+                                    "Activation unavailable — database is not open.",
+                                ));
+                            }
+                            LicenseActivateOutcome::NoServer => {
+                                log::info!(
+                                    "[license] activation attempted with no server configured yet"
+                                );
+                                h.set_license_activate_result(SharedString::from(
+                                    "No licensing server is configured — set LICENSE_SERVER_URL and restart.",
+                                ));
+                            }
+                            LicenseActivateOutcome::Failed(e) => {
+                                log::warn!("[license] activation failed: {e}");
+                                h.set_license_activate_result(SharedString::from(
+                                    format!("Activation failed: {e}").as_str(),
+                                ));
+                            }
                         }
-                    }
-                    Err(license::ApiError::NoServerConfigured) => {
-                        log::info!("[license] activation attempted with no server configured yet");
-                        h.set_license_activate_result(SharedString::from(
-                            "No licensing server is configured — set LICENSE_SERVER_URL and restart.",
-                        ));
-                    }
-                    Err(e) => {
-                        log::warn!("[license] activation failed: {:?}", e);
-                        h.set_license_activate_result(SharedString::from(
-                            format!("Activation failed: {e:?}").as_str(),
-                        ));
-                    }
-                }
+                    });
+                });
             });
         }
 
