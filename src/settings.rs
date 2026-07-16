@@ -10,26 +10,20 @@ use crate::db;
 // credential store instead (Windows Credential Manager / macOS Keychain /
 // Linux Secret Service via the `keyring` crate).
 const KEYRING_SERVICE: &str = "bank-statement-processor";
-// Tests use a distinct keyring entry so `cargo test` never reads/writes/deletes
-// the real credential a user has saved through the running app.
-#[cfg(not(test))]
+// Tests run against `credential_store::store()`'s in-memory backend (see
+// that module), never the real OS keyring, so no separate test username is
+// needed here to avoid colliding with a real user's saved credential.
 const KEYRING_USERNAME: &str = "ai_api_key";
-#[cfg(test)]
-const KEYRING_USERNAME: &str = "ai_api_key_test";
 /// Legacy plaintext settings-table key, retained only to find and purge
 /// pre-existing values left over from before this fix.
 const LEGACY_DB_KEY_AI_KEY: &str = "ai_api_key";
-
-fn keyring_entry() -> Option<keyring::Entry> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME).ok()
-}
 
 /// Reads the AI API key from the OS credential store. Returns an empty
 /// string if no key has been set yet or the platform store is unavailable —
 /// matching the previous plaintext default exactly.
 fn load_ai_key() -> String {
-    keyring_entry()
-        .and_then(|e| e.get_password().ok())
+    crate::credential_store::store()
+        .get_password(KEYRING_SERVICE, KEYRING_USERNAME)
         .unwrap_or_default()
 }
 
@@ -54,18 +48,18 @@ fn migrate_legacy_plaintext_ai_key(conn: &Connection) -> String {
 /// logged but not propagated as a hard error — mirrors how every other
 /// individual setting in `Settings::save` is best-effort.
 fn save_ai_key(key: &str) {
-    let Some(entry) = keyring_entry() else {
-        log::warn!("[Settings] no OS credential store available; AI API key not persisted");
-        return;
-    };
+    use crate::credential_store::CredentialError;
+    let store = crate::credential_store::store();
     let result = if key.is_empty() {
         // An empty key means "cleared" — delete rather than store an empty secret.
-        entry.delete_credential().or_else(|e| match e {
-            keyring::Error::NoEntry => Ok(()),
-            other => Err(other),
-        })
+        store
+            .delete_credential(KEYRING_SERVICE, KEYRING_USERNAME)
+            .or_else(|e| match e {
+                CredentialError::NoEntry => Ok(()),
+                other => Err(other),
+            })
     } else {
-        entry.set_password(key)
+        store.set_password(KEYRING_SERVICE, KEYRING_USERNAME, key)
     };
     if let Err(e) = result {
         log::error!("[Settings] failed to persist AI API key to OS credential store: {}", e);
@@ -184,9 +178,8 @@ mod tests {
     /// Cleans up the test keyring entry so repeated test runs start fresh
     /// regardless of pass/fail/panic in a previous run.
     fn clear_test_entry() {
-        if let Some(e) = keyring_entry() {
-            let _ = e.delete_credential();
-        }
+        let _ =
+            crate::credential_store::store().delete_credential(KEYRING_SERVICE, KEYRING_USERNAME);
     }
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {

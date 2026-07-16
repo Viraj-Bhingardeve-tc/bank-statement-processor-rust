@@ -103,6 +103,16 @@ default      = ["slint-ui", "ai"]
 slint-ui     = ["dep:slint", "dep:slint-build", "dep:rfd"]
 ai           = ["dep:reqwest"]
 excel-export = ["dep:umya-spreadsheet"]
+# Swaps `credential_store::store()` to the in-memory test backend even in a
+# non-`cfg(test)` build of the lib (see src/credential_store.rs). Needed
+# because integration tests under tests/*.rs link the lib as an ordinary,
+# non-test dependency, so `cfg(test)` alone never applies to that copy of
+# the lib — only this feature does. Never enabled in a release build; it's
+# picked up automatically by `cargo test --all-features` (what CI runs) so
+# the real OS keyring (Windows Credential Manager / macOS Keychain / Linux
+# Secret Service) is never touched by any test, including on a headless
+# Linux CI runner with no D-Bus session.
+test-keyring-mock = []
 
 # ── Build dependencies ────────────────────────────────────────────────────────
 [build-dependencies]

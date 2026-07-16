@@ -1,4 +1,5 @@
 // lib.rs — Public library surface for the Bank Statement Processor.
+mod credential_store;
 pub mod text_safety;
 pub mod parser;
 pub mod analytics;

@@ -61,12 +61,10 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 const KEYRING_SERVICE: &str = "bank-statement-processor";
-// Tests use a distinct keyring entry so `cargo test` never reads/writes/
-// deletes the real encryption key for a database a user is actually using.
-#[cfg(not(test))]
+// Tests run against `credential_store::store()`'s in-memory backend (see
+// that module), never the real OS keyring, so no separate test username is
+// needed here to avoid colliding with a real user's stored key.
 const KEYRING_USERNAME: &str = "db_encryption_key";
-#[cfg(test)]
-const KEYRING_USERNAME: &str = "db_encryption_key_test";
 
 // Every test anywhere in the crate that calls `db::open()` on a real file
 // path (not ":memory:") ends up touching the single shared OS keyring entry
@@ -82,18 +80,22 @@ pub(crate) static ENCRYPTION_KEYRING_TEST_LOCK: std::sync::Mutex<()> = std::sync
 /// `PRAGMA key`, generating and persisting a new random 256-bit key in the
 /// OS credential store on first use.
 fn key_literal() -> Result<String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .context("open OS credential store entry for db encryption key")?;
-    let hex = match entry.get_password() {
+    use crate::credential_store::CredentialError;
+    let store = crate::credential_store::store();
+    let hex = match store.get_password(KEYRING_SERVICE, KEYRING_USERNAME) {
         Ok(h) => h,
-        Err(keyring::Error::NoEntry) => {
+        Err(CredentialError::NoEntry) => {
             let hex = generate_key_hex();
-            entry
-                .set_password(&hex)
+            store
+                .set_password(KEYRING_SERVICE, KEYRING_USERNAME, &hex)
+                .map_err(|e| anyhow::anyhow!(e))
                 .context("store newly generated db encryption key in OS credential store")?;
             hex
         }
-        Err(e) => return Err(e).context("read db encryption key from OS credential store"),
+        Err(e) => {
+            return Err(anyhow::anyhow!(e))
+                .context("read db encryption key from OS credential store")
+        }
     };
     Ok(format!("x'{hex}'"))
 }
@@ -333,9 +335,8 @@ mod tests {
     }
 
     fn clear_test_key() {
-        if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME) {
-            let _ = e.delete_credential();
-        }
+        let _ =
+            crate::credential_store::store().delete_credential(KEYRING_SERVICE, KEYRING_USERNAME);
     }
 
     fn temp_path(name: &str) -> PathBuf {
