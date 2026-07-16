@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # rusqlite's "bundled-sqlcipher" feature (desktop crate, src/db/encryption.rs)
+  # needs an OpenSSL dev kit to link SQLCipher's crypto calls against.
+  # .cargo/config.toml's own [env] default (OPENSSL_DIR) points at a
+  # Windows-only PostgreSQL install path and applies whenever OPENSSL_DIR
+  # isn't already set in the process environment — that file's own comment
+  # says explicitly to override it here on CI runners instead of relying on
+  # it. Ubuntu's libssl-dev (installed below) lays out headers/libs under
+  # the multiarch path below, not a single combined $OPENSSL_DIR/{include,lib}
+  # tree, so both the combined and split forms are set: OPENSSL_DIR as a
+  # defensive fallback (its mere presence stops the Windows default from
+  # being injected at all), OPENSSL_LIB_DIR/OPENSSL_INCLUDE_DIR as the
+  # precise paths libsqlite3-sys's build script actually needs on Linux.
+  OPENSSL_DIR: /usr
+  OPENSSL_LIB_DIR: /usr/lib/x86_64-linux-gnu
+  OPENSSL_INCLUDE_DIR: /usr/include
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Desktop crate needs Slint's UI toolkit deps (fontconfig, xkbcommon,
+      # XCB) and rfd's native file-dialog deps (GTK3) to link, even though
+      # no display is ever opened in CI; the server crate's own TLS stack
+      # (sqlx's runtime-tokio-rustls) needs none of this, only the desktop
+      # crate's SQLCipher linkage does.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libssl-dev \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+
+      # --workspace: this repo's root Cargo.toml is both a package and a
+      # workspace root (members = ["protocol", "server"]) — Cargo's default
+      # run-set for that shape is the root package alone (see that file's
+      # own comment), so omitting --workspace here would silently skip
+      # linting the licensing/payment server and shared protocol crates
+      # entirely.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libssl-dev \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      # --workspace: see the clippy job's comment above — without it this
+      # would only run the desktop crate's tests and silently skip the
+      # server and protocol crates entirely.
+      - run: cargo test --workspace --all-features
