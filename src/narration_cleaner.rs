@@ -373,9 +373,14 @@ pub fn normalize_ledger_name(raw: &str) -> String {
     if words.len() >= 3 {
         let leading: HashSet<&str> = words[..2].iter().copied().collect();
         let mut cut = words.len();
-        for i in 2..words.len() {
-            if leading.contains(words[i]) { cut = i; break; }
+
+        for (i, w) in words.iter().copied().enumerate().skip(2) {
+            if leading.contains(w) {
+                cut = i;
+                break;
+            }
         }
+
         words.truncate(cut);
     }
 
