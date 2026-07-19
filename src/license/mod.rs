@@ -19,7 +19,10 @@ pub mod fingerprint;
 pub mod storage;
 pub mod validation;
 
-pub use client::{ApiError, HttpLicenseClient, LicenseApiClient, OfflineClient};
+pub use client::{ApiError, LicenseApiClient, OfflineClient};
+
+#[cfg(feature = "ai")]
+pub use client::HttpLicenseClient;
 pub use validation::LicenseStatus;
 
 use chrono::Utc;
