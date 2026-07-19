@@ -8,6 +8,16 @@
 
 ---
 
+> **STATUS UPDATE — 2026-07-19 (current `HEAD` = `85fff711`, now 9 commits ahead of the `146f7e2` this report audited):** This report's own §1 "Production Ready Items" findings on desktop license enforcement, the server crate, and the protocol crate all **remain valid and re-confirmed** as of current `HEAD` — `should_enforce()` still returns `true`, the real server and its endpoint set are unchanged in that respect, and `protocol/` continues to supply the shared request/response types both sides build against.
+>
+> Commit history since `146f7e2` (`caf5372`, `38a9b29`, `beb7ef7`, `0aa844f`, `99af102`, `0f2d4e4`, `128d679`, `82b24c8`, `78a9995`, `85fff711`) includes work with plausible bearing on two open items below, **neither independently re-verified line-by-line as part of this documentation-only update**:
+> - **H-1 (UTF-8 boundary panic risk):** commit `38a9b29`, "fix(core): harden UTF-8 handling against production crashes," appears to target exactly this issue.
+> - **H-4 (No CI/CD):** commit `0f2d4e4` added a GitHub Actions workflow (`fmt`/`clippy`/`test`, workspace-wide) — the CI-doesn't-exist half of H-4 is resolved. The other half is **not**: the workflow does not provision a Postgres service, so the Postgres-backed integration tests this finding specifically called out remain `#[ignore]`d and still do not run automatically on merge.
+>
+> No other item in §2–§5 (the Critical backup-encryption gap, the remaining eleven High items, or any Medium/Low item) was re-checked against current `HEAD` as part of this update. **The 68/100 score and the No-Go recommendation in §7–§8 should be treated as accurate for `146f7e2`, not as a current assessment** — a fresh full re-validation pass (the same five-workstream method this report used) is the appropriate way to get a current score, not an assumption that time-based progress closed the remaining items.
+
+---
+
 # 1. Production Ready Items
 
 | Item | Evidence | Status |

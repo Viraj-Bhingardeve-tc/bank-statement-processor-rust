@@ -1,7 +1,16 @@
 # License System Design — Phase 3A
 
-**Status:** Architecture + desktop-side implementation. No payment integration. No real server exists yet (API is specification-only — see `API_SPECIFICATION.md`).
+**Status:** Architecture + desktop-side implementation, as designed and built in Phase 3A. No payment integration was in scope for this document. **This "Status" line and §7 describe the state at Phase 3A time; both are superseded — see the status update immediately below.**
 **Scope:** This document covers the licensing/subscription architecture only. Payment gateway (Razorpay) integration is explicitly deferred to a later phase per the task instructions.
+
+---
+
+> **STATUS UPDATE — 2026-07-19 (current `HEAD` = `85fff711`):** Phase 4 work has since landed on top of this Phase 3A design. As of current `HEAD`:
+> - **A real license server exists** (`server/` crate), implementing the endpoints specified in `API_SPECIFICATION.md`.
+> - **`src/license/client.rs` now has a real `HttpLicenseClient`** alongside `OfflineClient` — §9 below, which describes `OfflineClient` as "the only implementation that exists today," is superseded.
+> - **The startup gate described in §7 as deliberately not blocking is now live:** `license::should_enforce()` returns `true`, and `enforce()` is called at login, at activation, and on a 24h periodic timer. §7's reasoning is retained below as the historical record of the original Phase 3A decision, not as current behavior.
+>
+> The architecture and entity model in §1–§6 and §8 remain accurate and unchanged.
 
 ---
 
@@ -89,7 +98,9 @@ The fingerprint is intentionally **not** used as the primary identity (that's th
 - The app **never requires internet on every launch** — a successful validation within the grace window is sufficient, matching the task's explicit requirement.
 - Clock-rollback protection: see `LICENSE_SECURITY_REVIEW.md` §1 — a naive `now − last_validated_at` is trivially defeated by turning the system clock back, so the desktop also tracks a monotonically-non-decreasing "highest timestamp ever observed" and treats any wall-clock read *behind* that watermark as suspicious (fails closed, not open).
 
-## 7. Deliberate scope decision: no startup gate yet
+## 7. Deliberate scope decision: no startup gate yet (Phase 3A — superseded, see status update at top of file)
+
+> **This section describes a Phase 3A decision that no longer reflects current behavior.** As of current `HEAD`, the gate below *is* live: `should_enforce()` returns `true` and `enforce()` blocks at login, activation, and a 24h periodic timer. The reasoning below is kept as the historical record of why the gate was originally deferred, not as a description of today's app.
 
 **The license status check is implemented and wired into startup, but it does not block login or app usage in this phase.** This is a considered decision, not an oversight, for three concrete reasons:
 
@@ -106,7 +117,7 @@ What *is* live today: `check_status` runs on every startup, is logged, and its r
 ## 9. Interfaces for future payment integration
 
 `src/license/client.rs` defines a `LicenseApiClient` trait (the 7 endpoints from the task spec as trait methods) with:
-- `OfflineClient` — the only implementation that exists today; every method returns `Err(ApiError::NoServerConfigured)` immediately, no network I/O attempted. This is what the app actually runs against right now.
-- A commented extension point documenting exactly where a future `HttpLicenseClient` (using the already-present `reqwest` dependency) and, later, a Razorpay webhook-driven payment flow plug in — without touching `license::mod`'s public API or any call site in `main.rs`.
+- `OfflineClient` — at Phase 3A time, the only implementation that existed; every method returns `Err(ApiError::NoServerConfigured)` immediately, no network I/O attempted. *(Superseded — see status update at top of file: a real `HttpLicenseClient` now exists alongside `OfflineClient`, which remains as the fallback used when `LICENSE_SERVER_URL` is unset.)*
+- A commented extension point documenting exactly where a future `HttpLicenseClient` (using the already-present `reqwest` dependency) and, later, a Razorpay webhook-driven payment flow plug in — without touching `license::mod`'s public API or any call site in `main.rs`. *(This `HttpLicenseClient` has since been built — see status update at top of file.)*
 
 See `API_SPECIFICATION.md` for the full request/response contract this trait is designed against.

@@ -5,6 +5,15 @@
 
 ---
 
+> **STATUS UPDATE — 2026-07-19 (current `HEAD` = `85fff711`):** This report is an accurate point-in-time record of the 2026-07-11 session and is left unedited below except for inline annotations at the specific claims that no longer hold. Since this session, licensing has moved substantially further, through Phase 4 work:
+> - **`license::should_enforce()` now returns `true`** — enforcement is live, wired into the login gate, activation, and a 24h periodic revalidation timer (`src/license/mod.rs`, `src/main.rs`).
+> - **A real license server now exists** (`server/` crate), implementing the `API_SPECIFICATION.md` contract plus one additional endpoint (`POST /deactivate-license`).
+> - **A real `HttpLicenseClient` now exists** (`src/license/client.rs`), wired in alongside the original `OfflineClient` fallback.
+>
+> Every place below that still says "no real server exists" or "`should_enforce()` remains `false`" describes the state *as of 2026-07-11*, not today. See `LICENSE_SYSTEM_DESIGN.md`'s own status update for more detail.
+
+---
+
 ## 1. Starting state
 
 Phase 3A (architecture + desktop-side implementation) was already complete and merged prior to this session:
@@ -74,14 +83,14 @@ No changes to the threat model documented in `LICENSE_SECURITY_REVIEW.md` — th
 
 - **Fail-closed rule (§6):** confirmed by test that a corrupted `last_validated_at` cannot produce a licensed status.
 - **Clock rollback (§1):** unchanged; existing watermark tests still pass.
-- **`should_enforce()` still returns `false`** — a dedicated test (`should_enforce_is_false_in_this_phase`) guards against this being flipped by accident; unchanged this session.
+- **`should_enforce()` still returns `false`** — a dedicated test (`should_enforce_is_false_in_this_phase`) guards against this being flipped by accident; unchanged this session. *(Superseded — see status update at top of file: `should_enforce()` now returns `true`, and the guarding test has been renamed/inverted to `should_enforce_is_true_since_phase_4k3`.)*
 - The new Settings-screen activation path calls the real `license::activate` against `OfflineClient` only — no new network code, no new credential storage, no change to what's persisted where.
 
 ## 6. Known limitations (unchanged from Phase 3A, restated)
 
-- No real license server exists — `OfflineClient` is the only `LicenseApiClient`. Activation from the UI will always report "no server configured" until a real `HttpLicenseClient` is built (explicitly out of scope for this phase).
+- No real license server exists — `OfflineClient` is the only `LicenseApiClient`. Activation from the UI will always report "no server configured" until a real `HttpLicenseClient` is built (explicitly out of scope for this phase). *(Superseded — a real server and `HttpLicenseClient` now exist; see status update at top of file.)*
 - No payment integration (explicitly deferred per task instructions).
-- `license::should_enforce()` remains `false` — the app does not block on license status yet. Flipping it is a documented one-line change (`LICENSE_SYSTEM_DESIGN.md` §7) once a server and payment path exist.
+- `license::should_enforce()` remains `false` — the app does not block on license status yet. Flipping it is a documented one-line change (`LICENSE_SYSTEM_DESIGN.md` §7) once a server and payment path exist. *(Superseded — `should_enforce()` now returns `true`; enforcement is live. See status update at top of file.)*
 - Machine fingerprint remains a weak-to-moderate signal by design (`LICENSE_SECURITY_REVIEW.md` §5) — unchanged.
 - The Settings-screen license status is a point-in-time snapshot taken at startup; it does not live-update if, hypothetically, a background heartbeat were added later (no heartbeat loop exists yet — `/heartbeat` is specified in `API_SPECIFICATION.md` but not implemented client-side, consistent with "no server exists").
 
@@ -132,8 +141,8 @@ Migration-6-specific test count: **3** (new this session) — all pass under `ca
 
 ## 10. Remaining risks
 
-1. Once a real `HttpLicenseClient` and server exist, the online-validation and `/heartbeat` paths need real integration testing against that server (cannot be done today — no server exists).
-2. `should_enforce()` flip is a one-line change but is a real behavior change for every user with a non-`Active`/`ActiveOfflineGrace` status — should be paired with the payment flow going live, not flipped in isolation.
+1. Once a real `HttpLicenseClient` and server exist, the online-validation and `/heartbeat` paths need real integration testing against that server (cannot be done today — no server exists). *(Superseded — both now exist; per the 2026-07-19 status update, this integration testing should be tracked and verified explicitly rather than assumed complete.)*
+2. `should_enforce()` flip is a one-line change but is a real behavior change for every user with a non-`Active`/`ActiveOfflineGrace` status — should be paired with the payment flow going live, not flipped in isolation. *(This flip has since happened — `should_enforce()` now returns `true` as of current `HEAD`. Whether it was in fact paired with the payment flow going live, as this risk note required, was not independently confirmed as part of the 2026-07-19 documentation update and should be verified with whoever approved the cutover.)*
 3. Machine fingerprint remains a soft signal (documented, accepted trade-off, unchanged this session).
 
 ## 11. Git commit

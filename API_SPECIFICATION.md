@@ -1,6 +1,8 @@
 # License API Specification — Phase 3A
 
-**Status: specification only. No server implements this yet.** This is the contract `src/license/client.rs`'s `LicenseApiClient` trait is designed against, and what a future backend must implement for the desktop app's `HttpLicenseClient` (not yet written — see `LICENSE_SYSTEM_DESIGN.md` §9) to work against without a client-side change.
+**Status (Phase 3A, 2026-07-09): specification only. No server implements this yet.** *(Superseded — as of current `HEAD`, a real server exists (`server/` crate) implementing this contract, and the desktop app's `HttpLicenseClient` (`src/license/client.rs`) is wired against it. The server additionally implements one endpoint not in this specification, `POST /deactivate-license` — see `server/src/routes/license.rs` for its current contract; it is not yet exposed via the desktop `LicenseApiClient` trait. The request/response shapes documented below were not re-verified line-by-line against the current server implementation as part of this update — treat this file as the design intent, and the server's own route handlers as the authoritative current contract if the two ever disagree.)*
+
+This is the contract `src/license/client.rs`'s `LicenseApiClient` trait is designed against, and what a future backend must implement for the desktop app's `HttpLicenseClient` (not yet written — see `LICENSE_SYSTEM_DESIGN.md` §9) to work against without a client-side change.
 
 All endpoints: `Content-Type: application/json`. All responses use a consistent envelope:
 
