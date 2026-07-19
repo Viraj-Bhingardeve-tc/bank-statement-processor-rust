@@ -24,16 +24,52 @@ use regex::Regex;
 
 /// Known Indian banking terminology dictionary (ocr-correction.js:26-37).
 const BANK_TERMS: &[&str] = &[
-    "NEFT", "RTGS", "IMPS", "UPI", "NACH", "ACH", "ECS", "BBPS",
-    "CREDIT", "DEBIT", "TRANSFER", "BALANCE", "INTEREST", "CHARGES",
-    "DEPOSIT", "WITHDRAWAL", "CHEQUE", "CLEARING", "NARRATION",
-    "SALARY", "PAYMENT", "RECEIPT", "VOUCHER",
-    "AIRTEL", "BSNL", "RELIANCE", "VODAFONE",
-    "MSEDCL", "BESCOM", "ELECTRICITY",
-    "AMAZON", "FLIPKART", "SWIGGY", "ZOMATO",
-    "HDFC", "ICICI", "AXIS", "KOTAK", "SBI",
-    "REFUND", "REVERSAL", "BOUNCE", "RETURN",
-    "SUSPENSE", "CONTRA", "JOURNAL",
+    "NEFT",
+    "RTGS",
+    "IMPS",
+    "UPI",
+    "NACH",
+    "ACH",
+    "ECS",
+    "BBPS",
+    "CREDIT",
+    "DEBIT",
+    "TRANSFER",
+    "BALANCE",
+    "INTEREST",
+    "CHARGES",
+    "DEPOSIT",
+    "WITHDRAWAL",
+    "CHEQUE",
+    "CLEARING",
+    "NARRATION",
+    "SALARY",
+    "PAYMENT",
+    "RECEIPT",
+    "VOUCHER",
+    "AIRTEL",
+    "BSNL",
+    "RELIANCE",
+    "VODAFONE",
+    "MSEDCL",
+    "BESCOM",
+    "ELECTRICITY",
+    "AMAZON",
+    "FLIPKART",
+    "SWIGGY",
+    "ZOMATO",
+    "HDFC",
+    "ICICI",
+    "AXIS",
+    "KOTAK",
+    "SBI",
+    "REFUND",
+    "REVERSAL",
+    "BOUNCE",
+    "RETURN",
+    "SUSPENSE",
+    "CONTRA",
+    "JOURNAL",
 ];
 
 static ALPHA_WORD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z]{4,}$").unwrap());
@@ -50,23 +86,27 @@ static SEP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[\s/\-.,|:]+").unwrap());
 fn is_plausibly_numeric(tok: &str) -> bool {
     !tok.is_empty()
         && tok.len() <= 20
-        && tok.chars().all(|c| c.is_ascii_digit() || "OoIlSZBGqQAg".contains(c))
+        && tok
+            .chars()
+            .all(|c| c.is_ascii_digit() || "OoIlSZBGqQAg".contains(c))
 }
 
 /// Port of `_repairNumericToken`'s `CHAR_MAP` substitution.
 fn repair_numeric_token(tok: &str) -> String {
-    tok.chars().map(|c| match c {
-        'O' | 'o' => '0',
-        'I' | 'l' => '1',
-        'S'       => '5',
-        'Z' | 'z' => '2',
-        'B'       => '8',
-        'G'       => '6',
-        'q' | 'Q' => '9',
-        'A'       => '4',
-        'g'       => '9',
-        other     => other,
-    }).collect()
+    tok.chars()
+        .map(|c| match c {
+            'O' | 'o' => '0',
+            'I' | 'l' => '1',
+            'S' => '5',
+            'Z' | 'z' => '2',
+            'B' => '8',
+            'G' => '6',
+            'q' | 'Q' => '9',
+            'A' => '4',
+            'g' => '9',
+            other => other,
+        })
+        .collect()
 }
 
 /// Port of `_repairString(s)` (ocr-correction.js:64-73): split on separator
@@ -86,7 +126,11 @@ fn repair_string(s: &str) -> String {
 }
 
 fn repair_token(tok: &str) -> String {
-    if is_plausibly_numeric(tok) { repair_numeric_token(tok) } else { tok.to_string() }
+    if is_plausibly_numeric(tok) {
+        repair_numeric_token(tok)
+    } else {
+        tok.to_string()
+    }
 }
 
 /// Levenshtein edit distance — port of `_lev(a, b)` (ocr-correction.js:76-87).
@@ -95,8 +139,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let (m, n) = (a.len(), b.len());
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for (i, row) in dp.iter_mut().enumerate() { row[0] = i; }
-    for j in 0..=n { dp[0][j] = j; }
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
     for i in 1..=m {
         for j in 1..=n {
             dp[i][j] = if a[i - 1] == b[j - 1] {
@@ -113,17 +161,29 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// `_fuzzyTerm(word)` (ocr-correction.js:90-105).
 fn fuzzy_correct_term(word: &str) -> String {
     let up = word.to_uppercase();
-    if BANK_TERMS.contains(&up.as_str()) { return up; }
+    if BANK_TERMS.contains(&up.as_str()) {
+        return up;
+    }
 
     let len = word.chars().count();
-    if !(4..=15).contains(&len) { return word.to_string(); }
-    let max_dist: i64 = if len <= 5 { 1 } else if len <= 8 { 2 } else { 3 };
+    if !(4..=15).contains(&len) {
+        return word.to_string();
+    }
+    let max_dist: i64 = if len <= 5 {
+        1
+    } else if len <= 8 {
+        2
+    } else {
+        3
+    };
 
     let mut best = word.to_string();
     let mut best_dist = i64::MAX;
     for &term in BANK_TERMS {
         let term_len = term.chars().count() as i64;
-        if (term_len - len as i64).abs() > max_dist { continue; }
+        if (term_len - len as i64).abs() > max_dist {
+            continue;
+        }
         let d = levenshtein(&up, term) as i64;
         if d < best_dist && d <= max_dist {
             best_dist = d;
@@ -138,7 +198,9 @@ fn fuzzy_correct_term(word: &str) -> String {
 /// amount/date flagging) are intentionally not ported: the old app computes
 /// but discards them at every call site (see module doc).
 fn correct_line(line: &str) -> String {
-    if line.trim().is_empty() { return line.to_string(); }
+    if line.trim().is_empty() {
+        return line.to_string();
+    }
 
     // Pass 1: repair digit-look-alike characters.
     let text = repair_string(line);
@@ -146,16 +208,25 @@ fn correct_line(line: &str) -> String {
     // Pass 2: fuzzy-correct likely-mangled banking terms (whole alphabetic
     // words, length >= 4 only) — matches JS's `text.split(/\s+/)` + rejoin,
     // which collapses whitespace runs to single spaces.
-    let corrected: Vec<String> = text.split_whitespace().map(|w| {
-        if !ALPHA_WORD_RE.is_match(w) { return w.to_string(); }
-        let fixed = fuzzy_correct_term(w);
-        let upper = w.to_uppercase();
-        // JS only substitutes when the fuzzy result differs from BOTH the
-        // original word and its plain uppercase form — an exact dictionary
-        // hit (fixed == upper) is treated as "no change needed" and the
-        // original casing of `w` is preserved.
-        if fixed != upper && fixed != w { fixed } else { w.to_string() }
-    }).collect();
+    let corrected: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            if !ALPHA_WORD_RE.is_match(w) {
+                return w.to_string();
+            }
+            let fixed = fuzzy_correct_term(w);
+            let upper = w.to_uppercase();
+            // JS only substitutes when the fuzzy result differs from BOTH the
+            // original word and its plain uppercase form — an exact dictionary
+            // hit (fixed == upper) is treated as "no change needed" and the
+            // original casing of `w` is preserved.
+            if fixed != upper && fixed != w {
+                fixed
+            } else {
+                w.to_string()
+            }
+        })
+        .collect();
 
     corrected.join(" ")
 }
@@ -166,7 +237,11 @@ fn correct_line(line: &str) -> String {
 pub fn correct_text(text: &str, passes: usize) -> String {
     let mut result = text.to_string();
     for _ in 0..passes {
-        result = result.lines().map(correct_line).collect::<Vec<_>>().join("\n");
+        result = result
+            .lines()
+            .map(correct_line)
+            .collect::<Vec<_>>()
+            .join("\n");
     }
     result
 }
@@ -180,14 +255,21 @@ mod tests {
         // "neft" uppercases to "NEFT", which is already a BANK_TERMS exact
         // match — JS's `fixed !== w.toUpperCase()` check is false here, so
         // the original lowercase word passes through unchanged.
-        assert_eq!(correct_line("neft transfer received"), "neft transfer received");
+        assert_eq!(
+            correct_line("neft transfer received"),
+            "neft transfer received"
+        );
     }
 
     #[test]
     fn mangled_term_gets_corrected() {
         // "NEDT" (1 substitution away from "NEFT") should fuzzy-correct.
         let out = correct_line("NEDT PAYMENT RECEIVED");
-        assert!(out.contains("NEFT"), "expected NEFT correction, got: {}", out);
+        assert!(
+            out.contains("NEFT"),
+            "expected NEFT correction, got: {}",
+            out
+        );
     }
 
     #[test]
@@ -202,7 +284,11 @@ mod tests {
         // (up to 20 chars) numeric-token repair, unlike date_parser's
         // 4-char-capped variant.
         let out = correct_line("Amount O5OOO.OO paid");
-        assert!(out.contains("05000.00"), "expected char repair, got: {}", out);
+        assert!(
+            out.contains("05000.00"),
+            "expected char repair, got: {}",
+            out
+        );
     }
 
     #[test]

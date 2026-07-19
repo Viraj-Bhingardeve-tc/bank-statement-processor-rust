@@ -39,30 +39,25 @@ const EXCEL_MAX: f64 = 54_789.0;
 
 /// Strip trailing `"HH:MM"` or `"HH:MM:SS"` time component and everything after.
 /// Handles: `"20/01/2026 18:36:14"` → `"20/01/2026"`.
-static RE_TIME_SUFFIX: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"\s+\d{1,2}:\d{2}(?::\d{2})?.*$").unwrap()
-);
+static RE_TIME_SUFFIX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\s+\d{1,2}:\d{2}(?::\d{2})?.*$").unwrap());
 
 /// DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY (numeric month, any common separator).
-static RE_DDMMYYYY: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$").unwrap()
-);
+static RE_DDMMYYYY: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$").unwrap());
 
 /// DD MMM YYYY / DD-MMM-YYYY / DD/MMM/YYYY — space, dash or slash separator.
-static RE_DD_MON_YYYY: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"^(\d{1,2})[\s\-/.]([A-Za-z]{3,})[\s\-/.](\d{2,4})$").unwrap()
-);
+static RE_DD_MON_YYYY: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\d{1,2})[\s\-/.]([A-Za-z]{3,})[\s\-/.](\d{2,4})$").unwrap());
 
 /// DDMmmYYYY — NO separator between day, month-name, and year.
 /// Example: `"01Apr2026"`.
-static RE_DDMONYYYY_NOSEP: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"^(\d{1,2})([A-Za-z]{3,})(\d{2,4})$").unwrap()
-);
+static RE_DDMONYYYY_NOSEP: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\d{1,2})([A-Za-z]{3,})(\d{2,4})$").unwrap());
 
 /// YYYY-MM-DD or YYYY/MM/DD (ISO-style, 4-digit year first).
-static RE_ISO: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"^(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})$").unwrap()
-);
+static RE_ISO: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})$").unwrap());
 
 /// Exactly 8 consecutive digits — YYYYMMDD compact.
 ///
@@ -74,14 +69,10 @@ static RE_ISO: Lazy<Regex> = Lazy::new(||
 /// made of multi-byte digits would be far more than 8 *bytes* long, and
 /// those fixed byte offsets could land mid-character and panic. `[0-9]`
 /// makes that assumption an invariant the regex itself enforces.
-static RE_COMPACT8: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"^[0-9]{8}$").unwrap()
-);
+static RE_COMPACT8: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[0-9]{8}$").unwrap());
 
 /// Separator characters used by `repair_ocr_chars`: runs of `/`, `-`, `.`, whitespace.
-static RE_OCR_SEP: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"[/\-.\s]+").unwrap()
-);
+static RE_OCR_SEP: Lazy<Regex> = Lazy::new(|| Regex::new(r"[/\-.\s]+").unwrap());
 
 // ── Public result type ────────────────────────────────────────────────────────
 
@@ -98,11 +89,19 @@ pub struct ParsedDate {
 
 impl ParsedDate {
     fn ok(display: String, ts: i64) -> Self {
-        ParsedDate { display, ts, valid: true }
+        ParsedDate {
+            display,
+            ts,
+            valid: true,
+        }
     }
 
     fn fail(display: String) -> Self {
-        ParsedDate { display, ts: 0, valid: false }
+        ParsedDate {
+            display,
+            ts: 0,
+            valid: false,
+        }
     }
 }
 
@@ -151,13 +150,15 @@ pub fn normalize_transaction_date(raw: &str) -> ParsedDate {
 /// Excel epoch is 1899-12-30 (Lotus 1-2-3 compatibility).
 /// Returns `None` for serials outside the expected 2000-2050 window.
 pub fn normalize_excel_date(serial: f64) -> Option<ParsedDate> {
-    if serial < EXCEL_MIN || serial > EXCEL_MAX {
+    if !(EXCEL_MIN..=EXCEL_MAX).contains(&serial) {
         return None;
     }
     let epoch = NaiveDate::from_ymd_opt(1899, 12, 30)?;
-    let days  = serial.floor() as u64;
-    let date  = epoch.checked_add_days(chrono::Days::new(days))?;
-    if !year_ok(date.year()) { return None; }
+    let days = serial.floor() as u64;
+    let date = epoch.checked_add_days(chrono::Days::new(days))?;
+    if !year_ok(date.year()) {
+        return None;
+    }
     Some(ParsedDate::ok(fmt_display(date), date_to_ts(date)))
 }
 
@@ -174,13 +175,24 @@ pub fn is_valid_date_str(s: &str) -> bool {
 /// Returns `0` if the string cannot be parsed.
 pub fn display_to_ts(s: &str) -> i64 {
     let parts: Vec<&str> = s.splitn(3, '/').collect();
-    if parts.len() != 3 { return 0; }
-    let dd: u32 = match parts[0].parse() { Ok(v) => v, Err(_) => return 0 };
-    let mm: u32 = match parts[1].parse() { Ok(v) => v, Err(_) => return 0 };
-    let yy: i32 = match parts[2].parse() { Ok(v) => v, Err(_) => return 0 };
+    if parts.len() != 3 {
+        return 0;
+    }
+    let dd: u32 = match parts[0].parse() {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let mm: u32 = match parts[1].parse() {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let yy: i32 = match parts[2].parse() {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
     match NaiveDate::from_ymd_opt(yy, mm, dd) {
         Some(d) => date_to_ts(d),
-        None    => 0,
+        None => 0,
     }
 }
 
@@ -197,7 +209,7 @@ pub fn display_to_ts(s: &str) -> i64 {
 pub fn repair_ocr_chars(s: &str) -> String {
     // Split on separator runs, preserving them in output.
     let mut result = String::with_capacity(s.len());
-    let mut last   = 0usize;
+    let mut last = 0usize;
 
     for m in RE_OCR_SEP.find_iter(s) {
         let token = &s[last..m.start()];
@@ -221,9 +233,11 @@ pub fn repair_ocr_chars(s: &str) -> String {
 ///   - `"YYYY-MM-DD"` or `"YYYY/MM/DD"` → `"YYYYMMDD"` (p[0].length === 4)
 ///   - Anything else → returned unchanged (matches JS fallback `return dateStr`)
 pub fn tally_date(date_str: &str) -> String {
-    if date_str.is_empty() { return String::new(); }
+    if date_str.is_empty() {
+        return String::new();
+    }
     let s = date_str.to_string();
-    let parts: Vec<&str> = s.split(|c| c == '/' || c == '-').collect();
+    let parts: Vec<&str> = s.split(['/', '-']).collect();
     if parts.len() == 3 {
         if parts[2].len() == 4 {
             // DD/MM/YYYY → YYYYMMDD
@@ -242,7 +256,9 @@ pub fn tally_date(date_str: &str) -> String {
 /// Core structured parse — mirrors `_parseDate()` from parser.js.
 fn parse_date(s: &str) -> Option<ParsedDate> {
     let s = s.trim();
-    if s.is_empty() { return None; }
+    if s.is_empty() {
+        return None;
+    }
 
     // Normalise internal whitespace (multiple spaces → single space)
     let s_norm: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -308,12 +324,14 @@ fn make_date(dd: &str, mm: u32, yy: &str) -> Option<NaiveDate> {
     let d: u32 = dd.parse().ok()?;
     let raw_y: i32 = yy.parse().ok()?;
     let y = if yy.len() <= 2 { 2000 + raw_y } else { raw_y };
-    if !year_ok(y) { return None; }
+    if !year_ok(y) {
+        return None;
+    }
     NaiveDate::from_ymd_opt(y, mm, d)
 }
 
 fn year_ok(y: i32) -> bool {
-    y >= YEAR_MIN && y <= YEAR_MAX
+    (YEAR_MIN..=YEAR_MAX).contains(&y)
 }
 
 /// Format a `NaiveDate` as `"DD/MM/YYYY"`.
@@ -333,19 +351,19 @@ fn date_to_ts(date: NaiveDate) -> i64 {
 /// Month name → 1-based month number (case-insensitive, 3-letter or full name).
 fn month_num(s: &str) -> Option<u32> {
     match s.to_lowercase().as_str() {
-        "jan" | "january"   => Some(1),
-        "feb" | "february"  => Some(2),
-        "mar" | "march"     => Some(3),
-        "apr" | "april"     => Some(4),
-        "may"               => Some(5),
-        "jun" | "june"      => Some(6),
-        "jul" | "july"      => Some(7),
-        "aug" | "august"    => Some(8),
+        "jan" | "january" => Some(1),
+        "feb" | "february" => Some(2),
+        "mar" | "march" => Some(3),
+        "apr" | "april" => Some(4),
+        "may" => Some(5),
+        "jun" | "june" => Some(6),
+        "jul" | "july" => Some(7),
+        "aug" | "august" => Some(8),
         "sep" | "september" => Some(9),
-        "oct" | "october"   => Some(10),
-        "nov" | "november"  => Some(11),
-        "dec" | "december"  => Some(12),
-        _                   => None,
+        "oct" | "october" => Some(10),
+        "nov" | "november" => Some(11),
+        "dec" | "december" => Some(12),
+        _ => None,
     }
 }
 
@@ -354,16 +372,18 @@ fn repair_token(tok: &str) -> String {
     const NOISE: &str = "OoIlSZBGq";
     // Only repair when every char is a digit or known OCR-noise char AND len ≤ 4
     if tok.len() <= 4 && tok.chars().all(|c| c.is_ascii_digit() || NOISE.contains(c)) {
-        tok.chars().map(|c| match c {
-            'O' | 'o' => '0',
-            'I' | 'l' => '1',
-            'S'        => '5',
-            'Z'        => '2',
-            'B'        => '8',
-            'G'        => '6',
-            'q'        => '9',
-            other      => other,
-        }).collect()
+        tok.chars()
+            .map(|c| match c {
+                'O' | 'o' => '0',
+                'I' | 'l' => '1',
+                'S' => '5',
+                'Z' => '2',
+                'B' => '8',
+                'G' => '6',
+                'q' => '9',
+                other => other,
+            })
+            .collect()
     } else {
         tok.to_owned()
     }
@@ -381,7 +401,10 @@ mod tests {
         assert!(
             r.valid && r.display == expected_display,
             "input={:?}: expected display={:?}, got display={:?} valid={}",
-            input, expected_display, r.display, r.valid
+            input,
+            expected_display,
+            r.display,
+            r.valid
         );
         assert!(r.ts > 0, "input={:?}: ts should be > 0", input);
     }
@@ -477,9 +500,9 @@ mod tests {
 
     #[test]
     fn dd_mon_full_name() {
-        assert_date("15 January 2024",   "15/01/2024");
-        assert_date("01 February 2024",  "01/02/2024");
-        assert_date("31 December 2024",  "31/12/2024");
+        assert_date("15 January 2024", "15/01/2024");
+        assert_date("01 February 2024", "01/02/2024");
+        assert_date("31 December 2024", "31/12/2024");
     }
 
     // ── Time suffix stripping ─────────────────────────────────────────────────
@@ -578,7 +601,7 @@ mod tests {
 
     #[test]
     fn excel_serial_out_of_range_is_none() {
-        assert!(normalize_excel_date(100.0).is_none());   // 1900-era
+        assert!(normalize_excel_date(100.0).is_none()); // 1900-era
         assert!(normalize_excel_date(60000.0).is_none()); // ~2064 - still in range, adjust
     }
 
@@ -609,13 +632,13 @@ mod tests {
     #[test]
     fn ocr_repair_all_subs() {
         // O→0, I→1, S→5, Z→2, B→8, G→6, q→9
-        assert_eq!(repair_token("O"),  "0");
-        assert_eq!(repair_token("I"),  "1");
-        assert_eq!(repair_token("S"),  "5");
-        assert_eq!(repair_token("Z"),  "2");
-        assert_eq!(repair_token("B"),  "8");
-        assert_eq!(repair_token("G"),  "6");
-        assert_eq!(repair_token("q"),  "9");
+        assert_eq!(repair_token("O"), "0");
+        assert_eq!(repair_token("I"), "1");
+        assert_eq!(repair_token("S"), "5");
+        assert_eq!(repair_token("Z"), "2");
+        assert_eq!(repair_token("B"), "8");
+        assert_eq!(repair_token("G"), "6");
+        assert_eq!(repair_token("q"), "9");
     }
 
     #[test]
@@ -703,7 +726,10 @@ mod tests {
             assert!(
                 r.valid && r.ts == ts0,
                 "format {:?}: expected ts={}, got ts={} valid={}",
-                fmt, ts0, r.ts, r.valid
+                fmt,
+                ts0,
+                r.ts,
+                r.valid
             );
         }
     }

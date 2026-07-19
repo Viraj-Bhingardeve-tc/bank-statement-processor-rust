@@ -37,9 +37,9 @@ pub enum MatchStatus {
 impl MatchStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            MatchStatus::Matched   => "Matched",
-            MatchStatus::Likely    => "Likely",
-            MatchStatus::Possible  => "Possible",
+            MatchStatus::Matched => "Matched",
+            MatchStatus::Likely => "Likely",
+            MatchStatus::Possible => "Possible",
             MatchStatus::Unmatched => "Unmatched",
         }
     }
@@ -48,19 +48,19 @@ impl MatchStatus {
 /// One row from a Tally daybook export (or any external ledger export).
 #[derive(Debug, Clone, Default)]
 pub struct Voucher {
-    pub date:         String,
-    pub amount:       f64,
-    pub narration:    String,
-    pub voucher_no:   String,
+    pub date: String,
+    pub amount: f64,
+    pub narration: String,
+    pub voucher_no: String,
     pub voucher_type: String,
-    pub ledger:       String,
+    pub ledger: String,
 }
 
 /// One bank transaction, reduced to just what reconciliation needs.
 #[derive(Debug, Clone, Default)]
 pub struct BankEntry {
-    pub date:      String,
-    pub amount:    f64,
+    pub date: String,
+    pub amount: f64,
     pub narration: String,
     pub reference: String,
 }
@@ -71,10 +71,10 @@ pub struct BankEntry {
 /// exposes them in its Settings UI.
 #[derive(Debug, Clone)]
 pub struct ReconConfig {
-    pub date_fuzzy_days:       i64,
-    pub amount_fuzzy_pct:      f64,
-    pub narr_similarity_min:   f64,
-    pub auto_accept_above:     f64,
+    pub date_fuzzy_days: i64,
+    pub amount_fuzzy_pct: f64,
+    pub narr_similarity_min: f64,
+    pub auto_accept_above: f64,
     pub flag_below_confidence: f64,
 }
 
@@ -83,36 +83,53 @@ impl ReconConfig {
         ReconConfig {
             date_fuzzy_days,
             amount_fuzzy_pct,
-            narr_similarity_min:   0.55,
-            auto_accept_above:     0.90,
+            narr_similarity_min: 0.55,
+            auto_accept_above: 0.90,
             flag_below_confidence: 0.40,
         }
     }
 }
 
 impl Default for ReconConfig {
-    fn default() -> Self { ReconConfig::new(3, 0.5) }
+    fn default() -> Self {
+        ReconConfig::new(3, 0.5)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchPair {
-    pub bank_idx:    usize,
+    pub bank_idx: usize,
     pub voucher_idx: usize,
-    pub score:       f64,
-    pub status:      MatchStatus,
+    pub score: f64,
+    pub status: MatchStatus,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ReconReport {
-    pub matches:            Vec<MatchPair>,
-    pub unmatched_bank:     Vec<usize>,
+    pub matches: Vec<MatchPair>,
+    pub unmatched_bank: Vec<usize>,
     pub unmatched_vouchers: Vec<usize>,
 }
 
 impl ReconReport {
-    pub fn matched_count(&self)  -> usize { self.matches.iter().filter(|m| m.status == MatchStatus::Matched).count() }
-    pub fn likely_count(&self)   -> usize { self.matches.iter().filter(|m| m.status == MatchStatus::Likely).count() }
-    pub fn possible_count(&self) -> usize { self.matches.iter().filter(|m| m.status == MatchStatus::Possible).count() }
+    pub fn matched_count(&self) -> usize {
+        self.matches
+            .iter()
+            .filter(|m| m.status == MatchStatus::Matched)
+            .count()
+    }
+    pub fn likely_count(&self) -> usize {
+        self.matches
+            .iter()
+            .filter(|m| m.status == MatchStatus::Likely)
+            .count()
+    }
+    pub fn possible_count(&self) -> usize {
+        self.matches
+            .iter()
+            .filter(|m| m.status == MatchStatus::Possible)
+            .count()
+    }
 }
 
 // ── Narration similarity ─────────────────────────────────────────────────────
@@ -138,7 +155,9 @@ fn tokenize(s: &str) -> HashSet<String> {
 pub fn narr_similarity(a: &str, b: &str) -> f64 {
     let sa = tokenize(a);
     let sb = tokenize(b);
-    if sa.is_empty() || sb.is_empty() { return 0.0; }
+    if sa.is_empty() || sb.is_empty() {
+        return 0.0;
+    }
     let intersection = sa.intersection(&sb).count();
     intersection as f64 / (sa.len() + sb.len() - intersection) as f64
 }
@@ -150,8 +169,12 @@ pub fn narr_similarity(a: &str, b: &str) -> f64 {
 fn amount_match(a: f64, b: f64, fuzz_pct: f64) -> bool {
     let a = a.abs();
     let b = b.abs();
-    if a == 0.0 && b == 0.0 { return true; }
-    if a == 0.0 || b == 0.0 { return false; }
+    if a == 0.0 && b == 0.0 {
+        return true;
+    }
+    if a == 0.0 || b == 0.0 {
+        return false;
+    }
     let tolerance = a.max(b) * (fuzz_pct / 100.0);
     (a - b).abs() <= tolerance
 }
@@ -162,7 +185,9 @@ fn amount_match(a: f64, b: f64, fuzz_pct: f64) -> bool {
 fn days_diff(a: &str, b: &str) -> Option<f64> {
     let pa = normalize_transaction_date(a);
     let pb = normalize_transaction_date(b);
-    if !pa.valid || !pb.valid { return None; }
+    if !pa.valid || !pb.valid {
+        return None;
+    }
     Some(((pa.ts - pb.ts).abs() as f64) / 86_400_000.0)
 }
 
@@ -190,7 +215,7 @@ pub fn score_match(bank: &BankEntry, voucher: &Voucher, cfg: &ReconConfig) -> f6
     // Date closeness — unparseable or too-distant dates reject the pair.
     let days = match days_diff(&bank.date, &voucher.date) {
         Some(d) => d,
-        None    => return 0.0,
+        None => return 0.0,
     };
     if days == 0.0 {
         score += 0.40;
@@ -224,10 +249,15 @@ pub fn score_match(bank: &BankEntry, voucher: &Voucher, cfg: &ReconConfig) -> f6
 
 /// Classify a score into a status tier — port of `_statusFromScore`.
 pub fn status_from_score(score: f64, cfg: &ReconConfig) -> MatchStatus {
-    if score >= cfg.auto_accept_above       { MatchStatus::Matched }
-    else if score >= cfg.flag_below_confidence { MatchStatus::Likely }
-    else if score > 0.0                     { MatchStatus::Possible }
-    else                                     { MatchStatus::Unmatched }
+    if score >= cfg.auto_accept_above {
+        MatchStatus::Matched
+    } else if score >= cfg.flag_below_confidence {
+        MatchStatus::Likely
+    } else if score > 0.0 {
+        MatchStatus::Possible
+    } else {
+        MatchStatus::Unmatched
+    }
 }
 
 // ── Greedy bipartite matching ────────────────────────────────────────────────
@@ -253,21 +283,32 @@ pub fn reconcile(bank: &[BankEntry], vouchers: &[Voucher], cfg: &ReconConfig) ->
     // (bank index then voucher index).
     candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut bank_used    = vec![false; bank.len()];
+    let mut bank_used = vec![false; bank.len()];
     let mut voucher_used = vec![false; vouchers.len()];
     let mut matches = Vec::new();
 
     for (bi, vi, score) in candidates {
-        if bank_used[bi] || voucher_used[vi] { continue; }
-        bank_used[bi]    = true;
+        if bank_used[bi] || voucher_used[vi] {
+            continue;
+        }
+        bank_used[bi] = true;
         voucher_used[vi] = true;
-        matches.push(MatchPair { bank_idx: bi, voucher_idx: vi, score, status: status_from_score(score, cfg) });
+        matches.push(MatchPair {
+            bank_idx: bi,
+            voucher_idx: vi,
+            score,
+            status: status_from_score(score, cfg),
+        });
     }
 
-    let unmatched_bank     = (0..bank.len()).filter(|&i| !bank_used[i]).collect();
+    let unmatched_bank = (0..bank.len()).filter(|&i| !bank_used[i]).collect();
     let unmatched_vouchers = (0..vouchers.len()).filter(|&i| !voucher_used[i]).collect();
 
-    ReconReport { matches, unmatched_bank, unmatched_vouchers }
+    ReconReport {
+        matches,
+        unmatched_bank,
+        unmatched_vouchers,
+    }
 }
 
 // ── Tally export parsing ─────────────────────────────────────────────────────
@@ -284,18 +325,22 @@ pub fn reconcile(bank: &[BankEntry], vouchers: &[Voucher], cfg: &ReconConfig) ->
 /// all, which the literal JS logic (amount-or-debit-only, no credit
 /// fallback) would silently miss entirely for credit rows.
 pub fn parse_tally_grid(rows: &[Vec<String>]) -> Vec<Voucher> {
-    if rows.len() < 2 { return Vec::new(); }
+    if rows.len() < 2 {
+        return Vec::new();
+    }
 
     let header: Vec<String> = rows[0].iter().map(|c| c.to_lowercase()).collect();
     let col = |name: &str| header.iter().position(|h| h.contains(name));
 
-    let date_col    = col("date");
-    let narr_col    = col("particular").or_else(|| col("narration")).or_else(|| col("description"));
-    let amt_col     = col("amount").or_else(|| col("debit"));
-    let credit_col  = col("credit");
+    let date_col = col("date");
+    let narr_col = col("particular")
+        .or_else(|| col("narration"))
+        .or_else(|| col("description"));
+    let amt_col = col("amount").or_else(|| col("debit"));
+    let credit_col = col("credit");
     let voucher_col = col("voucher");
-    let type_col    = col("type");
-    let ledger_col  = col("ledger");
+    let type_col = col("type");
+    let ledger_col = col("ledger");
 
     let (date_col, narr_col) = match (date_col, narr_col) {
         (Some(d), Some(n)) => (d, n),
@@ -311,29 +356,36 @@ pub fn parse_tally_grid(rows: &[Vec<String>]) -> Vec<Voucher> {
         cleaned.trim().parse::<f64>().unwrap_or(0.0).abs()
     };
 
-    rows.iter().skip(1).filter_map(|row| {
-        let raw_date = get(row, Some(date_col));
-        let raw_narr = get(row, Some(narr_col));
-        if raw_date.trim().is_empty() { return None; }
+    rows.iter()
+        .skip(1)
+        .filter_map(|row| {
+            let raw_date = get(row, Some(date_col));
+            let raw_narr = get(row, Some(narr_col));
+            if raw_date.trim().is_empty() {
+                return None;
+            }
 
-        let raw_amt = get(row, amt_col);
-        let amount = if !raw_amt.trim().is_empty() {
-            parse_amount(&raw_amt)
-        } else {
-            parse_amount(&get(row, credit_col))
-        };
+            let raw_amt = get(row, amt_col);
+            let amount = if !raw_amt.trim().is_empty() {
+                parse_amount(&raw_amt)
+            } else {
+                parse_amount(&get(row, credit_col))
+            };
 
-        if amount <= 0.0 && raw_narr.trim().is_empty() { return None; }
+            if amount <= 0.0 && raw_narr.trim().is_empty() {
+                return None;
+            }
 
-        Some(Voucher {
-            date:         raw_date.trim().to_string(),
-            amount,
-            narration:    raw_narr.trim().to_string(),
-            voucher_no:   get(row, voucher_col).trim().to_string(),
-            voucher_type: get(row, type_col).trim().to_string(),
-            ledger:       get(row, ledger_col).trim().to_string(),
+            Some(Voucher {
+                date: raw_date.trim().to_string(),
+                amount,
+                narration: raw_narr.trim().to_string(),
+                voucher_no: get(row, voucher_col).trim().to_string(),
+                voucher_type: get(row, type_col).trim().to_string(),
+                ledger: get(row, ledger_col).trim().to_string(),
+            })
         })
-    }).collect()
+        .collect()
 }
 
 // ── CSV report ────────────────────────────────────────────────────────────
@@ -351,30 +403,54 @@ pub fn report_to_csv(bank: &[BankEntry], vouchers: &[Voucher], report: &ReconRep
     for m in &report.matches {
         let b = &bank[m.bank_idx];
         let v = &vouchers[m.voucher_idx];
-        lines.push([
-            csv_field(m.status.as_str()),
-            csv_field(&b.date), csv_field(&format!("{:.2}", b.amount)), csv_field(&b.narration),
-            csv_field(&v.date), csv_field(&format!("{:.2}", v.amount)), csv_field(&v.narration), csv_field(&v.voucher_no),
-            csv_field(&format!("{:.0}%", m.score * 100.0)),
-        ].join(","));
+        lines.push(
+            [
+                csv_field(m.status.as_str()),
+                csv_field(&b.date),
+                csv_field(&format!("{:.2}", b.amount)),
+                csv_field(&b.narration),
+                csv_field(&v.date),
+                csv_field(&format!("{:.2}", v.amount)),
+                csv_field(&v.narration),
+                csv_field(&v.voucher_no),
+                csv_field(&format!("{:.0}%", m.score * 100.0)),
+            ]
+            .join(","),
+        );
     }
     for &bi in &report.unmatched_bank {
         let b = &bank[bi];
-        lines.push([
-            csv_field("UNMATCHED-BANK"),
-            csv_field(&b.date), csv_field(&format!("{:.2}", b.amount)), csv_field(&b.narration),
-            csv_field(""), csv_field(""), csv_field(""), csv_field(""),
-            csv_field("0%"),
-        ].join(","));
+        lines.push(
+            [
+                csv_field("UNMATCHED-BANK"),
+                csv_field(&b.date),
+                csv_field(&format!("{:.2}", b.amount)),
+                csv_field(&b.narration),
+                csv_field(""),
+                csv_field(""),
+                csv_field(""),
+                csv_field(""),
+                csv_field("0%"),
+            ]
+            .join(","),
+        );
     }
     for &vi in &report.unmatched_vouchers {
         let v = &vouchers[vi];
-        lines.push([
-            csv_field("MISSING-IN-BANK"),
-            csv_field(""), csv_field(""), csv_field(""),
-            csv_field(&v.date), csv_field(&format!("{:.2}", v.amount)), csv_field(&v.narration), csv_field(&v.voucher_no),
-            csv_field("0%"),
-        ].join(","));
+        lines.push(
+            [
+                csv_field("MISSING-IN-BANK"),
+                csv_field(""),
+                csv_field(""),
+                csv_field(""),
+                csv_field(&v.date),
+                csv_field(&format!("{:.2}", v.amount)),
+                csv_field(&v.narration),
+                csv_field(&v.voucher_no),
+                csv_field("0%"),
+            ]
+            .join(","),
+        );
     }
 
     lines.join("\n")
@@ -385,10 +461,22 @@ mod tests {
     use super::*;
 
     fn bank(date: &str, amount: f64, narration: &str, reference: &str) -> BankEntry {
-        BankEntry { date: date.to_string(), amount, narration: narration.to_string(), reference: reference.to_string() }
+        BankEntry {
+            date: date.to_string(),
+            amount,
+            narration: narration.to_string(),
+            reference: reference.to_string(),
+        }
     }
     fn voucher(date: &str, amount: f64, narration: &str, voucher_no: &str) -> Voucher {
-        Voucher { date: date.to_string(), amount, narration: narration.to_string(), voucher_no: voucher_no.to_string(), voucher_type: String::new(), ledger: String::new() }
+        Voucher {
+            date: date.to_string(),
+            amount,
+            narration: narration.to_string(),
+            voucher_no: voucher_no.to_string(),
+            voucher_type: String::new(),
+            ledger: String::new(),
+        }
     }
 
     // ── Exact matches ──────────────────────────────────────────────────────
@@ -399,7 +487,12 @@ mod tests {
         let b = bank("01/04/2026", 1000.0, "SALARY CREDIT ACME PVT LTD", "");
         let v = voucher("01/04/2026", 1000.0, "SALARY CREDIT ACME PVT LTD", "");
         let score = score_match(&b, &v, &cfg);
-        assert!(score >= cfg.auto_accept_above, "exact match should score >= {}, got {}", cfg.auto_accept_above, score);
+        assert!(
+            score >= cfg.auto_accept_above,
+            "exact match should score >= {}, got {}",
+            cfg.auto_accept_above,
+            score
+        );
         assert_eq!(status_from_score(score, &cfg), MatchStatus::Matched);
     }
 
@@ -407,7 +500,12 @@ mod tests {
     fn reconcile_pairs_exact_match_and_leaves_no_unmatched() {
         let cfg = ReconConfig::default();
         let bank_v = vec![bank("01/04/2026", 1000.0, "SALARY CREDIT ACME PVT LTD", "")];
-        let vouchers = vec![voucher("01/04/2026", 1000.0, "SALARY CREDIT ACME PVT LTD", "")];
+        let vouchers = vec![voucher(
+            "01/04/2026",
+            1000.0,
+            "SALARY CREDIT ACME PVT LTD",
+            "",
+        )];
         let report = reconcile(&bank_v, &vouchers, &cfg);
         assert_eq!(report.matches.len(), 1);
         assert_eq!(report.matches[0].status, MatchStatus::Matched);
@@ -425,7 +523,10 @@ mod tests {
         let score = score_match(&b, &v, &cfg);
         assert!(score > 0.0, "amount within tolerance must still score > 0");
         let exact = score_match(&b, &voucher("01/04/2026", 1000.0, "RENT PAYMENT", ""), &cfg);
-        assert!(score < exact, "a tolerance-only amount match must score lower than an exact one");
+        assert!(
+            score < exact,
+            "a tolerance-only amount match must score lower than an exact one"
+        );
     }
 
     #[test]
@@ -433,7 +534,11 @@ mod tests {
         let cfg = ReconConfig::new(3, 0.5); // hard filter at 1% (2x)
         let b = bank("01/04/2026", 1000.0, "RENT PAYMENT", "");
         let v = voucher("01/04/2026", 1100.0, "RENT PAYMENT", ""); // 10% off
-        assert_eq!(score_match(&b, &v, &cfg), 0.0, "amount far outside tolerance must hard-reject regardless of date/narration");
+        assert_eq!(
+            score_match(&b, &v, &cfg),
+            0.0,
+            "amount far outside tolerance must hard-reject regardless of date/narration"
+        );
     }
 
     // ── Date tolerance ──────────────────────────────────────────────────────
@@ -444,8 +549,14 @@ mod tests {
         let b = bank("01/04/2026", 1000.0, "RENT PAYMENT", "");
         let same_day = score_match(&b, &voucher("01/04/2026", 1000.0, "RENT PAYMENT", ""), &cfg);
         let two_days = score_match(&b, &voucher("03/04/2026", 1000.0, "RENT PAYMENT", ""), &cfg);
-        assert!(two_days > 0.0, "date within the fuzzy window must still score > 0");
-        assert!(two_days < same_day, "a date within the fuzzy window must score lower than an exact same-day match");
+        assert!(
+            two_days > 0.0,
+            "date within the fuzzy window must still score > 0"
+        );
+        assert!(
+            two_days < same_day,
+            "a date within the fuzzy window must score lower than an exact same-day match"
+        );
     }
 
     #[test]
@@ -453,7 +564,11 @@ mod tests {
         let cfg = ReconConfig::new(3, 0.5); // date rejects beyond 2*3 = 6 days
         let b = bank("01/04/2026", 1000.0, "RENT PAYMENT", "");
         let v = voucher("10/04/2026", 1000.0, "RENT PAYMENT", ""); // 9 days apart
-        assert_eq!(score_match(&b, &v, &cfg), 0.0, "date far beyond the fuzzy window must hard-reject");
+        assert_eq!(
+            score_match(&b, &v, &cfg),
+            0.0,
+            "date far beyond the fuzzy window must hard-reject"
+        );
     }
 
     // ── Partial / narration-driven matches ──────────────────────────────────
@@ -466,10 +581,23 @@ mod tests {
         // on their own these two components alone would land below the
         // "likely" threshold; matching reference numbers should still let it
         // register as at least a "possible" match instead of a hard reject.
-        let b = bank("01/04/2026", 1000.0, "PAYMENT TO XYZ TRADERS FOR SUPPLIES", "REF12345");
-        let v = voucher("04/04/2026", 1009.0, "PAYMENT TO XYZ TRADERS FOR SUPPLIES", "REF12345");
+        let b = bank(
+            "01/04/2026",
+            1000.0,
+            "PAYMENT TO XYZ TRADERS FOR SUPPLIES",
+            "REF12345",
+        );
+        let v = voucher(
+            "04/04/2026",
+            1009.0,
+            "PAYMENT TO XYZ TRADERS FOR SUPPLIES",
+            "REF12345",
+        );
         let score = score_match(&b, &v, &cfg);
-        assert!(score > 0.0, "must not hard-reject when reference numbers match");
+        assert!(
+            score > 0.0,
+            "must not hard-reject when reference numbers match"
+        );
         assert_ne!(status_from_score(score, &cfg), MatchStatus::Unmatched);
     }
 
@@ -477,8 +605,9 @@ mod tests {
     fn reference_number_mismatch_does_not_add_a_bonus() {
         let cfg = ReconConfig::default();
         let b = bank("01/04/2026", 1000.0, "PAYMENT", "REF-A");
-        let with_match    = score_match(&b, &voucher("01/04/2026", 1000.0, "PAYMENT", "REF-A"), &cfg);
-        let with_mismatch = score_match(&b, &voucher("01/04/2026", 1000.0, "PAYMENT", "REF-B"), &cfg);
+        let with_match = score_match(&b, &voucher("01/04/2026", 1000.0, "PAYMENT", "REF-A"), &cfg);
+        let with_mismatch =
+            score_match(&b, &voucher("01/04/2026", 1000.0, "PAYMENT", "REF-B"), &cfg);
         assert!(with_match >= with_mismatch);
     }
 
@@ -488,7 +617,12 @@ mod tests {
     fn bank_transaction_with_no_plausible_voucher_is_unmatched() {
         let cfg = ReconConfig::default();
         let bank_v = vec![bank("01/04/2026", 1000.0, "RENT", "")];
-        let vouchers = vec![voucher("01/04/2026", 50000.0, "SOMETHING ELSE ENTIRELY", "")];
+        let vouchers = vec![voucher(
+            "01/04/2026",
+            50000.0,
+            "SOMETHING ELSE ENTIRELY",
+            "",
+        )];
         let report = reconcile(&bank_v, &vouchers, &cfg);
         assert!(report.matches.is_empty());
         assert_eq!(report.unmatched_bank, vec![0]);
@@ -498,7 +632,10 @@ mod tests {
     #[test]
     fn empty_vouchers_leaves_every_bank_transaction_unmatched() {
         let cfg = ReconConfig::default();
-        let bank_v = vec![bank("01/04/2026", 1000.0, "RENT", ""), bank("02/04/2026", 2000.0, "SALARY", "")];
+        let bank_v = vec![
+            bank("01/04/2026", 1000.0, "RENT", ""),
+            bank("02/04/2026", 2000.0, "SALARY", ""),
+        ];
         let report = reconcile(&bank_v, &[], &cfg);
         assert_eq!(report.matches.len(), 0);
         assert_eq!(report.unmatched_bank.len(), 2);
@@ -517,10 +654,23 @@ mod tests {
             bank("01/04/2026", 1000.0, "SUBSCRIPTION FEE MONTHLY", ""),
             bank("01/04/2026", 1000.0, "SUBSCRIPTION FEE MONTHLY", ""),
         ];
-        let vouchers = vec![voucher("01/04/2026", 1000.0, "SUBSCRIPTION FEE MONTHLY", "")];
+        let vouchers = vec![voucher(
+            "01/04/2026",
+            1000.0,
+            "SUBSCRIPTION FEE MONTHLY",
+            "",
+        )];
         let report = reconcile(&bank_v, &vouchers, &cfg);
-        assert_eq!(report.matches.len(), 1, "only one of the two duplicates can claim the single voucher");
-        assert_eq!(report.unmatched_bank.len(), 1, "the other duplicate must be left unmatched");
+        assert_eq!(
+            report.matches.len(),
+            1,
+            "only one of the two duplicates can claim the single voucher"
+        );
+        assert_eq!(
+            report.unmatched_bank.len(),
+            1,
+            "the other duplicate must be left unmatched"
+        );
         assert!(report.unmatched_vouchers.is_empty());
     }
 
@@ -535,18 +685,26 @@ mod tests {
         // voucher 2 (its best match), freeing voucher 1 for B.
         let cfg = ReconConfig::new(3, 0.5);
         let bank_v = vec![
-            bank("01/04/2026", 1000.0, "PAYMENT ALPHA CORP SERVICES", ""),   // A
-            bank("01/04/2026", 1000.0, "PAYMENT BETA CORP", ""),              // B
+            bank("01/04/2026", 1000.0, "PAYMENT ALPHA CORP SERVICES", ""), // A
+            bank("01/04/2026", 1000.0, "PAYMENT BETA CORP", ""),           // B
         ];
         let vouchers = vec![
-            voucher("01/04/2026", 1000.0, "PAYMENT BETA CORP", ""),          // voucher 1 — only matches B well, and A weakly (no narration overlap)
-            voucher("01/04/2026", 1000.0, "PAYMENT ALPHA CORP SERVICES", ""),// voucher 2 — perfect match for A
+            voucher("01/04/2026", 1000.0, "PAYMENT BETA CORP", ""), // voucher 1 — only matches B well, and A weakly (no narration overlap)
+            voucher("01/04/2026", 1000.0, "PAYMENT ALPHA CORP SERVICES", ""), // voucher 2 — perfect match for A
         ];
         let report = reconcile(&bank_v, &vouchers, &cfg);
-        assert_eq!(report.matches.len(), 2, "both bank transactions should end up matched");
+        assert_eq!(
+            report.matches.len(),
+            2,
+            "both bank transactions should end up matched"
+        );
         for m in &report.matches {
-            if m.bank_idx == 0 { assert_eq!(m.voucher_idx, 1, "A must claim its perfect-match voucher 2"); }
-            if m.bank_idx == 1 { assert_eq!(m.voucher_idx, 0, "B must get voucher 1, its only option"); }
+            if m.bank_idx == 0 {
+                assert_eq!(m.voucher_idx, 1, "A must claim its perfect-match voucher 2");
+            }
+            if m.bank_idx == 1 {
+                assert_eq!(m.voucher_idx, 0, "B must get voucher 1, its only option");
+            }
         }
     }
 
@@ -556,9 +714,9 @@ mod tests {
     fn reconcile_handles_a_mixed_batch_of_matched_likely_and_unmatched() {
         let cfg = ReconConfig::new(3, 0.5);
         let bank_v = vec![
-            bank("01/04/2026", 1000.0, "SALARY CREDIT ACME PVT LTD", ""),   // exact
-            bank("05/04/2026", 2000.0, "RENT PAYMENT TO OWNER", ""),        // 2 days off — likely
-            bank("10/04/2026", 999999.0, "UNRELATED HUGE TRANSFER", ""),    // no plausible voucher
+            bank("01/04/2026", 1000.0, "SALARY CREDIT ACME PVT LTD", ""), // exact
+            bank("05/04/2026", 2000.0, "RENT PAYMENT TO OWNER", ""),      // 2 days off — likely
+            bank("10/04/2026", 999999.0, "UNRELATED HUGE TRANSFER", ""),  // no plausible voucher
         ];
         let vouchers = vec![
             voucher("01/04/2026", 1000.0, "SALARY CREDIT ACME PVT LTD", ""),
@@ -576,9 +734,33 @@ mod tests {
     #[test]
     fn parse_tally_grid_extracts_all_voucher_fields() {
         let rows = vec![
-            vec!["Date".into(), "Particulars".into(), "Voucher No".into(), "Type".into(), "Debit".into(), "Credit".into(), "Ledger".into()],
-            vec!["01/04/2026".into(), "Salary Credit Acme".into(), "V-001".into(), "Payment".into(), "1000".into(), "".into(), "Salaries".into()],
-            vec!["02/04/2026".into(), "Rent Received".into(), "V-002".into(), "Receipt".into(), "".into(), "5000".into(), "Rent Income".into()],
+            vec![
+                "Date".into(),
+                "Particulars".into(),
+                "Voucher No".into(),
+                "Type".into(),
+                "Debit".into(),
+                "Credit".into(),
+                "Ledger".into(),
+            ],
+            vec![
+                "01/04/2026".into(),
+                "Salary Credit Acme".into(),
+                "V-001".into(),
+                "Payment".into(),
+                "1000".into(),
+                "".into(),
+                "Salaries".into(),
+            ],
+            vec![
+                "02/04/2026".into(),
+                "Rent Received".into(),
+                "V-002".into(),
+                "Receipt".into(),
+                "".into(),
+                "5000".into(),
+                "Rent Income".into(),
+            ],
         ];
         let vouchers = parse_tally_grid(&rows);
         assert_eq!(vouchers.len(), 2);
@@ -586,7 +768,10 @@ mod tests {
         assert_eq!(vouchers[0].voucher_no, "V-001");
         assert_eq!(vouchers[0].voucher_type, "Payment");
         assert_eq!(vouchers[0].ledger, "Salaries");
-        assert_eq!(vouchers[1].amount, 5000.0, "must fall back to the Credit column when Debit is blank");
+        assert_eq!(
+            vouchers[1].amount, 5000.0,
+            "must fall back to the Credit column when Debit is blank"
+        );
     }
 
     #[test]
@@ -612,14 +797,26 @@ mod tests {
 
     #[test]
     fn narr_similarity_identical_is_one_and_unrelated_is_zero() {
-        assert_eq!(narr_similarity("SALARY CREDIT ACME PVT LTD", "SALARY CREDIT ACME PVT LTD"), 1.0);
-        assert_eq!(narr_similarity("SALARY CREDIT ACME PVT LTD", "COMPLETELY DIFFERENT TEXT HERE"), 0.0);
+        assert_eq!(
+            narr_similarity("SALARY CREDIT ACME PVT LTD", "SALARY CREDIT ACME PVT LTD"),
+            1.0
+        );
+        assert_eq!(
+            narr_similarity(
+                "SALARY CREDIT ACME PVT LTD",
+                "COMPLETELY DIFFERENT TEXT HERE"
+            ),
+            0.0
+        );
     }
 
     #[test]
     fn report_to_csv_includes_matched_and_unmatched_rows() {
         let cfg = ReconConfig::default();
-        let bank_v = vec![bank("01/04/2026", 1000.0, "SALARY", ""), bank("02/04/2026", 999.0, "UNRELATED", "")];
+        let bank_v = vec![
+            bank("01/04/2026", 1000.0, "SALARY", ""),
+            bank("02/04/2026", 999.0, "UNRELATED", ""),
+        ];
         let vouchers = vec![voucher("01/04/2026", 1000.0, "SALARY", "")];
         let report = reconcile(&bank_v, &vouchers, &cfg);
         let csv = report_to_csv(&bank_v, &vouchers, &report);

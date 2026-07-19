@@ -1,11 +1,10 @@
 // ai_classifier.rs — AI-powered batch classification using OpenAI / Claude / Gemini.
-// Only compiled when the "ai" feature is active.
+// Only compiled when the "ai" feature is active (gated by lib.rs's
+// `#[cfg(feature = "ai")] pub mod ai_classifier;`, not repeated here).
 
-#![cfg(feature = "ai")]
-
-use anyhow::{anyhow, Context, Result};
 use crate::parser::Transaction;
 use crate::text_safety::safe_prefix;
+use anyhow::{anyhow, Context, Result};
 
 const BATCH_SIZE: usize = 15;
 
@@ -28,11 +27,11 @@ impl AiProvider {
 
 #[derive(Debug, Clone)]
 pub struct AiClassifyResult {
-    pub idx:         usize,
-    pub vendor:      String,
+    pub idx: usize,
+    pub vendor: String,
     pub account_head: String,
-    pub txn_type:    String,
-    pub confidence:  f64,
+    pub txn_type: String,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,7 +58,7 @@ impl AiScope {
 /// hiding the overlay. Already-classified transactions from completed batches
 /// are kept; only remaining batches are skipped.
 pub fn classify_with_ai<F>(
-    txns: &mut Vec<Transaction>,
+    txns: &mut [Transaction],
     provider: AiProvider,
     api_key: &str,
     scope: AiScope,
@@ -73,11 +72,16 @@ where
         return Err(anyhow!("AI API key is empty"));
     }
 
-    let indices: Vec<usize> = txns.iter().enumerate()
+    let indices: Vec<usize> = txns
+        .iter()
+        .enumerate()
         .filter(|(_, t)| {
-            if t.is_opening_balance { return false; }
+            if t.is_opening_balance {
+                return false;
+            }
             if matches!(t.status, crate::parser::TransactionStatus::Manual)
-                || matches!(t.status, crate::parser::TransactionStatus::Suspense) {
+                || matches!(t.status, crate::parser::TransactionStatus::Suspense)
+            {
                 return false;
             }
             match scope {
@@ -93,7 +97,9 @@ where
         .collect();
 
     let total = indices.len();
-    if total == 0 { return Ok(0); }
+    if total == 0 {
+        return Ok(0);
+    }
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -104,10 +110,15 @@ where
 
     for chunk in indices.chunks(BATCH_SIZE) {
         if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            log::info!("[AI] cancelled by user after {} of {} classified", classified, total);
+            log::info!(
+                "[AI] cancelled by user after {} of {} classified",
+                classified,
+                total
+            );
             break;
         }
-        let batch: Vec<(usize, &str)> = chunk.iter()
+        let batch: Vec<(usize, &str)> = chunk
+            .iter()
             .map(|&i| (i, txns[i].narration.as_str()))
             .collect();
 
@@ -122,20 +133,26 @@ where
                 for r in &responses {
                     if r.idx < txns.len() {
                         let t = &mut txns[r.idx];
-                        if !r.vendor.is_empty()       { t.vendor       = r.vendor.clone(); }
-                        if !r.account_head.is_empty() { t.account_head = r.account_head.clone(); }
+                        if !r.vendor.is_empty() {
+                            t.vendor = r.vendor.clone();
+                        }
+                        if !r.account_head.is_empty() {
+                            t.account_head = r.account_head.clone();
+                        }
                         if !r.txn_type.is_empty() {
                             t.txn_type = match r.txn_type.as_str() {
-                                "Payment"  => crate::parser::VoucherType::Payment,
-                                "Receipt"  => crate::parser::VoucherType::Receipt,
-                                "Contra"   => crate::parser::VoucherType::Contra,
-                                _          => t.txn_type.clone(),
+                                "Payment" => crate::parser::VoucherType::Payment,
+                                "Receipt" => crate::parser::VoucherType::Receipt,
+                                "Contra" => crate::parser::VoucherType::Contra,
+                                _ => t.txn_type.clone(),
                             };
                         }
-                        t.confidence   = r.confidence.clamp(0.0, 1.0);
-                        t.status       = crate::parser::TransactionStatus::Classified;
+                        t.confidence = r.confidence.clamp(0.0, 1.0);
+                        t.status = crate::parser::TransactionStatus::Classified;
                         t.classification_source = "ai".to_string();
-                        if !t.tags.iter().any(|g| g == "ai") { t.tags.push("ai".to_string()); }
+                        if !t.tags.iter().any(|g| g == "ai") {
+                            t.tags.push("ai".to_string());
+                        }
                         classified += 1;
                     }
                 }
@@ -165,11 +182,16 @@ Return ONLY the JSON array, no markdown."
 }
 
 fn build_user_prompt(batch: &[(usize, &str)]) -> String {
-    let lines: Vec<String> = batch.iter()
+    let lines: Vec<String> = batch
+        .iter()
         .enumerate()
         .map(|(i, (_, narr))| format!("{}: {}", i + 1, narr))
         .collect();
-    format!("Classify these {} transactions:\n{}", batch.len(), lines.join("\n"))
+    format!(
+        "Classify these {} transactions:\n{}",
+        batch.len(),
+        lines.join("\n")
+    )
 }
 
 // ── OpenAI ────────────────────────────────────────────────────────────────────
@@ -199,12 +221,17 @@ fn call_openai(
     let status = resp.status();
     let text = resp.text().context("openai response text")?;
     if !status.is_success() {
-        return Err(anyhow!("OpenAI HTTP {}: {}", status, safe_prefix(&text, 200)));
+        return Err(anyhow!(
+            "OpenAI HTTP {}: {}",
+            status,
+            safe_prefix(&text, 200)
+        ));
     }
 
     let json: serde_json::Value = serde_json::from_str(&text).context("parse openai json")?;
     let content = json["choices"][0]["message"]["content"]
-        .as_str().unwrap_or("[]");
+        .as_str()
+        .unwrap_or("[]");
 
     parse_ai_response(batch, content)
 }
@@ -236,12 +263,15 @@ fn call_claude(
     let status = resp.status();
     let text = resp.text().context("claude response text")?;
     if !status.is_success() {
-        return Err(anyhow!("Claude HTTP {}: {}", status, safe_prefix(&text, 200)));
+        return Err(anyhow!(
+            "Claude HTTP {}: {}",
+            status,
+            safe_prefix(&text, 200)
+        ));
     }
 
     let json: serde_json::Value = serde_json::from_str(&text).context("parse claude json")?;
-    let content = json["content"][0]["text"]
-        .as_str().unwrap_or("[]");
+    let content = json["content"][0]["text"].as_str().unwrap_or("[]");
 
     parse_ai_response(batch, content)
 }
@@ -273,12 +303,17 @@ fn call_gemini(
     let status = resp.status();
     let text = resp.text().context("gemini response text")?;
     if !status.is_success() {
-        return Err(anyhow!("Gemini HTTP {}: {}", status, safe_prefix(&text, 200)));
+        return Err(anyhow!(
+            "Gemini HTTP {}: {}",
+            status,
+            safe_prefix(&text, 200)
+        ));
     }
 
     let json: serde_json::Value = serde_json::from_str(&text).context("parse gemini json")?;
     let content = json["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str().unwrap_or("[]");
+        .as_str()
+        .unwrap_or("[]");
 
     parse_ai_response(batch, content)
 }
@@ -294,21 +329,25 @@ fn parse_ai_response(batch: &[(usize, &str)], content: &str) -> Result<Vec<AiCla
         .trim_end_matches("```")
         .trim();
 
-    let arr: serde_json::Value = serde_json::from_str(stripped)
-        .context("parse AI JSON response")?;
+    let arr: serde_json::Value =
+        serde_json::from_str(stripped).context("parse AI JSON response")?;
 
-    let items = arr.as_array().ok_or_else(|| anyhow!("AI response is not an array"))?;
+    let items = arr
+        .as_array()
+        .ok_or_else(|| anyhow!("AI response is not an array"))?;
 
     let mut results = Vec::new();
     for (pos, item) in items.iter().enumerate() {
-        if pos >= batch.len() { break; }
+        if pos >= batch.len() {
+            break;
+        }
         let orig_idx = batch[pos].0;
         results.push(AiClassifyResult {
-            idx:          orig_idx,
-            vendor:       item["vendor"].as_str().unwrap_or("").to_string(),
+            idx: orig_idx,
+            vendor: item["vendor"].as_str().unwrap_or("").to_string(),
             account_head: item["account_head"].as_str().unwrap_or("").to_string(),
-            txn_type:     item["txn_type"].as_str().unwrap_or("").to_string(),
-            confidence:   item["confidence"].as_f64().unwrap_or(0.5),
+            txn_type: item["txn_type"].as_str().unwrap_or("").to_string(),
+            confidence: item["confidence"].as_f64().unwrap_or(0.5),
         });
     }
 

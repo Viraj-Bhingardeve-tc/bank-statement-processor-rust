@@ -3,13 +3,13 @@
 
 use crate::parser::{Transaction, VoucherType};
 use crate::tally_group_engine;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 // ── Options mirroring the Tally Export modal UI ───────────────────────────────
 
 #[derive(Debug, Clone, Default)]
 pub struct TallyOpts {
-    pub company:            String,
+    pub company: String,
     // Verified against the original Electron app's tallyExportEngine
     // (accounting-export-engine.js's Tally exporter): the TDML voucher
     // import format it produces has no GSTIN/financial-year field at all —
@@ -18,17 +18,17 @@ pub struct TallyOpts {
     // in the original app as well as this port. Intentionally unread here;
     // see gen_generic_xml in accounting.rs for the format that does use them.
     #[allow(dead_code)]
-    pub gstin:              String,
+    pub gstin: String,
     #[allow(dead_code)]
-    pub fy:                 String,         // e.g. "2024-25"
-    pub bank_ledger:        String,         // Tally ledger for the bank account
-    pub date_from:          Option<String>, // ISO YYYY-MM-DD
-    pub date_to:            Option<String>,
-    pub only_classified:    bool,
-    pub include_ledgers:    bool,
+    pub fy: String, // e.g. "2024-25"
+    pub bank_ledger: String,       // Tally ledger for the bank account
+    pub date_from: Option<String>, // ISO YYYY-MM-DD
+    pub date_to: Option<String>,
+    pub only_classified: bool,
+    pub include_ledgers: bool,
     pub include_narrations: bool,
-    pub include_ob:         bool,
-    pub skip_low_conf:      bool,
+    pub include_ob: bool,
+    pub skip_low_conf: bool,
 }
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ fn to_tally_date(s: &str) -> String {
     if p.len() == 3 && p[2].len() == 4 {
         return format!("{}{}{}", p[2], p[1].zfill2(), p[0].zfill2());
     }
-    s.replace('-', "").replace('/', "")
+    s.replace(['-', '/'], "")
 }
 
 fn to_iso_date(s: &str) -> String {
@@ -51,16 +51,30 @@ fn to_iso_date(s: &str) -> String {
     s.to_string()
 }
 
-trait Zfill2 { fn zfill2(&self) -> String; }
+trait Zfill2 {
+    fn zfill2(&self) -> String;
+}
 impl Zfill2 for &str {
-    fn zfill2(&self) -> String { format!("{:0>2}", self) }
+    fn zfill2(&self) -> String {
+        format!("{:0>2}", self)
+    }
 }
 
 fn in_range(date_str: &str, from: &Option<String>, to: &Option<String>) -> bool {
-    if date_str.is_empty() { return false; }
+    if date_str.is_empty() {
+        return false;
+    }
     let iso = to_iso_date(date_str);
-    if let Some(f) = from { if iso.as_str() < f.as_str() { return false; } }
-    if let Some(t) = to   { if iso.as_str() > t.as_str() { return false; } }
+    if let Some(f) = from {
+        if iso.as_str() < f.as_str() {
+            return false;
+        }
+    }
+    if let Some(t) = to {
+        if iso.as_str() > t.as_str() {
+            return false;
+        }
+    }
     true
 }
 
@@ -68,10 +82,10 @@ fn in_range(date_str: &str, from: &Option<String>, to: &Option<String>) -> bool 
 
 fn x(s: &str) -> String {
     s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
-     .replace('\'', "&apos;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 // ── Voucher type resolution ───────────────────────────────────────────────────
@@ -79,7 +93,7 @@ fn x(s: &str) -> String {
 fn voucher_type(t: &Transaction) -> &'static str {
     match &t.txn_type {
         VoucherType::Receipt => "Receipt",
-        VoucherType::Contra  => "Contra",
+        VoucherType::Contra => "Contra",
         VoucherType::Payment => "Payment",
         _ => {
             let n = t.narration.to_uppercase();
@@ -96,32 +110,47 @@ fn voucher_type(t: &Transaction) -> &'static str {
 
 /// Ledger used for the contra entry (bank side).
 fn bank_ledger_name(t: &Transaction, bank_ledger: &str) -> String {
-    if !bank_ledger.is_empty() { return bank_ledger.to_string(); }
-    if !t.bank_name.is_empty() { return format!("{} A/c", t.bank_name); }
+    if !bank_ledger.is_empty() {
+        return bank_ledger.to_string();
+    }
+    if !t.bank_name.is_empty() {
+        return format!("{} A/c", t.bank_name);
+    }
     "Bank Account".to_string()
 }
 
 /// Posting ledger (expense/income/party head).
 fn posting_ledger(t: &Transaction) -> String {
-    if !t.account_head.is_empty()  { return t.account_head.clone(); }
-    if !t.vendor.is_empty()        { return t.vendor.clone(); }
+    if !t.account_head.is_empty() {
+        return t.account_head.clone();
+    }
+    if !t.vendor.is_empty() {
+        return t.vendor.clone();
+    }
     "Unclassified".to_string()
 }
 
 // ── Generate TDML XML ─────────────────────────────────────────────────────────
 
 pub fn generate(txns: &[Transaction], opts: &TallyOpts, opening_bal: Option<f64>) -> String {
-    let real: Vec<&Transaction> = txns.iter()
+    let real: Vec<&Transaction> = txns
+        .iter()
         .filter(|t| !t.is_opening_balance)
         .filter(|t| in_range(&t.date, &opts.date_from, &opts.date_to))
         .filter(|t| {
             if opts.only_classified {
                 !matches!(t.status, crate::parser::TransactionStatus::Unreviewed)
                     && !matches!(t.status, crate::parser::TransactionStatus::Suspense)
-            } else { true }
+            } else {
+                true
+            }
         })
         .filter(|t| {
-            if opts.skip_low_conf { t.confidence >= 0.4 } else { true }
+            if opts.skip_low_conf {
+                t.confidence >= 0.4
+            } else {
+                true
+            }
         })
         .collect();
 
@@ -137,7 +166,10 @@ pub fn generate(txns: &[Transaction], opts: &TallyOpts, opening_bal: Option<f64>
     out.push_str("    <IMPORTDATA>\n");
     out.push_str("      <REQUESTDESC>\n");
     out.push_str("        <REPORTNAME>Vouchers</REPORTNAME>\n");
-    out.push_str(&format!("        <STATICVARIABLES><SVCURRENTCOMPANY>{}</SVCURRENTCOMPANY></STATICVARIABLES>\n", x(&opts.company)));
+    out.push_str(&format!(
+        "        <STATICVARIABLES><SVCURRENTCOMPANY>{}</SVCURRENTCOMPANY></STATICVARIABLES>\n",
+        x(&opts.company)
+    ));
     out.push_str("      </REQUESTDESC>\n");
     out.push_str("      <REQUESTDATA>\n");
 
@@ -147,7 +179,10 @@ pub fn generate(txns: &[Transaction], opts: &TallyOpts, opening_bal: Option<f64>
 
         // Bank ledger itself
         if !opts.bank_ledger.is_empty() && seen.insert(opts.bank_ledger.clone()) {
-            out.push_str(&ledger_master(&opts.bank_ledger, tally_group_engine::GROUP_BANK_ACCOUNTS));
+            out.push_str(&ledger_master(
+                &opts.bank_ledger,
+                tally_group_engine::GROUP_BANK_ACCOUNTS,
+            ));
         }
 
         // All posting/party ledgers — mirrors Electron's _tallyParent(): a party
@@ -179,7 +214,13 @@ pub fn generate(txns: &[Transaction], opts: &TallyOpts, opening_bal: Option<f64>
         if let Some(ob) = opening_bal {
             if !real.is_empty() {
                 let date = &real[0].date;
-                out.push_str(&ob_voucher(date, &opts.bank_ledger, &opts.company, ob, opts));
+                out.push_str(&ob_voucher(
+                    date,
+                    &opts.bank_ledger,
+                    &opts.company,
+                    ob,
+                    opts,
+                ));
             }
         }
     }
@@ -204,13 +245,19 @@ fn ledger_master(name: &str, group: &str) -> String {
          <NAME>{}</NAME>\
          <PARENT>{}</PARENT>\
          </LEDGER></TALLYMESSAGE>\n",
-        x(name), x(name), x(group)
+        x(name),
+        x(name),
+        x(group)
     )
 }
 
 fn ob_voucher(date: &str, bank_ledger: &str, _company: &str, ob: f64, opts: &TallyOpts) -> String {
     let td = to_tally_date(date);
-    let narr = if opts.include_narrations { "Opening Balance" } else { "" };
+    let narr = if opts.include_narrations {
+        "Opening Balance"
+    } else {
+        ""
+    };
     format!(
         "        <TALLYMESSAGE xmlns:UDF=\"TallyUDF\">\
          <VOUCHER VCHTYPE=\"Journal\" ACTION=\"Create\">\
@@ -227,25 +274,33 @@ fn ob_voucher(date: &str, bank_ledger: &str, _company: &str, ob: f64, opts: &Tal
          <AMOUNT>{:.2}</AMOUNT>\
          </ALLLEDGERENTRIES.LIST>\
          </VOUCHER></TALLYMESSAGE>\n",
-        td, x(narr), x(bank_ledger), ob, ob
+        td,
+        x(narr),
+        x(bank_ledger),
+        ob,
+        ob
     )
 }
 
 fn txn_voucher(t: &Transaction, opts: &TallyOpts) -> String {
-    let vt     = voucher_type(t);
-    let td     = to_tally_date(&t.date);
-    let narr   = if opts.include_narrations { t.narration.as_str() } else { "" };
-    let bank   = bank_ledger_name(t, &opts.bank_ledger);
+    let vt = voucher_type(t);
+    let td = to_tally_date(&t.date);
+    let narr = if opts.include_narrations {
+        t.narration.as_str()
+    } else {
+        ""
+    };
+    let bank = bank_ledger_name(t, &opts.bank_ledger);
     let ledger = posting_ledger(t);
-    let amt    = t.debit.or(t.credit).unwrap_or(0.0);
+    let amt = t.debit.or(t.credit).unwrap_or(0.0);
 
     // For Receipt: bank Dr, posting Cr  → bank ispositive=Yes, posting ispositive=No
     // For Payment: posting Dr, bank Cr → posting ispositive=No, bank ispositive=Yes
     // For Contra:  bank Dr, bank Cr (cash/ATM)
-    let (dr_ledger, cr_ledger, is_receipt) = match vt {
+    let (dr_ledger, cr_ledger, _is_receipt) = match vt {
         "Receipt" => (bank.as_str(), ledger.as_str(), true),
-        "Contra"  => (bank.as_str(), "Cash",          true),
-        _         => (ledger.as_str(), bank.as_str(),  false),
+        "Contra" => (bank.as_str(), "Cash", true),
+        _ => (ledger.as_str(), bank.as_str(), false),
     };
 
     format!(
@@ -265,19 +320,23 @@ fn txn_voucher(t: &Transaction, opts: &TallyOpts) -> String {
          <AMOUNT>{amt:.2}</AMOUNT>\
          </ALLLEDGERENTRIES.LIST>\
          </VOUCHER></TALLYMESSAGE>\n",
-        vt = vt, td = td, narr = x(narr), amt = amt,
-        dr = x(dr_ledger), cr = x(cr_ledger),
+        vt = vt,
+        td = td,
+        narr = x(narr),
+        amt = amt,
+        dr = x(dr_ledger),
+        cr = x(cr_ledger),
     )
 }
 
 // ── Count preview ─────────────────────────────────────────────────────────────
 
 pub struct TallyPreview {
-    pub total:   usize,
+    pub total: usize,
     pub payment: usize,
     pub receipt: usize,
-    pub contra:  usize,
-    pub gst:     usize,
+    pub contra: usize,
+    pub gst: usize,
     /// Sum of gst_amount across GST-tagged transactions in this preview —
     /// backs the "verify CGST/SGST/IGST split" warning with a real figure
     /// instead of just a voucher count.
@@ -287,28 +346,53 @@ pub struct TallyPreview {
 
 pub fn count_preview(txns: &[Transaction], opts: &TallyOpts) -> TallyPreview {
     let total_real = txns.iter().filter(|t| !t.is_opening_balance).count();
-    let filtered: Vec<&Transaction> = txns.iter()
+    let filtered: Vec<&Transaction> = txns
+        .iter()
         .filter(|t| !t.is_opening_balance)
         .filter(|t| in_range(&t.date, &opts.date_from, &opts.date_to))
         .filter(|t| {
             if opts.only_classified {
                 !matches!(t.status, crate::parser::TransactionStatus::Unreviewed)
-                && !matches!(t.status, crate::parser::TransactionStatus::Suspense)
-            } else { true }
+                    && !matches!(t.status, crate::parser::TransactionStatus::Suspense)
+            } else {
+                true
+            }
         })
-        .filter(|t| if opts.skip_low_conf { t.confidence >= 0.4 } else { true })
+        .filter(|t| {
+            if opts.skip_low_conf {
+                t.confidence >= 0.4
+            } else {
+                true
+            }
+        })
         .collect();
 
-    let payment = filtered.iter().filter(|t| voucher_type(t) == "Payment").count();
-    let receipt = filtered.iter().filter(|t| voucher_type(t) == "Receipt").count();
-    let contra  = filtered.iter().filter(|t| voucher_type(t) == "Contra").count();
-    let gst_txns: Vec<&&Transaction> = filtered.iter().filter(|t| t.tags.iter().any(|g| g == "GST")).collect();
-    let gst        = gst_txns.len();
+    let payment = filtered
+        .iter()
+        .filter(|t| voucher_type(t) == "Payment")
+        .count();
+    let receipt = filtered
+        .iter()
+        .filter(|t| voucher_type(t) == "Receipt")
+        .count();
+    let contra = filtered
+        .iter()
+        .filter(|t| voucher_type(t) == "Contra")
+        .count();
+    let gst_txns: Vec<&&Transaction> = filtered
+        .iter()
+        .filter(|t| t.tags.iter().any(|g| g == "GST"))
+        .collect();
+    let gst = gst_txns.len();
     let gst_amount = gst_txns.iter().filter_map(|t| t.gst_amount).sum();
 
     TallyPreview {
-        total:   filtered.len(),
-        payment, receipt, contra, gst, gst_amount,
+        total: filtered.len(),
+        payment,
+        receipt,
+        contra,
+        gst,
+        gst_amount,
         skipped: total_real - filtered.len(),
     }
 }

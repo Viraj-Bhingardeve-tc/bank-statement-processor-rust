@@ -15,39 +15,39 @@ pub use encryption::diagnostics;
 #[cfg(test)]
 pub(crate) use encryption::ENCRYPTION_KEYRING_TEST_LOCK;
 
+use crate::parser::{Transaction, TransactionStatus, VoucherType};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
-use crate::parser::{Transaction, TransactionStatus, VoucherType};
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Client {
-    pub id:           i64,
-    pub name:         String,
+    pub id: i64,
+    pub name: String,
     pub tally_ledger: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ImportRecord {
-    pub id:          i64,
-    pub client_id:   i64,
-    pub file_name:   String,
-    pub bank_name:   String,
-    pub account_no:  String,
-    pub txn_count:   i64,
+    pub id: i64,
+    pub client_id: i64,
+    pub file_name: String,
+    pub bank_name: String,
+    pub account_no: String,
+    pub txn_count: i64,
     pub imported_at: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClassificationRule {
-    pub id:          i64,
-    pub client_id:   i64,
-    pub pattern:     String,
-    pub vendor:      String,
+    pub id: i64,
+    pub client_id: i64,
+    pub pattern: String,
+    pub vendor: String,
     pub account_head: String,
-    pub txn_type:    String,
+    pub txn_type: String,
 }
 
 // ── Client CRUD ───────────────────────────────────────────────────────────────
@@ -56,57 +56,66 @@ pub fn add_client(conn: &Connection, name: &str, tally_ledger: &str) -> Result<i
     conn.execute(
         "INSERT INTO clients (name, gstin) VALUES (?1, ?2)",
         rusqlite::params![name, tally_ledger],
-    ).context("add_client insert")?;
+    )
+    .context("add_client insert")?;
     Ok(conn.last_insert_rowid())
 }
 
 pub fn get_clients(conn: &Connection) -> Result<Vec<Client>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, gstin FROM clients ORDER BY name"
-    ).context("get_clients prepare")?;
-    let rows = stmt.query_map([], |r| {
-        Ok(Client {
-            id:           r.get(0)?,
-            name:         r.get(1)?,
-            tally_ledger: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+    let mut stmt = conn
+        .prepare("SELECT id, name, gstin FROM clients ORDER BY name")
+        .context("get_clients prepare")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(Client {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                tally_ledger: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            })
         })
-    }).context("get_clients query")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("get_clients collect")
+        .context("get_clients query")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("get_clients collect")
 }
 
 pub fn get_client(conn: &Connection, id: i64) -> Result<Option<Client>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, gstin FROM clients WHERE id = ?1"
-    ).context("get_client prepare")?;
-    let mut rows = stmt.query_map(rusqlite::params![id], |r| {
-        Ok(Client {
-            id:           r.get(0)?,
-            name:         r.get(1)?,
-            tally_ledger: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+    let mut stmt = conn
+        .prepare("SELECT id, name, gstin FROM clients WHERE id = ?1")
+        .context("get_client prepare")?;
+    let mut rows = stmt
+        .query_map(rusqlite::params![id], |r| {
+            Ok(Client {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                tally_ledger: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            })
         })
-    }).context("get_client query")?;
-    Ok(rows.next().transpose().context("get_client row")?)
+        .context("get_client query")?;
+    rows.next().transpose().context("get_client row")
 }
 
 pub fn get_client_by_name(conn: &Connection, name: &str) -> Result<Option<Client>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, gstin FROM clients WHERE name = ?1"
-    ).context("get_client_by_name prepare")?;
-    let mut rows = stmt.query_map(rusqlite::params![name], |r| {
-        Ok(Client {
-            id:           r.get(0)?,
-            name:         r.get(1)?,
-            tally_ledger: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+    let mut stmt = conn
+        .prepare("SELECT id, name, gstin FROM clients WHERE name = ?1")
+        .context("get_client_by_name prepare")?;
+    let mut rows = stmt
+        .query_map(rusqlite::params![name], |r| {
+            Ok(Client {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                tally_ledger: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            })
         })
-    }).context("get_client_by_name query")?;
-    Ok(rows.next().transpose().context("get_client_by_name row")?)
+        .context("get_client_by_name query")?;
+    rows.next().transpose().context("get_client_by_name row")
 }
 
 pub fn update_client(conn: &Connection, id: i64, name: &str, tally_ledger: &str) -> Result<()> {
     conn.execute(
         "UPDATE clients SET name = ?1, gstin = ?2, updated_at = datetime('now') WHERE id = ?3",
         rusqlite::params![name, tally_ledger, id],
-    ).context("update_client")?;
+    )
+    .context("update_client")?;
     Ok(())
 }
 
@@ -120,23 +129,23 @@ pub fn delete_client(conn: &Connection, id: i64) -> Result<()> {
 
 fn voucher_from_str(s: &str) -> VoucherType {
     match s {
-        "Payment"  => VoucherType::Payment,
-        "Receipt"  => VoucherType::Receipt,
-        "Contra"   => VoucherType::Contra,
-        "Journal"  => VoucherType::Journal,
-        "Sales"    => VoucherType::Sales,
+        "Payment" => VoucherType::Payment,
+        "Receipt" => VoucherType::Receipt,
+        "Contra" => VoucherType::Contra,
+        "Journal" => VoucherType::Journal,
+        "Sales" => VoucherType::Sales,
         "Purchase" => VoucherType::Purchase,
-        _          => VoucherType::Unknown,
+        _ => VoucherType::Unknown,
     }
 }
 
 fn status_from_str(s: &str) -> TransactionStatus {
     match s {
-        "classified"   => TransactionStatus::Classified,
-        "manual"       => TransactionStatus::Manual,
-        "suspense"     => TransactionStatus::Suspense,
+        "classified" => TransactionStatus::Classified,
+        "manual" => TransactionStatus::Manual,
+        "suspense" => TransactionStatus::Suspense,
         "needs_review" => TransactionStatus::NeedsReview,
-        _              => TransactionStatus::Unreviewed,
+        _ => TransactionStatus::Unreviewed,
     }
 }
 
@@ -151,7 +160,9 @@ pub fn upsert_transactions(
     import_id: Option<i64>,
     txns: &[Transaction],
 ) -> Result<usize> {
-    let txn = conn.unchecked_transaction().context("upsert_transactions: begin")?;
+    let txn = conn
+        .unchecked_transaction()
+        .context("upsert_transactions: begin")?;
     let mut count = 0usize;
     for t in txns {
         let tags_json = serde_json::to_string(&t.tags).unwrap_or_else(|_| "[]".to_string());
@@ -173,18 +184,39 @@ pub fn upsert_transactions(
                 ?24, ?25, ?26
             )",
             rusqlite::params![
-                t.id, client_id, eff_import_id, t.bank_name, t.account_no,
-                t.date, t.date_ts, t.narration, t.reference,
-                t.debit, t.credit, t.balance, t.prev_balance,
-                t.vendor, t.account_head, t.txn_type.to_string(), t.status.to_string(), t.confidence,
-                if t.classification_source.is_empty() { None } else { Some(t.classification_source.clone()) },
+                t.id,
+                client_id,
+                eff_import_id,
+                t.bank_name,
+                t.account_no,
+                t.date,
+                t.date_ts,
+                t.narration,
+                t.reference,
+                t.debit,
+                t.credit,
+                t.balance,
+                t.prev_balance,
+                t.vendor,
+                t.account_head,
+                t.txn_type.to_string(),
+                t.status.to_string(),
+                t.confidence,
+                if t.classification_source.is_empty() {
+                    None
+                } else {
+                    Some(t.classification_source.clone())
+                },
                 tags_json,
                 t.balance_ok.map(|b| if b { 1i64 } else { 0i64 }),
                 if t.is_opening_balance { 1i64 } else { 0i64 },
                 if t.dup_flag { 1i64 } else { 0i64 },
-                t.gst_rate, t.gst_amount, t.gst_type,
+                t.gst_rate,
+                t.gst_amount,
+                t.gst_type,
             ],
-        ).context("upsert_transaction row")?;
+        )
+        .context("upsert_transaction row")?;
         count += 1;
     }
     txn.commit().context("upsert_transactions: commit")?;
@@ -192,114 +224,127 @@ pub fn upsert_transactions(
 }
 
 pub fn get_transactions(conn: &Connection, client_id: i64) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, import_id, bank_name, account_no, date, date_ts,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, import_id, bank_name, account_no, date, date_ts,
                 narration, reference, debit, credit, balance, prev_balance,
                 vendor, account_head, txn_type, status, confidence, tags,
                 balance_ok, is_opening_bal, dup_flag, classified_by,
                 gst_rate, gst_amount, gst_type
          FROM transactions WHERE client_id = ?1
-         ORDER BY date_ts ASC, rowid ASC"
-    ).context("get_transactions prepare")?;
-    let rows = stmt.query_map(rusqlite::params![client_id], |r| {
-        let tags_json: Option<String> = r.get(17)?;
-        let tags: Vec<String> = tags_json
-            .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-            .unwrap_or_default();
-        let balance_ok_raw: Option<i64> = r.get(18)?;
-        let is_ob: i64 = r.get::<_, Option<i64>>(19)?.unwrap_or(0);
-        let dup: i64 = r.get::<_, Option<i64>>(20)?.unwrap_or(0);
-        let txn_type_str: String = r.get::<_, Option<String>>(14)?.unwrap_or_default();
-        let status_str:   String = r.get::<_, Option<String>>(15)?.unwrap_or_default();
-        let import_id: Option<i64> = r.get(1)?;
-        let classification_source: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
-        Ok(Transaction {
-            id:               r.get(0)?,
-            import_id,
-            bank_name:        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            account_no:       r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            date:             r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            date_ts:          r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-            narration:        r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            reference:        r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            debit:            r.get(8)?,
-            credit:           r.get(9)?,
-            balance:          r.get(10)?,
-            prev_balance:     r.get(11)?,
-            vendor:           r.get::<_, Option<String>>(12)?.unwrap_or_default(),
-            account_head:     r.get::<_, Option<String>>(13)?.unwrap_or_default(),
-            txn_type:         voucher_from_str(&txn_type_str),
-            status:           status_from_str(&status_str),
-            confidence:       r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
-            classification_source,
-            tags,
-            balance_ok:       balance_ok_raw.map(|v| v != 0),
-            is_opening_balance: is_ob != 0,
-            dup_flag:         dup != 0,
-            gst_rate:         r.get(22)?,
-            gst_amount:       r.get(23)?,
-            gst_type:         r.get(24)?,
+         ORDER BY date_ts ASC, rowid ASC",
+        )
+        .context("get_transactions prepare")?;
+    let rows = stmt
+        .query_map(rusqlite::params![client_id], |r| {
+            let tags_json: Option<String> = r.get(17)?;
+            let tags: Vec<String> = tags_json
+                .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+                .unwrap_or_default();
+            let balance_ok_raw: Option<i64> = r.get(18)?;
+            let is_ob: i64 = r.get::<_, Option<i64>>(19)?.unwrap_or(0);
+            let dup: i64 = r.get::<_, Option<i64>>(20)?.unwrap_or(0);
+            let txn_type_str: String = r.get::<_, Option<String>>(14)?.unwrap_or_default();
+            let status_str: String = r.get::<_, Option<String>>(15)?.unwrap_or_default();
+            let import_id: Option<i64> = r.get(1)?;
+            let classification_source: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
+            Ok(Transaction {
+                id: r.get(0)?,
+                import_id,
+                bank_name: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                account_no: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                date: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                date_ts: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                narration: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                reference: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                debit: r.get(8)?,
+                credit: r.get(9)?,
+                balance: r.get(10)?,
+                prev_balance: r.get(11)?,
+                vendor: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                account_head: r.get::<_, Option<String>>(13)?.unwrap_or_default(),
+                txn_type: voucher_from_str(&txn_type_str),
+                status: status_from_str(&status_str),
+                confidence: r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                classification_source,
+                tags,
+                balance_ok: balance_ok_raw.map(|v| v != 0),
+                is_opening_balance: is_ob != 0,
+                dup_flag: dup != 0,
+                gst_rate: r.get(22)?,
+                gst_amount: r.get(23)?,
+                gst_type: r.get(24)?,
+            })
         })
-    }).context("get_transactions query")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("get_transactions collect")
+        .context("get_transactions query")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("get_transactions collect")
 }
 
 pub fn get_transactions_for_import(conn: &Connection, import_id: i64) -> Result<Vec<Transaction>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, import_id, bank_name, account_no, date, date_ts,
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, import_id, bank_name, account_no, date, date_ts,
                 narration, reference, debit, credit, balance, prev_balance,
                 vendor, account_head, txn_type, status, confidence, tags,
                 balance_ok, is_opening_bal, dup_flag, classified_by,
                 gst_rate, gst_amount, gst_type
          FROM transactions WHERE import_id = ?1
-         ORDER BY date_ts ASC, rowid ASC"
-    ).context("get_transactions_for_import prepare")?;
-    let rows = stmt.query_map(rusqlite::params![import_id], |r| {
-        let tags_json: Option<String> = r.get(17)?;
-        let tags: Vec<String> = tags_json
-            .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-            .unwrap_or_default();
-        let balance_ok_raw: Option<i64> = r.get(18)?;
-        let is_ob: i64 = r.get::<_, Option<i64>>(19)?.unwrap_or(0);
-        let dup: i64 = r.get::<_, Option<i64>>(20)?.unwrap_or(0);
-        let txn_type_str: String = r.get::<_, Option<String>>(14)?.unwrap_or_default();
-        let status_str:   String = r.get::<_, Option<String>>(15)?.unwrap_or_default();
-        let import_id_col: Option<i64> = r.get(1)?;
-        let classification_source: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
-        Ok(Transaction {
-            id:               r.get(0)?,
-            import_id:        import_id_col,
-            bank_name:        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            account_no:       r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            date:             r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            date_ts:          r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-            narration:        r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            reference:        r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            debit:            r.get(8)?,
-            credit:           r.get(9)?,
-            balance:          r.get(10)?,
-            prev_balance:     r.get(11)?,
-            vendor:           r.get::<_, Option<String>>(12)?.unwrap_or_default(),
-            account_head:     r.get::<_, Option<String>>(13)?.unwrap_or_default(),
-            txn_type:         voucher_from_str(&txn_type_str),
-            status:           status_from_str(&status_str),
-            confidence:       r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
-            classification_source,
-            tags,
-            balance_ok:       balance_ok_raw.map(|v| v != 0),
-            is_opening_balance: is_ob != 0,
-            gst_rate:         r.get(22)?,
-            gst_amount:       r.get(23)?,
-            gst_type:         r.get(24)?,
-            dup_flag:         dup != 0,
+         ORDER BY date_ts ASC, rowid ASC",
+        )
+        .context("get_transactions_for_import prepare")?;
+    let rows = stmt
+        .query_map(rusqlite::params![import_id], |r| {
+            let tags_json: Option<String> = r.get(17)?;
+            let tags: Vec<String> = tags_json
+                .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+                .unwrap_or_default();
+            let balance_ok_raw: Option<i64> = r.get(18)?;
+            let is_ob: i64 = r.get::<_, Option<i64>>(19)?.unwrap_or(0);
+            let dup: i64 = r.get::<_, Option<i64>>(20)?.unwrap_or(0);
+            let txn_type_str: String = r.get::<_, Option<String>>(14)?.unwrap_or_default();
+            let status_str: String = r.get::<_, Option<String>>(15)?.unwrap_or_default();
+            let import_id_col: Option<i64> = r.get(1)?;
+            let classification_source: String = r.get::<_, Option<String>>(21)?.unwrap_or_default();
+            Ok(Transaction {
+                id: r.get(0)?,
+                import_id: import_id_col,
+                bank_name: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                account_no: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                date: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                date_ts: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                narration: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                reference: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                debit: r.get(8)?,
+                credit: r.get(9)?,
+                balance: r.get(10)?,
+                prev_balance: r.get(11)?,
+                vendor: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                account_head: r.get::<_, Option<String>>(13)?.unwrap_or_default(),
+                txn_type: voucher_from_str(&txn_type_str),
+                status: status_from_str(&status_str),
+                confidence: r.get::<_, Option<f64>>(16)?.unwrap_or(0.0),
+                classification_source,
+                tags,
+                balance_ok: balance_ok_raw.map(|v| v != 0),
+                is_opening_balance: is_ob != 0,
+                gst_rate: r.get(22)?,
+                gst_amount: r.get(23)?,
+                gst_type: r.get(24)?,
+                dup_flag: dup != 0,
+            })
         })
-    }).context("get_transactions_for_import query")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("get_transactions_for_import collect")
+        .context("get_transactions_for_import query")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("get_transactions_for_import collect")
 }
 
 pub fn delete_transactions_for_client(conn: &Connection, client_id: i64) -> Result<()> {
-    conn.execute("DELETE FROM transactions WHERE client_id = ?1", rusqlite::params![client_id])
-        .context("delete_transactions_for_client")?;
+    conn.execute(
+        "DELETE FROM transactions WHERE client_id = ?1",
+        rusqlite::params![client_id],
+    )
+    .context("delete_transactions_for_client")?;
     Ok(())
 }
 
@@ -307,6 +352,7 @@ pub fn delete_transactions_for_client(conn: &Connection, client_id: i64) -> Resu
 /// a different client's row that happens to share the same `id` — `id`
 /// alone is no longer unique across the whole table (see migration 5),
 /// only within a `client_id`, so every write/delete by id must include it.
+#[allow(clippy::too_many_arguments)]
 pub fn upsert_transaction_classification(
     conn: &Connection,
     client_id: i64,
@@ -334,7 +380,8 @@ pub fn update_dup_flags(conn: &Connection, client_id: i64, txns: &[Transaction])
         conn.execute(
             "UPDATE transactions SET dup_flag = ?1 WHERE client_id = ?2 AND id = ?3",
             rusqlite::params![if t.dup_flag { 1i64 } else { 0i64 }, client_id, t.id],
-        ).context("update_dup_flag")?;
+        )
+        .context("update_dup_flag")?;
     }
     Ok(())
 }
@@ -346,47 +393,67 @@ pub fn delete_transaction(conn: &Connection, client_id: i64, txn_id: &str) -> Re
     conn.execute(
         "DELETE FROM transactions WHERE client_id = ?1 AND id = ?2",
         rusqlite::params![client_id, txn_id],
-    ).context("delete_transaction")?;
+    )
+    .context("delete_transaction")?;
     Ok(())
 }
 
 // ── Import history CRUD ───────────────────────────────────────────────────────
 
 pub fn save_import(
-    conn: &Connection, client_id: i64, file_name: &str,
-    bank_name: &str, account_no: &str, txn_count: usize,
+    conn: &Connection,
+    client_id: i64,
+    file_name: &str,
+    bank_name: &str,
+    account_no: &str,
+    txn_count: usize,
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO import_history (client_id, file_name, bank_name, account_no, txn_count)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![client_id, file_name, bank_name, account_no, txn_count as i64],
-    ).context("save_import insert")?;
+        rusqlite::params![
+            client_id,
+            file_name,
+            bank_name,
+            account_no,
+            txn_count as i64
+        ],
+    )
+    .context("save_import insert")?;
     Ok(conn.last_insert_rowid())
 }
 
 pub fn get_imports(conn: &Connection, client_id: i64) -> Result<Vec<ImportRecord>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, client_id, file_name, bank_name, account_no, txn_count, imported_at
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, client_id, file_name, bank_name, account_no, txn_count, imported_at
          FROM import_history WHERE client_id = ?1
-         ORDER BY imported_at DESC LIMIT 20"
-    ).context("get_imports prepare")?;
-    let rows = stmt.query_map(rusqlite::params![client_id], |r| {
-        Ok(ImportRecord {
-            id:          r.get(0)?,
-            client_id:   r.get(1)?,
-            file_name:   r.get(2)?,
-            bank_name:   r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            account_no:  r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            txn_count:   r.get(5)?,
-            imported_at: r.get(6)?,
+         ORDER BY imported_at DESC LIMIT 20",
+        )
+        .context("get_imports prepare")?;
+    let rows = stmt
+        .query_map(rusqlite::params![client_id], |r| {
+            Ok(ImportRecord {
+                id: r.get(0)?,
+                client_id: r.get(1)?,
+                file_name: r.get(2)?,
+                bank_name: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                account_no: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                txn_count: r.get(5)?,
+                imported_at: r.get(6)?,
+            })
         })
-    }).context("get_imports query")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("get_imports collect")
+        .context("get_imports query")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("get_imports collect")
 }
 
 pub fn delete_import(conn: &Connection, import_id: i64) -> Result<()> {
-    conn.execute("DELETE FROM import_history WHERE id = ?1", rusqlite::params![import_id])
-        .context("delete_import")?;
+    conn.execute(
+        "DELETE FROM import_history WHERE id = ?1",
+        rusqlite::params![import_id],
+    )
+    .context("delete_import")?;
     Ok(())
 }
 
@@ -397,8 +464,12 @@ pub fn delete_import(conn: &Connection, import_id: i64) -> Result<()> {
 /// `idx_classification_rules_unique`, migration 4). Returns `true` if a new
 /// row was actually inserted, `false` if it was a duplicate and got ignored.
 pub fn add_rule(
-    conn: &Connection, client_id: i64,
-    pattern: &str, vendor: &str, account_head: &str, txn_type: &str,
+    conn: &Connection,
+    client_id: i64,
+    pattern: &str,
+    vendor: &str,
+    account_head: &str,
+    txn_type: &str,
 ) -> Result<bool> {
     let rows = conn.execute(
         "INSERT OR IGNORE INTO classification_rules (client_id, pattern, vendor, account_head, txn_type)
@@ -409,42 +480,53 @@ pub fn add_rule(
 }
 
 pub fn get_rules(conn: &Connection, client_id: i64) -> Result<Vec<ClassificationRule>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, client_id, pattern, vendor, account_head, txn_type
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, client_id, pattern, vendor, account_head, txn_type
          FROM classification_rules WHERE client_id = ?1 OR client_id = 0
-         ORDER BY priority DESC, id"
-    ).context("get_rules prepare")?;
-    let rows = stmt.query_map(rusqlite::params![client_id], |r| {
-        Ok(ClassificationRule {
-            id:           r.get(0)?,
-            client_id:    r.get(1)?,
-            pattern:      r.get(2)?,
-            vendor:       r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            account_head: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            txn_type:     r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+         ORDER BY priority DESC, id",
+        )
+        .context("get_rules prepare")?;
+    let rows = stmt
+        .query_map(rusqlite::params![client_id], |r| {
+            Ok(ClassificationRule {
+                id: r.get(0)?,
+                client_id: r.get(1)?,
+                pattern: r.get(2)?,
+                vendor: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                account_head: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                txn_type: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            })
         })
-    }).context("get_rules query")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().context("get_rules collect")
+        .context("get_rules query")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("get_rules collect")
 }
 
 pub fn delete_rule(conn: &Connection, rule_id: i64) -> Result<()> {
-    conn.execute("DELETE FROM classification_rules WHERE id = ?1", rusqlite::params![rule_id])
-        .context("delete_rule")?;
+    conn.execute(
+        "DELETE FROM classification_rules WHERE id = ?1",
+        rusqlite::params![rule_id],
+    )
+    .context("delete_rule")?;
     Ok(())
 }
 
 /// Serialize all rules for `client_id` to a JSON string for backup.
 pub fn export_rules_json(conn: &Connection, client_id: i64) -> Result<String> {
     let rules = get_rules(conn, client_id)?;
-    let items: Vec<String> = rules.iter().map(|r| {
-        format!(
-            r#"{{"pattern":{p},"vendor":{v},"account_head":{h},"txn_type":{t}}}"#,
-            p = json_str(&r.pattern),
-            v = json_str(&r.vendor),
-            h = json_str(&r.account_head),
-            t = json_str(&r.txn_type),
-        )
-    }).collect();
+    let items: Vec<String> = rules
+        .iter()
+        .map(|r| {
+            format!(
+                r#"{{"pattern":{p},"vendor":{v},"account_head":{h},"txn_type":{t}}}"#,
+                p = json_str(&r.pattern),
+                v = json_str(&r.vendor),
+                h = json_str(&r.account_head),
+                t = json_str(&r.txn_type),
+            )
+        })
+        .collect();
     Ok(format!(r#"{{"version":1,"rules":[{}]}}"#, items.join(",")))
 }
 
@@ -456,22 +538,31 @@ fn json_str(s: &str) -> String {
 /// Existing rules for this client are replaced.
 pub fn import_rules_json(conn: &Connection, client_id: i64, json: &str) -> Result<usize> {
     // Minimal hand-rolled parse: find "rules":[...] array and extract objects
-    let rules_start = json.find("\"rules\"").and_then(|p| json[p..].find('[').map(|o| p + o + 1));
-    if rules_start.is_none() { anyhow::bail!("no 'rules' array in backup JSON"); }
+    let rules_start = json
+        .find("\"rules\"")
+        .and_then(|p| json[p..].find('[').map(|o| p + o + 1));
+    if rules_start.is_none() {
+        anyhow::bail!("no 'rules' array in backup JSON");
+    }
     let rs = rules_start.unwrap();
     // Delete existing client rules first
-    conn.execute("DELETE FROM classification_rules WHERE client_id = ?1", rusqlite::params![client_id])
-        .context("import_rules_json delete")?;
+    conn.execute(
+        "DELETE FROM classification_rules WHERE client_id = ?1",
+        rusqlite::params![client_id],
+    )
+    .context("import_rules_json delete")?;
 
     let obj_re = regex::Regex::new(r#""pattern"\s*:\s*"([^"]*)"\s*,\s*"vendor"\s*:\s*"([^"]*)"\s*,\s*"account_head"\s*:\s*"([^"]*)"\s*,\s*"txn_type"\s*:\s*"([^"]*)""#).unwrap();
     let slice = &json[rs..];
     let mut count = 0usize;
     for cap in obj_re.captures_iter(slice) {
         let pattern = cap.get(1).map_or("", |m| m.as_str());
-        let vendor   = cap.get(2).map_or("", |m| m.as_str());
-        let head     = cap.get(3).map_or("", |m| m.as_str());
-        let typ      = cap.get(4).map_or("", |m| m.as_str());
-        if pattern.is_empty() { continue; }
+        let vendor = cap.get(2).map_or("", |m| m.as_str());
+        let head = cap.get(3).map_or("", |m| m.as_str());
+        let typ = cap.get(4).map_or("", |m| m.as_str());
+        if pattern.is_empty() {
+            continue;
+        }
         // OR IGNORE: a backup file can itself contain two entries for the same
         // (client_id, pattern) — e.g. re-exported after migration 4 landed, or
         // hand-edited — and restoring it must not abort the whole import over
@@ -494,22 +585,28 @@ pub fn push_audit_event(conn: &Connection, client_id: i64, event: &str) -> Resul
     conn.execute(
         "INSERT INTO audit_log (client_id, event) VALUES (?1, ?2)",
         rusqlite::params![client_id, event],
-    ).context("push_audit_event")?;
+    )
+    .context("push_audit_event")?;
     Ok(())
 }
 
 pub fn get_audit_events(conn: &Connection, client_id: i64) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT event FROM audit_log WHERE client_id = ?1 ORDER BY id DESC LIMIT 500"
-    ).context("get_audit_events prepare")?;
-    let rows = stmt.query_map(rusqlite::params![client_id], |r| r.get(0))
+    let mut stmt = conn
+        .prepare("SELECT event FROM audit_log WHERE client_id = ?1 ORDER BY id DESC LIMIT 500")
+        .context("get_audit_events prepare")?;
+    let rows = stmt
+        .query_map(rusqlite::params![client_id], |r| r.get(0))
         .context("get_audit_events query")?;
-    rows.collect::<rusqlite::Result<Vec<String>>>().context("get_audit_events collect")
+    rows.collect::<rusqlite::Result<Vec<String>>>()
+        .context("get_audit_events collect")
 }
 
 pub fn clear_audit_events(conn: &Connection, client_id: i64) -> Result<()> {
-    conn.execute("DELETE FROM audit_log WHERE client_id = ?1", rusqlite::params![client_id])
-        .context("clear_audit_events")?;
+    conn.execute(
+        "DELETE FROM audit_log WHERE client_id = ?1",
+        rusqlite::params![client_id],
+    )
+    .context("clear_audit_events")?;
     Ok(())
 }
 
@@ -524,29 +621,40 @@ pub fn clear_all_audit_events(conn: &Connection) -> Result<()> {
 // dedup catch the same statement being re-loaded across separate import
 // sessions, not just duplicate rows within one load.
 
-pub fn get_dedupe_hashes(conn: &Connection, client_id: i64) -> Result<std::collections::HashSet<String>> {
-    let mut stmt = conn.prepare("SELECT hash FROM dedupe_hashes WHERE client_id = ?1")
+pub fn get_dedupe_hashes(
+    conn: &Connection,
+    client_id: i64,
+) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn
+        .prepare("SELECT hash FROM dedupe_hashes WHERE client_id = ?1")
         .context("get_dedupe_hashes prepare")?;
-    let rows = stmt.query_map(rusqlite::params![client_id], |r| r.get::<_, String>(0))
+    let rows = stmt
+        .query_map(rusqlite::params![client_id], |r| r.get::<_, String>(0))
         .context("get_dedupe_hashes query")?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
 pub fn add_dedupe_hashes(conn: &Connection, client_id: i64, hashes: &[String]) -> Result<()> {
-    let txn = conn.unchecked_transaction().context("add_dedupe_hashes: begin")?;
+    let txn = conn
+        .unchecked_transaction()
+        .context("add_dedupe_hashes: begin")?;
     for h in hashes {
         txn.execute(
             "INSERT OR IGNORE INTO dedupe_hashes (client_id, hash) VALUES (?1, ?2)",
             rusqlite::params![client_id, h],
-        ).context("add_dedupe_hashes")?;
+        )
+        .context("add_dedupe_hashes")?;
     }
     txn.commit().context("add_dedupe_hashes: commit")?;
     Ok(())
 }
 
 pub fn reset_dedupe_hashes(conn: &Connection, client_id: i64) -> Result<()> {
-    conn.execute("DELETE FROM dedupe_hashes WHERE client_id = ?1", rusqlite::params![client_id])
-        .context("reset_dedupe_hashes")?;
+    conn.execute(
+        "DELETE FROM dedupe_hashes WHERE client_id = ?1",
+        rusqlite::params![client_id],
+    )
+    .context("reset_dedupe_hashes")?;
     Ok(())
 }
 
@@ -554,13 +662,19 @@ pub fn reset_dedupe_hashes(conn: &Connection, client_id: i64) -> Result<()> {
 
 /// Insert ledger entries for `client_id`. Each entry is (name, group).
 /// Skips duplicates (UNIQUE(client_id, name)). Returns count of newly inserted rows.
-pub fn import_ledgers(conn: &Connection, client_id: i64, entries: &[(String, String)]) -> Result<usize> {
+pub fn import_ledgers(
+    conn: &Connection,
+    client_id: i64,
+    entries: &[(String, String)],
+) -> Result<usize> {
     let mut added = 0usize;
     for (name, group) in entries {
-        let n = conn.execute(
-            "INSERT OR IGNORE INTO ledgers (client_id, name, group_name) VALUES (?1, ?2, ?3)",
-            rusqlite::params![client_id, name, group],
-        ).context("import_ledgers insert")?;
+        let n = conn
+            .execute(
+                "INSERT OR IGNORE INTO ledgers (client_id, name, group_name) VALUES (?1, ?2, ?3)",
+                rusqlite::params![client_id, name, group],
+            )
+            .context("import_ledgers insert")?;
         added += n;
     }
     Ok(added)
@@ -568,18 +682,24 @@ pub fn import_ledgers(conn: &Connection, client_id: i64, entries: &[(String, Str
 
 /// Automatically seed ledger entries from classified transaction account heads.
 /// Skips names that are already present for this client.
-pub fn auto_seed_ledgers(conn: &Connection, client_id: i64, heads_with_groups: &[(String, String)]) -> Result<usize> {
+pub fn auto_seed_ledgers(
+    conn: &Connection,
+    client_id: i64,
+    heads_with_groups: &[(String, String)],
+) -> Result<usize> {
     import_ledgers(conn, client_id, heads_with_groups)
 }
 
 // ── Settings CRUD ─────────────────────────────────────────────────────────────
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
-    let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")
+    let mut stmt = conn
+        .prepare("SELECT value FROM settings WHERE key = ?1")
         .context("get_setting prepare")?;
-    let mut rows = stmt.query_map(rusqlite::params![key], |r| r.get(0))
+    let mut rows = stmt
+        .query_map(rusqlite::params![key], |r| r.get(0))
         .context("get_setting query")?;
-    Ok(rows.next().transpose().context("get_setting row")?)
+    rows.next().transpose().context("get_setting row")
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -587,13 +707,17 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
         rusqlite::params![key, value],
-    ).context("set_setting")?;
+    )
+    .context("set_setting")?;
     Ok(())
 }
 
 pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
-    conn.execute("DELETE FROM settings WHERE key = ?1", rusqlite::params![key])
-        .context("delete_setting")?;
+    conn.execute(
+        "DELETE FROM settings WHERE key = ?1",
+        rusqlite::params![key],
+    )
+    .context("delete_setting")?;
     Ok(())
 }
 
@@ -830,11 +954,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let count: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
-        rusqlite::params![column],
-        |r| r.get(0),
-    ).context("column_exists")?;
+    let count: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+            rusqlite::params![column],
+            |r| r.get(0),
+        )
+        .context("column_exists")?;
     Ok(count > 0)
 }
 
@@ -844,7 +970,11 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 /// so the version-arithmetic can be unit-tested directly against a
 /// synthetic migration list, without needing a real future migration to
 /// exist in `MIGRATIONS` yet.
-fn apply_migrations(conn: &Connection, migrations: &[(i64, &str)], legacy_baseline: i64) -> Result<()> {
+fn apply_migrations(
+    conn: &Connection,
+    migrations: &[(i64, &str)],
+    legacy_baseline: i64,
+) -> Result<()> {
     let current: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .context("read PRAGMA user_version")?;
@@ -1009,7 +1139,8 @@ mod tests {
     }
 
     fn user_version(conn: &Connection) -> i64 {
-        conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
     }
 
     /// The highest version in the real MIGRATIONS list — what any database
@@ -1031,11 +1162,17 @@ mod tests {
         assert_eq!(user_version(&conn), latest_migration_version());
         assert!(column_exists(&conn, "transactions", "dup_flag").unwrap());
         assert!(column_exists(&conn, "transactions", "gst_rate").unwrap());
-        let audit_log_exists: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_log'",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(audit_log_exists, 1, "audit_log must have been created by migration 2");
+        let audit_log_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_log'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            audit_log_exists, 1,
+            "audit_log must have been created by migration 2"
+        );
     }
 
     #[test]
@@ -1048,20 +1185,27 @@ mod tests {
         // genuinely new to this database and must still apply.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
-        conn.execute("ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0", []).unwrap();
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .unwrap();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, client_id INTEGER NOT NULL DEFAULT 0,
                 event TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
              );",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(user_version(&conn), 0, "precondition: never versioned");
 
         // Must NOT error with "duplicate column dup_flag".
         init_schema(&conn).expect("init_schema must not replay already-applied legacy migrations");
         assert_eq!(user_version(&conn), latest_migration_version());
-        assert!(column_exists(&conn, "transactions", "gst_rate").unwrap(),
-            "migration 3 is newer than the legacy baseline and must still have applied");
+        assert!(
+            column_exists(&conn, "transactions", "gst_rate").unwrap(),
+            "migration 3 is newer than the legacy baseline and must still have applied"
+        );
     }
 
     #[test]
@@ -1071,17 +1215,26 @@ mod tests {
         conn.pragma_update(None, "user_version", 2i64).unwrap();
 
         let synthetic: &[(i64, &str)] = &[
-            (1, "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0"),
-            (2, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY);"),
+            (
+                1,
+                "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                2,
+                "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY);",
+            ),
             (3, "ALTER TABLE transactions ADD COLUMN test_marker TEXT"),
         ];
         apply_migrations(&conn, synthetic, 2).expect("migration 3 should apply cleanly");
         assert_eq!(user_version(&conn), 3);
 
-        let has_column: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name='test_marker'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('transactions') WHERE name='test_marker'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(has_column, 1, "migration 3's column must have been added");
 
         // Re-applying from the now-current version must be a no-op, not an error.
@@ -1099,14 +1252,28 @@ mod tests {
         // open.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
-        conn.execute("ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0", []).unwrap();
+        conn.execute(
+            "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .unwrap();
 
         let synthetic: &[(i64, &str)] = &[
-            (1, "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0"),
-            (2, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY);"),
+            (
+                1,
+                "ALTER TABLE transactions ADD COLUMN dup_flag INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                2,
+                "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY);",
+            ),
         ];
         apply_migrations(&conn, synthetic, 2).expect("must not replay 1/2 against a legacy DB");
-        assert_eq!(user_version(&conn), 2, "user_version must settle, not stay 0 forever");
+        assert_eq!(
+            user_version(&conn),
+            2,
+            "user_version must settle, not stay 0 forever"
+        );
     }
 
     #[test]
@@ -1128,26 +1295,44 @@ mod tests {
         // be harmless for whichever migration this test was originally
         // written to exercise.
         apply_migrations(&conn, &MIGRATIONS[..3], 0).unwrap();
-        assert_eq!(user_version(&conn), 3, "test setup: must land exactly on version 3");
-        let client_id  = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
+        assert_eq!(
+            user_version(&conn),
+            3,
+            "test setup: must land exactly on version 3"
+        );
+        let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
         let other_client = add_client(&conn, "Beta Co", "Beta Ledger").expect("add_client 2");
 
         // Three duplicate rows for the same (client_id, pattern) — including a
         // case-variant — plus one genuinely distinct rule and one belonging to
         // a different client that happens to share the same pattern text.
         conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'AMAZON', 'Amazon', 'Office Expense', 'Payment')", rusqlite::params![client_id]).unwrap();
-        let dup_id_2: i64 = { conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'Amazon', 'Amazon Retail', 'Shopping', 'Payment')", rusqlite::params![client_id]).unwrap(); conn.last_insert_rowid() };
-        let dup_id_3: i64 = { conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'amazon', 'Amazon Pay', 'Software Expense', 'Payment')", rusqlite::params![client_id]).unwrap(); conn.last_insert_rowid() };
+        let dup_id_2: i64 = {
+            conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'Amazon', 'Amazon Retail', 'Shopping', 'Payment')", rusqlite::params![client_id]).unwrap();
+            conn.last_insert_rowid()
+        };
+        let dup_id_3: i64 = {
+            conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'amazon', 'Amazon Pay', 'Software Expense', 'Payment')", rusqlite::params![client_id]).unwrap();
+            conn.last_insert_rowid()
+        };
         conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'SWIGGY', 'Swiggy', 'Food Expense', 'Payment')", rusqlite::params![client_id]).unwrap();
         conn.execute("INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'AMAZON', 'Amazon (other client)', 'Office Expense', 'Payment')", rusqlite::params![other_client]).unwrap();
 
-        let count_before: i64 = conn.query_row("SELECT COUNT(*) FROM classification_rules", [], |r| r.get(0)).unwrap();
+        let count_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM classification_rules", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(count_before, 5);
 
         apply_migrations(&conn, MIGRATIONS, 3).expect("migration 4 must dedupe and index cleanly");
         assert_eq!(user_version(&conn), latest_migration_version());
 
-        let count_after: i64 = conn.query_row("SELECT COUNT(*) FROM classification_rules", [], |r| r.get(0)).unwrap();
+        let count_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM classification_rules", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(count_after, 3, "3 AMAZON duplicates for client_id must collapse to 1, leaving AMAZON(client) + SWIGGY(client) + AMAZON(other client)");
 
         // The lowest id (first-ever-learned) among the 3 duplicates must be the survivor.
@@ -1158,18 +1343,27 @@ mod tests {
         assert!(surviving_id < dup_id_2 && surviving_id < dup_id_3);
 
         // The other client's row with the same pattern text must have survived untouched.
-        let other_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1",
-            rusqlite::params![other_client], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(other_count, 1, "same pattern under a different client_id is not a duplicate");
+        let other_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1",
+                rusqlite::params![other_client],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            other_count, 1,
+            "same pattern under a different client_id is not a duplicate"
+        );
 
         // The unique index must now genuinely reject a fresh duplicate insert attempt.
         let raw_insert = conn.execute(
             "INSERT INTO classification_rules (client_id, pattern, vendor, account_head, txn_type) VALUES (?1, 'AMAZON', 'x', 'y', 'z')",
             rusqlite::params![client_id],
         );
-        assert!(raw_insert.is_err(), "unique index must reject a plain duplicate INSERT after migration 4");
+        assert!(
+            raw_insert.is_err(),
+            "unique index must reject a plain duplicate INSERT after migration 4"
+        );
     }
 
     // ── Migration 5: transactions.id scoped per-client ──────────────────────────
@@ -1188,7 +1382,11 @@ mod tests {
     fn db_at_pre_migration_5(conn: &Connection) {
         conn.execute_batch(SCHEMA_SQL).unwrap();
         apply_migrations(conn, &MIGRATIONS[..4], 0).unwrap();
-        assert_eq!(user_version(conn), 4, "test setup: must land exactly on version 4, before migration 5");
+        assert_eq!(
+            user_version(conn),
+            4,
+            "test setup: must land exactly on version 4, before migration 5"
+        );
     }
 
     #[test]
@@ -1204,18 +1402,28 @@ mod tests {
                 "INSERT INTO transactions (id, client_id, date, narration, debit, credit)
                  VALUES (?1, ?2, '01/01/2024', ?3, 100.0, NULL)",
                 rusqlite::params![format!("t_{i}_5"), client_id, format!("Txn {i}")],
-            ).unwrap();
+            )
+            .unwrap();
         }
-        let count_before: i64 = conn.query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0)).unwrap();
+        let count_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count_before, 5);
 
-        apply_migrations(&conn, MIGRATIONS, 4).expect("migration 5 must upgrade existing data cleanly");
+        apply_migrations(&conn, MIGRATIONS, 4)
+            .expect("migration 5 must upgrade existing data cleanly");
         assert_eq!(user_version(&conn), latest_migration_version());
 
         let txns = get_transactions(&conn, client_id).unwrap();
-        assert_eq!(txns.len(), 5, "every pre-existing transaction must survive the rebuild");
+        assert_eq!(
+            txns.len(),
+            5,
+            "every pre-existing transaction must survive the rebuild"
+        );
         for i in 0..5 {
-            assert!(txns.iter().any(|t| t.id == format!("t_{i}_5") && t.narration == format!("Txn {i}")));
+            assert!(txns
+                .iter()
+                .any(|t| t.id == format!("t_{i}_5") && t.narration == format!("Txn {i}")));
         }
     }
 
@@ -1235,7 +1443,8 @@ mod tests {
             "INSERT INTO transactions (id, client_id, date, narration, is_opening_bal)
              VALUES ('opening_balance', ?1, '', 'Opening Balance', 1)",
             rusqlite::params![client_a],
-        ).unwrap();
+        )
+        .unwrap();
 
         apply_migrations(&conn, MIGRATIONS, 4).expect("migration 5 must succeed");
 
@@ -1249,10 +1458,21 @@ mod tests {
              VALUES ('opening_balance', ?1, '', 'Opening Balance', 1)",
             rusqlite::params![client_b],
         );
-        assert!(inserted.is_ok(), "the same id must be insertable for a different client after migration 5");
+        assert!(
+            inserted.is_ok(),
+            "the same id must be insertable for a different client after migration 5"
+        );
 
-        assert_eq!(get_transactions(&conn, client_a).unwrap().len(), 1, "client A's opening-balance row must still exist");
-        assert_eq!(get_transactions(&conn, client_b).unwrap().len(), 1, "client B's opening-balance row must also exist");
+        assert_eq!(
+            get_transactions(&conn, client_a).unwrap().len(),
+            1,
+            "client A's opening-balance row must still exist"
+        );
+        assert_eq!(
+            get_transactions(&conn, client_b).unwrap().len(),
+            1,
+            "client B's opening-balance row must also exist"
+        );
     }
 
     #[test]
@@ -1275,7 +1495,10 @@ mod tests {
             "INSERT INTO transactions (id, client_id, date, narration) VALUES ('t1', ?1, '01/01/2024', 'Second')",
             rusqlite::params![client_id],
         );
-        assert!(dup.is_err(), "a genuine duplicate INSERT for the same (client_id, id) must still be rejected");
+        assert!(
+            dup.is_err(),
+            "a genuine duplicate INSERT for the same (client_id, id) must still be rejected"
+        );
     }
 
     #[test]
@@ -1295,7 +1518,10 @@ mod tests {
         // every subsequent app launch — must not error or duplicate data.
         apply_migrations(&conn, MIGRATIONS, 4).expect("second run must be a no-op, not an error");
         let count_2 = get_transactions(&conn, client_id).unwrap().len();
-        assert_eq!(count_1, count_2, "re-running migrations must not duplicate or lose data");
+        assert_eq!(
+            count_1, count_2,
+            "re-running migrations must not duplicate or lose data"
+        );
     }
 
     // ── Migration 6: Phase 3A licensing tables ──────────────────────────────────
@@ -1305,26 +1531,39 @@ mod tests {
     // client/transaction data, not just against a fresh in-memory schema.
 
     #[test]
-    fn migration_6_creates_license_tables_on_a_real_pre_existing_database_without_touching_its_data() {
+    fn migration_6_creates_license_tables_on_a_real_pre_existing_database_without_touching_its_data(
+    ) {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
         apply_migrations(&conn, &MIGRATIONS[..5], 0).unwrap();
-        assert_eq!(user_version(&conn), 5, "test setup: must land exactly on version 5, before migration 6");
+        assert_eq!(
+            user_version(&conn),
+            5,
+            "test setup: must land exactly on version 5, before migration 6"
+        );
 
         // Real user data present before the upgrade — migration 6 must not
         // touch it (it's additive, unrelated tables only).
         let client_id = add_client(&conn, "Acme Co", "Acme Ledger").unwrap();
-        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+        let txn = Transaction {
+            id: "t1".to_string(),
+            date: "01/01/2024".to_string(),
+            ..Transaction::new("t1")
+        };
         upsert_transactions(&conn, client_id, None, std::slice::from_ref(&txn)).unwrap();
 
-        apply_migrations(&conn, MIGRATIONS, 5).expect("migration 6 must apply cleanly on top of real data");
+        apply_migrations(&conn, MIGRATIONS, 5)
+            .expect("migration 6 must apply cleanly on top of real data");
         assert_eq!(user_version(&conn), latest_migration_version());
 
         for table in ["local_license", "device_info", "license_validation_log"] {
-            let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                rusqlite::params![table], |r| r.get(0),
-            ).unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(count, 1, "{table} must have been created by migration 6");
         }
 
@@ -1354,20 +1593,32 @@ mod tests {
         // pass id=1.
         let conn = open(":memory:").expect("open");
         conn.execute(
-            "INSERT INTO local_license (id, status) VALUES (1, 'not_activated')", [],
-        ).unwrap();
+            "INSERT INTO local_license (id, status) VALUES (1, 'not_activated')",
+            [],
+        )
+        .unwrap();
         let second = conn.execute(
-            "INSERT INTO local_license (id, status) VALUES (2, 'not_activated')", [],
+            "INSERT INTO local_license (id, status) VALUES (2, 'not_activated')",
+            [],
         );
-        assert!(second.is_err(), "CHECK (id = 1) must reject a second local_license row");
+        assert!(
+            second.is_err(),
+            "CHECK (id = 1) must reject a second local_license row"
+        );
 
         conn.execute(
-            "INSERT INTO device_info (id, device_id, machine_fingerprint) VALUES (1, 'd1', 'f1')", [],
-        ).unwrap();
+            "INSERT INTO device_info (id, device_id, machine_fingerprint) VALUES (1, 'd1', 'f1')",
+            [],
+        )
+        .unwrap();
         let second_device = conn.execute(
-            "INSERT INTO device_info (id, device_id, machine_fingerprint) VALUES (2, 'd2', 'f2')", [],
+            "INSERT INTO device_info (id, device_id, machine_fingerprint) VALUES (2, 'd2', 'f2')",
+            [],
         );
-        assert!(second_device.is_err(), "CHECK (id = 1) must reject a second device_info row");
+        assert!(
+            second_device.is_err(),
+            "CHECK (id = 1) must reject a second device_info row"
+        );
     }
 
     #[test]
@@ -1375,17 +1626,35 @@ mod tests {
         let conn = open(":memory:").expect("open");
         let client_a = add_client(&conn, "Client A", "Ledger A").unwrap();
         let client_b = add_client(&conn, "Client B", "Ledger B").unwrap();
-        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+        let txn = Transaction {
+            id: "t1".to_string(),
+            date: "01/01/2024".to_string(),
+            ..Transaction::new("t1")
+        };
 
         upsert_transactions(&conn, client_a, None, std::slice::from_ref(&txn)).unwrap();
         upsert_transactions(&conn, client_b, None, std::slice::from_ref(&txn)).unwrap();
 
-        upsert_transaction_classification(&conn, client_a, "t1", "Vendor A", "Head A", "Payment", "classified", 0.9, "manual").unwrap();
+        upsert_transaction_classification(
+            &conn,
+            client_a,
+            "t1",
+            "Vendor A",
+            "Head A",
+            "Payment",
+            "classified",
+            0.9,
+            "manual",
+        )
+        .unwrap();
 
         let a = get_transactions(&conn, client_a).unwrap();
         let b = get_transactions(&conn, client_b).unwrap();
         assert_eq!(a[0].vendor, "Vendor A", "client A's row must be updated");
-        assert_eq!(b[0].vendor, "", "client B's same-id row must be untouched by client A's classification update");
+        assert_eq!(
+            b[0].vendor, "",
+            "client B's same-id row must be untouched by client A's classification update"
+        );
     }
 
     #[test]
@@ -1393,15 +1662,27 @@ mod tests {
         let conn = open(":memory:").expect("open");
         let client_a = add_client(&conn, "Client A", "Ledger A").unwrap();
         let client_b = add_client(&conn, "Client B", "Ledger B").unwrap();
-        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+        let txn = Transaction {
+            id: "t1".to_string(),
+            date: "01/01/2024".to_string(),
+            ..Transaction::new("t1")
+        };
 
         upsert_transactions(&conn, client_a, None, std::slice::from_ref(&txn)).unwrap();
         upsert_transactions(&conn, client_b, None, std::slice::from_ref(&txn)).unwrap();
 
         delete_transaction(&conn, client_a, "t1").unwrap();
 
-        assert_eq!(get_transactions(&conn, client_a).unwrap().len(), 0, "client A's row must be deleted");
-        assert_eq!(get_transactions(&conn, client_b).unwrap().len(), 1, "client B's same-id row must survive client A's delete");
+        assert_eq!(
+            get_transactions(&conn, client_a).unwrap().len(),
+            0,
+            "client A's row must be deleted"
+        );
+        assert_eq!(
+            get_transactions(&conn, client_b).unwrap().len(),
+            1,
+            "client B's same-id row must survive client A's delete"
+        );
     }
 
     #[test]
@@ -1409,18 +1690,28 @@ mod tests {
         let conn = open(":memory:").expect("open");
         let client_a = add_client(&conn, "Client A", "Ledger A").unwrap();
         let client_b = add_client(&conn, "Client B", "Ledger B").unwrap();
-        let txn = Transaction { id: "t1".to_string(), date: "01/01/2024".to_string(), ..Transaction::new("t1") };
+        let txn = Transaction {
+            id: "t1".to_string(),
+            date: "01/01/2024".to_string(),
+            ..Transaction::new("t1")
+        };
 
         upsert_transactions(&conn, client_a, None, std::slice::from_ref(&txn)).unwrap();
         upsert_transactions(&conn, client_b, None, std::slice::from_ref(&txn)).unwrap();
 
-        let flagged = Transaction { dup_flag: true, ..txn.clone() };
+        let flagged = Transaction {
+            dup_flag: true,
+            ..txn.clone()
+        };
         update_dup_flags(&conn, client_a, &[flagged]).unwrap();
 
         let a = get_transactions(&conn, client_a).unwrap();
         let b = get_transactions(&conn, client_b).unwrap();
         assert!(a[0].dup_flag, "client A's row must be flagged");
-        assert!(!b[0].dup_flag, "client B's same-id row must be untouched by client A's dup-flag update");
+        assert!(
+            !b[0].dup_flag,
+            "client B's same-id row must be untouched by client A's dup-flag update"
+        );
     }
 
     #[test]
@@ -1428,17 +1719,39 @@ mod tests {
         let conn = open(":memory:").expect("open");
         let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
 
-        let first = add_rule(&conn, client_id, "AMAZON", "Amazon", "Office Expense", "Payment").expect("first add_rule");
+        let first = add_rule(
+            &conn,
+            client_id,
+            "AMAZON",
+            "Amazon",
+            "Office Expense",
+            "Payment",
+        )
+        .expect("first add_rule");
         assert!(first, "first insert of a new pattern must report true");
 
-        let second = add_rule(&conn, client_id, "AMAZON", "Different Vendor", "Different Head", "Receipt").expect("second add_rule");
-        assert!(!second, "re-adding the same (client_id, pattern) must report false, not duplicate the row");
+        let second = add_rule(
+            &conn,
+            client_id,
+            "AMAZON",
+            "Different Vendor",
+            "Different Head",
+            "Receipt",
+        )
+        .expect("second add_rule");
+        assert!(
+            !second,
+            "re-adding the same (client_id, pattern) must report false, not duplicate the row"
+        );
 
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1 AND pattern = 'AMAZON'",
             rusqlite::params![client_id], |r| r.get(0),
         ).unwrap();
-        assert_eq!(count, 1, "exactly one row must exist despite two add_rule calls");
+        assert_eq!(
+            count, 1,
+            "exactly one row must exist despite two add_rule calls"
+        );
     }
 
     #[test]
@@ -1450,14 +1763,31 @@ mod tests {
         let conn = open(":memory:").expect("open");
         let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");
 
-        assert!(add_rule(&conn, client_id, "Amazon", "Amazon", "Office Expense", "Payment").expect("first"));
-        assert!(!add_rule(&conn, client_id, "AMAZON", "x", "y", "z").expect("second"), "case-variant pattern must be treated as a duplicate");
-        assert!(!add_rule(&conn, client_id, "amazon", "x", "y", "z").expect("third"), "lowercase variant must also be treated as a duplicate");
+        assert!(add_rule(
+            &conn,
+            client_id,
+            "Amazon",
+            "Amazon",
+            "Office Expense",
+            "Payment"
+        )
+        .expect("first"));
+        assert!(
+            !add_rule(&conn, client_id, "AMAZON", "x", "y", "z").expect("second"),
+            "case-variant pattern must be treated as a duplicate"
+        );
+        assert!(
+            !add_rule(&conn, client_id, "amazon", "x", "y", "z").expect("third"),
+            "lowercase variant must also be treated as a duplicate"
+        );
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1",
-            rusqlite::params![client_id], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM classification_rules WHERE client_id = ?1",
+                rusqlite::params![client_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1467,9 +1797,27 @@ mod tests {
         let client_a = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client a");
         let client_b = add_client(&conn, "Beta Co", "Beta Ledger").expect("add_client b");
 
-        assert!(add_rule(&conn, client_a, "AMAZON", "Amazon", "Office Expense", "Payment").expect("client a"));
-        assert!(add_rule(&conn, client_b, "AMAZON", "Amazon", "Office Expense", "Payment").expect("client b"),
-            "the same pattern for a different client_id is a distinct rule, not a duplicate");
+        assert!(add_rule(
+            &conn,
+            client_a,
+            "AMAZON",
+            "Amazon",
+            "Office Expense",
+            "Payment"
+        )
+        .expect("client a"));
+        assert!(
+            add_rule(
+                &conn,
+                client_b,
+                "AMAZON",
+                "Amazon",
+                "Office Expense",
+                "Payment"
+            )
+            .expect("client b"),
+            "the same pattern for a different client_id is a distinct rule, not a duplicate"
+        );
     }
 
     #[test]
@@ -1486,8 +1834,12 @@ mod tests {
         // Must not error out over the duplicate AMAZON entry — restoring a
         // backup that happens to contain a repeated pattern degrades
         // gracefully (keeps the first occurrence) instead of aborting.
-        let count = import_rules_json(&conn, client_id, json).expect("import_rules_json must tolerate intra-file duplicates");
-        assert_eq!(count, 2, "only the 2 genuinely distinct patterns should be counted as inserted");
+        let count = import_rules_json(&conn, client_id, json)
+            .expect("import_rules_json must tolerate intra-file duplicates");
+        assert_eq!(
+            count, 2,
+            "only the 2 genuinely distinct patterns should be counted as inserted"
+        );
 
         let rules = get_rules(&conn, client_id).expect("get_rules");
         assert_eq!(rules.len(), 2);
@@ -1522,7 +1874,10 @@ mod tests {
             ("Sales Account".to_string(), "Sales Accounts".to_string()),
         ];
         let added_second = import_ledgers(&conn, client_id, &second_batch).expect("second import");
-        assert_eq!(added_second, 1, "only the genuinely new 'Sales Account' row should count");
+        assert_eq!(
+            added_second, 1,
+            "only the genuinely new 'Sales Account' row should count"
+        );
     }
 
     #[test]
@@ -1534,7 +1889,10 @@ mod tests {
         let entries = vec![("Cash".to_string(), "Cash-in-Hand".to_string())];
         import_ledgers(&conn, client_a, &entries).expect("import for client a");
         let added_b = import_ledgers(&conn, client_b, &entries).expect("import for client b");
-        assert_eq!(added_b, 1, "same ledger name for a different client is not a duplicate");
+        assert_eq!(
+            added_b, 1,
+            "same ledger name for a different client is not a duplicate"
+        );
     }
 
     #[test]
@@ -1596,7 +1954,10 @@ mod tests {
         // covers the harder "some rows valid, some not" atomicity case.
         let hashes = vec!["abc12345".to_string(), "deadbeef".to_string()];
         let result = add_dedupe_hashes(&conn, 999_999, &hashes);
-        assert!(result.is_err(), "hashes for a non-existent client must fail");
+        assert!(
+            result.is_err(),
+            "hashes for a non-existent client must fail"
+        );
         assert!(get_dedupe_hashes(&conn, 999_999).unwrap().is_empty());
     }
 
@@ -1618,11 +1979,11 @@ mod tests {
         // which touches the shared OS keyring test entry — hold the same
         // lock encryption::tests uses so the two modules' tests don't race
         // on that one entry.
-        let _guard = encryption::ENCRYPTION_KEYRING_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let path = std::env::temp_dir().join(format!(
-            "bsp_migration_smoke_{}.db",
-            std::process::id(),
-        ));
+        let _guard = encryption::ENCRYPTION_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let path =
+            std::env::temp_dir().join(format!("bsp_migration_smoke_{}.db", std::process::id(),));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}.bak", path.display()));
 

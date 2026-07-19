@@ -42,7 +42,10 @@ impl LicenseStatus {
     /// there is exactly one place that encodes "which statuses count as
     /// licensed," not one per call site.
     pub fn is_licensed(&self) -> bool {
-        matches!(self, LicenseStatus::Active | LicenseStatus::ActiveOfflineGrace { .. })
+        matches!(
+            self,
+            LicenseStatus::Active | LicenseStatus::ActiveOfflineGrace { .. }
+        )
     }
 }
 
@@ -114,7 +117,9 @@ mod tests {
     use chrono::Duration;
 
     fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-07-09T12:00:00Z").unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339("2026-07-09T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     #[test]
@@ -127,14 +132,20 @@ mod tests {
     fn within_grace_period_is_active_offline_grace_with_correct_days_remaining() {
         let last = now() - Duration::days(3);
         let status = derive_offline_status(7, Some(last), Some(last), now());
-        assert_eq!(status, LicenseStatus::ActiveOfflineGrace { days_remaining: 4 });
+        assert_eq!(
+            status,
+            LicenseStatus::ActiveOfflineGrace { days_remaining: 4 }
+        );
     }
 
     #[test]
     fn exactly_at_the_grace_boundary_is_still_active() {
         let last = now() - Duration::days(7);
         let status = derive_offline_status(7, Some(last), Some(last), now());
-        assert_eq!(status, LicenseStatus::ActiveOfflineGrace { days_remaining: 0 });
+        assert_eq!(
+            status,
+            LicenseStatus::ActiveOfflineGrace { days_remaining: 0 }
+        );
     }
 
     #[test]
@@ -163,7 +174,10 @@ mod tests {
         // recorded yet. Must not be treated as a rollback.
         let last = now() - Duration::days(1);
         let status = derive_offline_status(7, Some(last), None, now());
-        assert_eq!(status, LicenseStatus::ActiveOfflineGrace { days_remaining: 6 });
+        assert_eq!(
+            status,
+            LicenseStatus::ActiveOfflineGrace { days_remaining: 6 }
+        );
     }
 
     #[test]
@@ -179,17 +193,32 @@ mod tests {
     #[test]
     fn server_response_mapping_matches_the_documented_enum() {
         assert_eq!(status_from_server_response("active"), LicenseStatus::Active);
-        assert_eq!(status_from_server_response("suspended"), LicenseStatus::Suspended);
-        assert_eq!(status_from_server_response("expired"), LicenseStatus::Expired);
-        assert_eq!(status_from_server_response("revoked"), LicenseStatus::Expired);
-        assert_eq!(status_from_server_response("device_mismatch"), LicenseStatus::Expired);
+        assert_eq!(
+            status_from_server_response("suspended"),
+            LicenseStatus::Suspended
+        );
+        assert_eq!(
+            status_from_server_response("expired"),
+            LicenseStatus::Expired
+        );
+        assert_eq!(
+            status_from_server_response("revoked"),
+            LicenseStatus::Expired
+        );
+        assert_eq!(
+            status_from_server_response("device_mismatch"),
+            LicenseStatus::Expired
+        );
     }
 
     #[test]
     fn unrecognized_server_status_fails_closed_not_open() {
         // A hypothetical future server status this client build doesn't
         // know about must never be treated as licensed.
-        assert_eq!(status_from_server_response("some_future_status"), LicenseStatus::Expired);
+        assert_eq!(
+            status_from_server_response("some_future_status"),
+            LicenseStatus::Expired
+        );
         assert!(!status_from_server_response("some_future_status").is_licensed());
     }
 }

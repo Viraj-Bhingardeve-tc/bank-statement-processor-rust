@@ -9,11 +9,11 @@
 //! character-position within that line, not by PDF X coordinates.
 
 use crate::parser::{
-    ParseResult, Transaction,
     column_detector::PdfItem,
     date_parser::normalize_transaction_date,
     excel_parser::{compute_prev_balances, prepend_opening_balance_row},
     noise_filter::is_noise_row,
+    ParseResult, Transaction,
 };
 use crate::text_safety::floor_char_boundary;
 
@@ -43,15 +43,19 @@ use crate::text_safety::floor_char_boundary;
 /// (Phase 4L.2.2 follow-up) closes that gap at the source instead.
 fn starts_with_date(s: &str) -> Option<(String, usize)> {
     let s = s.trim();
-    if s.len() < 10 { return None; }
+    if s.len() < 10 {
+        return None;
+    }
     // First 10 chars: DD[-/]MM[-/]YYYY
     let bytes = s.as_bytes();
     let d1 = bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit();
     let sep1 = bytes[2] == b'-' || bytes[2] == b'/' || bytes[2] == 0xE2; // em-dash is multi-byte
     let m1 = bytes[3].is_ascii_digit() && bytes[4].is_ascii_digit();
-    if !d1 || !sep1 || !m1 { return None; }
+    if !d1 || !sep1 || !m1 {
+        return None;
+    }
     // Find separator positions allowing em-dash (3 bytes)
-    let normalized = s.replace('\u{2212}', "-").replace('\u{2013}', "-");
+    let normalized = s.replace(['\u{2212}', '\u{2013}'], "-");
     // `\u{2014}` (em-dash) isn't replaced above, so it — or any other
     // stray multi-byte character in this heuristically-detected date
     // region — can still be present here; `floor_char_boundary` keeps
@@ -61,8 +65,10 @@ fn starts_with_date(s: &str) -> Option<(String, usize)> {
     // un-replaced em-dash leaves `parts.len() < 3`) — safely rejected,
     // not silently mis-parsed.
     let cut = floor_char_boundary(&normalized, 10.min(normalized.len()));
-    let parts: Vec<&str> = normalized[..cut].split(|c| c == '-' || c == '/').collect();
-    if parts.len() < 3 { return None; }
+    let parts: Vec<&str> = normalized[..cut].split(['-', '/']).collect();
+    if parts.len() < 3 {
+        return None;
+    }
     if parts[0].len() == 2 && parts[1].len() == 2 && parts[2].len() == 4 {
         let date_str = format!("{}-{}-{}", parts[0], parts[1], parts[2]);
         // Walk `s`'s own bytes for the real separator widths, rather
@@ -84,7 +90,9 @@ fn starts_with_date(s: &str) -> Option<(String, usize)> {
 /// date pattern via `parts`, but never guessed at (Phase 4L.2.2).
 fn separator_byte_len(s: &str, at: usize) -> Option<usize> {
     let bytes = s.as_bytes();
-    if at >= bytes.len() { return None; }
+    if at >= bytes.len() {
+        return None;
+    }
     match bytes[at] {
         b'-' | b'/' => Some(1),
         0xE2 if at + 3 <= bytes.len() && s.is_char_boundary(at + 3) => Some(3),
@@ -107,17 +115,25 @@ fn extract_amounts(s: &str) -> Vec<(f64, usize, String)> {
         let mut end = digit_pos;
         while end < s.len() {
             let c = s.as_bytes()[end];
-            if c.is_ascii_digit() || c == b',' { end += 1; } else { break; }
+            if c.is_ascii_digit() || c == b',' {
+                end += 1;
+            } else {
+                break;
+            }
         }
         // Require decimal point + digits
         if end < s.len() && s.as_bytes()[end] == b'.' {
             end += 1;
             let dec_start = end;
-            while end < s.len() && s.as_bytes()[end].is_ascii_digit() { end += 1; }
+            while end < s.len() && s.as_bytes()[end].is_ascii_digit() {
+                end += 1;
+            }
             if end - dec_start >= 1 && end - dec_start <= 2 {
                 let raw = &s[digit_pos..end];
                 let val = raw.replace(',', "").parse::<f64>().unwrap_or(0.0);
-                if val > 0.0 { out.push((val, digit_pos, raw.to_string())); }
+                if val > 0.0 {
+                    out.push((val, digit_pos, raw.to_string()));
+                }
             }
         }
         start = end.max(digit_pos + 1);
@@ -128,7 +144,11 @@ fn extract_amounts(s: &str) -> Vec<(f64, usize, String)> {
 /// Number of integer digits in a decimal string (commas stripped, before the dot).
 fn int_digit_count(s: &str) -> usize {
     let s = s.replace(',', "");
-    let s = if let Some(p) = s.find('.') { &s[..p] } else { &s };
+    let s = if let Some(p) = s.find('.') {
+        &s[..p]
+    } else {
+        &s
+    };
     s.chars().filter(|c| c.is_ascii_digit()).count()
 }
 
@@ -137,7 +157,9 @@ fn extract_balance_suffix(line: &str) -> Option<(f64, usize, &str)> {
     let lower = line.to_lowercase();
     let suffix = if lower.trim_end().ends_with("cr") || lower.trim_end().ends_with("dr") {
         2
-    } else { return None; };
+    } else {
+        return None;
+    };
     let base = line.trim_end();
     let base = &base[..base.len() - suffix].trim_end();
     let amts = extract_amounts(base);
@@ -152,26 +174,29 @@ fn extract_balance_suffix(line: &str) -> Option<(f64, usize, &str)> {
 
 fn is_debit_narr(nl: &str) -> bool {
     // Matches JS: /upi[-\s]?dr[/\s]|[/-]dr[/-]|\bdr\b.*[/-]|neft.*dr\b|rtgs.*dr\b|by\s+debit|cash\s*wd|atm\s*wd|chg\s*dr/
-    nl.contains("upi-dr") || nl.contains("upi dr")
-    || (nl.contains("/dr/") || nl.contains("-dr-"))
-    || nl.contains("neft") && nl.contains("dr")
-    || nl.contains("rtgs") && nl.contains("dr")
-    || nl.contains("cash wd") || nl.contains("atm wd")
-    || nl.contains("by debit")
-    || nl.contains("chg dr")
+    nl.contains("upi-dr")
+        || nl.contains("upi dr")
+        || (nl.contains("/dr/") || nl.contains("-dr-"))
+        || nl.contains("neft") && nl.contains("dr")
+        || nl.contains("rtgs") && nl.contains("dr")
+        || nl.contains("cash wd")
+        || nl.contains("atm wd")
+        || nl.contains("by debit")
+        || nl.contains("chg dr")
 }
 
 fn is_credit_narr(nl: &str) -> bool {
     // Matches JS: /upi[-\s]?cr[/\s]|[/-]cr[/-]|\bcr\b.*[/-]|neft.*cr\b|rtgs.*cr\b|by\s+cr\b|interest\b|refund|reversal|salary/
-    nl.contains("upi-cr") || nl.contains("upi cr")
-    || (nl.contains("/cr/") || nl.contains("-cr-"))
-    || nl.contains("neft") && nl.contains("cr")
-    || nl.contains("rtgs") && nl.contains("cr")
-    || nl.contains("interest")
-    || nl.contains("refund")
-    || nl.contains("reversal")
-    || nl.contains("salary")
-    || nl.contains("by cr")
+    nl.contains("upi-cr")
+        || nl.contains("upi cr")
+        || (nl.contains("/cr/") || nl.contains("-cr-"))
+        || nl.contains("neft") && nl.contains("cr")
+        || nl.contains("rtgs") && nl.contains("cr")
+        || nl.contains("interest")
+        || nl.contains("refund")
+        || nl.contains("reversal")
+        || nl.contains("salary")
+        || nl.contains("by cr")
 }
 
 // ── extract_fw_transactions ───────────────────────────────────────────────────
@@ -194,70 +219,97 @@ pub fn extract_fw_transactions(
     rows: &[Vec<PdfItem>],
     file_name: &str,
 ) -> Option<(Vec<Transaction>, Option<f64>, Option<f64>)> {
-
     // ── Header detection ──────────────────────────────────────────────────────
-    let mut hdr_idx      = usize::MAX;
-    let mut wd_pos: i32  = -1;   // char position of "withdrawal/debit" keyword
-    let mut dep_pos: i32 = -1;   // char position of "deposit/credit" keyword
-    let mut col_mid      = 0i32; // midpoint between withdrawal and deposit
-    let mut single_amt   = false;
+    let mut hdr_idx = usize::MAX;
+    let mut wd_pos: i32 = -1; // char position of "withdrawal/debit" keyword
+    let mut dep_pos: i32 = -1; // char position of "deposit/credit" keyword
+    let mut single_amt = false;
 
     for (i, row) in rows.iter().enumerate().take(30) {
         let line = row.first().map_or("", |it| it.text.as_str());
-        let ll   = line.to_lowercase();
-        if !ll.contains("date") || !ll.contains("balance") { continue; }
+        let ll = line.to_lowercase();
+        if !ll.contains("date") || !ll.contains("balance") {
+            continue;
+        }
 
-        if (ll.contains("withdrawal") || ll.contains("debit")) &&
-           (ll.contains("deposit")    || ll.contains("credit")) {
+        if (ll.contains("withdrawal") || ll.contains("debit"))
+            && (ll.contains("deposit") || ll.contains("credit"))
+        {
             hdr_idx = i;
             // Find character positions of withdrawal/deposit keywords
-            let wp = ll.find("withdrawal").or_else(|| ll.find("debit")).map(|p| p as i32).unwrap_or(-1);
-            let dp = ll.find("deposit").or_else(|| ll.find("credit")).map(|p| p as i32).unwrap_or(-1);
-            if wp >= 0 { wd_pos  = wp; }
-            if dp >= 0 { dep_pos = dp; }
+            let wp = ll
+                .find("withdrawal")
+                .or_else(|| ll.find("debit"))
+                .map(|p| p as i32)
+                .unwrap_or(-1);
+            let dp = ll
+                .find("deposit")
+                .or_else(|| ll.find("credit"))
+                .map(|p| p as i32)
+                .unwrap_or(-1);
+            if wp >= 0 {
+                wd_pos = wp;
+            }
+            if dp >= 0 {
+                dep_pos = dp;
+            }
             break;
         }
 
-        let single = ll.contains("amount") || ll.contains("amt") || ll.contains("txn amt")
-                  || ll.contains("transaction amount");
+        let single = ll.contains("amount")
+            || ll.contains("amt")
+            || ll.contains("txn amt")
+            || ll.contains("transaction amount");
         if single && !ll.contains("withdrawal") && !ll.contains("deposit") {
-            hdr_idx     = i;
-            single_amt  = true;
+            hdr_idx = i;
+            single_amt = true;
             break;
         }
     }
-    if hdr_idx == usize::MAX { return None; }
+    if hdr_idx == usize::MAX {
+        return None;
+    }
 
     // Format A midpoint between withdrawal and deposit headers
-    col_mid = if !single_amt {
-        if wd_pos >= 0 && dep_pos >= 0 { (wd_pos + dep_pos) / 2 }
-        else if dep_pos >= 0 { dep_pos }
-        else { 70 }
-    } else { 0 };
+    let col_mid: i32 = if !single_amt {
+        if wd_pos >= 0 && dep_pos >= 0 {
+            (wd_pos + dep_pos) / 2
+        } else if dep_pos >= 0 {
+            dep_pos
+        } else {
+            70
+        }
+    } else {
+        0
+    };
 
     // ── Transaction loop ──────────────────────────────────────────────────────
     let mut txns: Vec<Transaction> = Vec::new();
-    let mut op_balance:      Option<f64> = None;
+    let mut op_balance: Option<f64> = None;
     let mut closing_balance: Option<f64> = None;
     let mut txn_counter = 0usize;
 
     for (i, row) in rows.iter().enumerate().skip(hdr_idx + 1) {
         let line = row.first().map_or("", |it| it.text.as_str());
         let line = line.trim();
-        if line.is_empty() || line.chars().all(|c| c == '-' || c == '=' || c == ' ') { continue; }
+        if line.is_empty() || line.chars().all(|c| c == '-' || c == '=' || c == ' ') {
+            continue;
+        }
 
         // Require a date at the start of the line
         let (date_str, date_orig_len) = match starts_with_date(line) {
             Some(d) => d,
-            None    => continue,
+            None => continue,
         };
         let nd = normalize_transaction_date(&date_str);
-        if !nd.valid { continue; }
+        if !nd.valid {
+            continue;
+        }
 
         // Require balance suffix: "NNN.NNCr" or "NNN.NNDr"
         let (balance, bal_start, _bal_raw) = match extract_balance_suffix(line) {
             Some(b) => b,
-            None    => continue,
+            None => continue,
         };
 
         // The portion between date and balance. `date_orig_len` is the
@@ -271,25 +323,33 @@ pub fn extract_fw_transactions(
         // `bal_start` is always boundary-safe already (found via `rfind`
         // on a same-offset-aligned substring).
         let date_part_len = floor_char_boundary(line, date_orig_len + 1);
-        let after_date = if date_part_len < line.len() { &line[date_part_len..] } else { "" };
+        let after_date = if date_part_len < line.len() {
+            &line[date_part_len..]
+        } else {
+            ""
+        };
         let middle = if bal_start > date_part_len {
             &line[date_part_len..bal_start]
-        } else { after_date };
+        } else {
+            after_date
+        };
 
         let ml = middle.to_lowercase();
 
         // Opening/closing balance markers
         if ml.contains("opening bal") || ml.contains("op bal") {
-            op_balance = Some(balance); continue;
+            op_balance = Some(balance);
+            continue;
         }
         if ml.contains("closing bal") || ml.contains("cl bal") {
-            closing_balance = Some(balance); continue;
+            closing_balance = Some(balance);
+            continue;
         }
 
-        let mut debit:     Option<f64> = None;
-        let mut credit:    Option<f64> = None;
-        let mut narration  = String::new();
-        let mut reference  = String::new();
+        let mut debit: Option<f64> = None;
+        let mut credit: Option<f64> = None;
+        let narration: String;
+        let mut reference = String::new();
 
         if single_amt {
             // ── Format B (single amount column) ──────────────────────────────
@@ -298,7 +358,9 @@ pub fn extract_fw_transactions(
                 .into_iter()
                 .filter(|(_, _, raw)| int_digit_count(raw) <= 10)
                 .collect();
-            if real_amts.is_empty() { continue; }
+            if real_amts.is_empty() {
+                continue;
+            }
 
             let txn_amt = real_amts.last().unwrap();
             narration = middle[..txn_amt.1].trim().to_string();
@@ -316,7 +378,6 @@ pub fn extract_fw_transactions(
             } else {
                 debit = Some(txn_amt.0); // ambiguous → balance pass corrects
             }
-
         } else {
             // ── Format A (two-column: Withdrawal | Deposit) ───────────────────
             let all_amts: Vec<(f64, usize, String)> = extract_amounts(middle).into_iter().collect();
@@ -333,7 +394,7 @@ pub fn extract_fw_transactions(
             for (val, mid_idx, raw) in &all_amts {
                 let abs_start = (date_part_len + mid_idx) as i32;
                 let is_ref_by_digits = int_digit_count(raw) > 10;
-                let is_ref_by_pos    = wd_pos >= 0 && abs_start < (wd_pos - 5);
+                let is_ref_by_pos = wd_pos >= 0 && abs_start < (wd_pos - 5);
                 if is_ref_by_digits || is_ref_by_pos {
                     if reference.is_empty() {
                         reference = if is_ref_by_digits {
@@ -349,53 +410,80 @@ pub fn extract_fw_transactions(
 
             // Assign by position vs midpoint
             for &(val, abs_start) in &txn_amts {
-                if abs_start < col_mid { debit  = Some(val); }
-                else                   { credit = Some(val); }
+                if abs_start < col_mid {
+                    debit = Some(val);
+                } else {
+                    credit = Some(val);
+                }
             }
         }
 
-        if debit.is_none() && credit.is_none() { continue; }
+        if debit.is_none() && credit.is_none() {
+            continue;
+        }
 
         txn_counter += 1;
         let mut t = Transaction::new(format!("t_fw_{}_{}", i, txn_counter));
-        t.date      = nd.display;
-        t.date_ts   = nd.ts;
+        t.date = nd.display;
+        t.date_ts = nd.ts;
         t.narration = narration;
         t.reference = reference;
-        t.debit     = debit;
-        t.credit    = credit;
-        t.balance   = Some(balance);
+        t.debit = debit;
+        t.credit = credit;
+        t.balance = Some(balance);
         t.bank_name = file_name.to_string();
         txns.push(t);
     }
 
-    if txns.is_empty() { return None; }
+    if txns.is_empty() {
+        return None;
+    }
 
     // ── Balance-direction post-pass ───────────────────────────────────────────
     // Corrects Format B misclassifications (and catches Format A edge cases).
     {
         let mut prev_bal = op_balance;
         if prev_bal.is_none() {
-            if let Some(seed) = txns.iter().find(|t| t.balance.is_some() && (t.debit.is_some() || t.credit.is_some())) {
-                prev_bal = Some(((seed.balance.unwrap() - seed.credit.unwrap_or(0.0) + seed.debit.unwrap_or(0.0)) * 100.0).round() / 100.0);
+            if let Some(seed) = txns
+                .iter()
+                .find(|t| t.balance.is_some() && (t.debit.is_some() || t.credit.is_some()))
+            {
+                prev_bal = Some(
+                    ((seed.balance.unwrap() - seed.credit.unwrap_or(0.0)
+                        + seed.debit.unwrap_or(0.0))
+                        * 100.0)
+                        .round()
+                        / 100.0,
+                );
             }
         }
         for t in &mut txns {
-            let bal = match t.balance { Some(b) => b, None => continue };
-            let prev = match prev_bal { Some(p) => p, None => { prev_bal = Some(bal); continue; } };
-            let tol  = |amt: f64| (amt * 0.02_f64).max(1.0);
+            let bal = match t.balance {
+                Some(b) => b,
+                None => continue,
+            };
+            let prev = match prev_bal {
+                Some(p) => p,
+                None => {
+                    prev_bal = Some(bal);
+                    continue;
+                }
+            };
+            let tol = |amt: f64| (amt * 0.02_f64).max(1.0);
 
             if t.debit.is_some() && t.credit.is_none() {
                 let diff = bal - prev;
-                let amt  = t.debit.unwrap();
+                let amt = t.debit.unwrap();
                 if (diff - amt).abs() < tol(amt) {
-                    t.credit = Some(amt); t.debit = None; // balance went UP → credit
+                    t.credit = Some(amt);
+                    t.debit = None; // balance went UP → credit
                 }
             } else if t.credit.is_some() && t.debit.is_none() {
                 let diff = bal - prev;
-                let amt  = t.credit.unwrap();
+                let amt = t.credit.unwrap();
                 if (diff + amt).abs() < tol(amt) {
-                    t.debit = Some(amt); t.credit = None; // balance went DOWN → debit
+                    t.debit = Some(amt);
+                    t.credit = None; // balance went DOWN → debit
                 }
             }
             prev_bal = Some(bal);
@@ -414,11 +502,13 @@ fn extract_ref_from_narration(narr: &str) -> Option<String> {
     while i < bytes.len() {
         if bytes[i].is_ascii_digit() {
             let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
             let len = i - start;
             if len >= 9 {
                 // Check boundaries: must be preceded/followed by /, -, space, or string boundary
-                let pre_ok  = start == 0 || matches!(bytes[start-1], b'/' | b'-' | b' ');
+                let pre_ok = start == 0 || matches!(bytes[start - 1], b'/' | b'-' | b' ');
                 let post_ok = i >= bytes.len() || matches!(bytes[i], b'/' | b'-' | b' ');
                 if pre_ok && post_ok {
                     return Some(narr[start..i].to_string());
@@ -445,53 +535,73 @@ fn extract_ref_from_narration(narr: &str) -> Option<String> {
 ///   balance decreased → debit  (Withdrawals column)
 ///
 /// Narration keywords are used only as a fallback when `prev_bal` is unknown.
-pub fn extract_cosmos_transactions(
-    rows: &[Vec<PdfItem>],
-    file_name: &str,
-) -> Option<ParseResult> {
-
+pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Option<ParseResult> {
     // ── Step 1: locate Cosmos header ─────────────────────────────────────────
     let mut hdr_idx = usize::MAX;
     for (i, row) in rows.iter().enumerate().take(50) {
-        let line = row.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" ");
-        let ll   = line.to_lowercase();
-        if ll.contains("date") && ll.contains("particulars") &&
-           ll.contains("chq")  && ll.contains("withdrawal") &&
-           ll.contains("deposit") && ll.contains("balance") {
+        let line = row
+            .iter()
+            .map(|it| it.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ll = line.to_lowercase();
+        if ll.contains("date")
+            && ll.contains("particulars")
+            && ll.contains("chq")
+            && ll.contains("withdrawal")
+            && ll.contains("deposit")
+            && ll.contains("balance")
+        {
             hdr_idx = i;
             break;
         }
     }
     if hdr_idx == usize::MAX {
-        log::debug!("[BSP Cosmos] No Cosmos header in \"{}\" — skipping", file_name);
+        log::debug!(
+            "[BSP Cosmos] No Cosmos header in \"{}\" — skipping",
+            file_name
+        );
         return None;
     }
 
     // ── Step 2: parse transaction rows ────────────────────────────────────────
     // Structure holds txnVal temporarily until direction is resolved in Step 3.
-    struct Pending { t: Transaction, txn_val: f64 }
+    struct Pending {
+        t: Transaction,
+        txn_val: f64,
+    }
 
-    let mut pending:         Vec<Pending>  = Vec::new();
-    let mut op_balance:      Option<f64>   = None;
-    let mut closing_balance: Option<f64>   = None;
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut op_balance: Option<f64> = None;
+    let mut closing_balance: Option<f64> = None;
     let mut txn_counter = 0usize;
 
     for (i, row) in rows.iter().enumerate().skip(hdr_idx + 1) {
-        let line = row.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" ").trim().to_string();
-        if line.is_empty() || line.chars().all(|c| c == '-' || c == '=' || c == ' ') { continue; }
+        let line = row
+            .iter()
+            .map(|it| it.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string();
+        if line.is_empty() || line.chars().all(|c| c == '-' || c == '=' || c == ' ') {
+            continue;
+        }
 
         // Date at start
         let (date_str, date_orig_len) = match starts_with_date(&line) {
             Some(d) => d,
-            None    => continue,
+            None => continue,
         };
         let nd = normalize_transaction_date(&date_str);
-        if !nd.valid { continue; }
+        if !nd.valid {
+            continue;
+        }
 
         // Balance at end: "NNN,NNN.NNCr" or "Dr"
         let (balance, bal_raw_start, _) = match extract_balance_suffix(&line) {
             Some(b) => b,
-            None    => continue,
+            None => continue,
         };
 
         // See the equivalent comment in extract_fw_transactions above —
@@ -508,56 +618,78 @@ pub fn extract_cosmos_transactions(
         let ml = middle.to_lowercase();
 
         if ml.contains("opening bal") || ml.contains("op bal") {
-            op_balance = Some(balance); continue;
+            op_balance = Some(balance);
+            continue;
         }
         if ml.contains("closing bal") || ml.contains("cl bal") {
-            closing_balance = Some(balance); continue;
+            closing_balance = Some(balance);
+            continue;
         }
-        if is_noise_row(&middle) { continue; }
+        if is_noise_row(&middle) {
+            continue;
+        }
 
         // ── Amount extraction: rightmost valid decimal (≤ 10 int digits) ──────
         let amt_candidates: Vec<(f64, usize, String)> = extract_amounts(&middle)
             .into_iter()
             .filter(|(_, _, raw)| int_digit_count(raw) <= 10)
             .collect();
-        if amt_candidates.is_empty() { continue; }
+        if amt_candidates.is_empty() {
+            continue;
+        }
 
         let (txn_val, txn_idx, _) = amt_candidates.last().unwrap().clone();
         let text_part = middle[..txn_idx].trim().to_string();
 
         // Chq.No. = trailing 4–7 digit integer in textPart
         let (narration, reference) = extract_cosmos_ref(&text_part);
-        if narration.is_empty() { continue; }
+        if narration.is_empty() {
+            continue;
+        }
 
         txn_counter += 1;
         let mut t = Transaction::new(format!("t_cosmos_{}_{}", i, txn_counter));
-        t.date      = nd.display;
-        t.date_ts   = nd.ts;
+        t.date = nd.display;
+        t.date_ts = nd.ts;
         t.narration = narration;
         t.reference = reference;
-        t.balance   = Some(balance);
+        t.balance = Some(balance);
         t.bank_name = "Cosmos Co-operative Bank".to_string();
         // debit/credit resolved in Step 3
         pending.push(Pending { t, txn_val });
     }
 
-    if pending.len() < 2 { return None; }
+    if pending.len() < 2 {
+        return None;
+    }
 
     // ── Step 3: determine debit / credit from balance movement ────────────────
     let is_cosmos_credit = |nl: &str| -> bool {
-        nl.contains("upi-cr") || nl.contains("prcr/") || nl.contains("upi cr")
-        || (nl.contains("neft") && nl.contains("cr"))
-        || nl.contains("^by ") || nl.starts_with("by/") || nl.starts_with("by ")
-        || nl.contains("imps/p2a") || nl.contains("upi-rd")
-        || nl.contains("salary") || nl.contains("refund") || nl.contains("interest")
-        || nl.contains("reversal") || nl.contains("deposit")
+        nl.contains("upi-cr")
+            || nl.contains("prcr/")
+            || nl.contains("upi cr")
+            || (nl.contains("neft") && nl.contains("cr"))
+            || nl.contains("^by ")
+            || nl.starts_with("by/")
+            || nl.starts_with("by ")
+            || nl.contains("imps/p2a")
+            || nl.contains("upi-rd")
+            || nl.contains("salary")
+            || nl.contains("refund")
+            || nl.contains("interest")
+            || nl.contains("reversal")
+            || nl.contains("deposit")
     };
     let is_cosmos_debit = |nl: &str| -> bool {
-        nl.contains("upi-dr") || nl.contains("upi dr")
-        || (nl.contains("neft") && nl.contains("dr"))
-        || nl.contains("atm") || nl.contains("cwdr")
-        || nl.contains("cash w/d") || nl.contains("cash w-d")
-        || nl.contains("withdrawal") || nl.contains("payment to")
+        nl.contains("upi-dr")
+            || nl.contains("upi dr")
+            || (nl.contains("neft") && nl.contains("dr"))
+            || nl.contains("atm")
+            || nl.contains("cwdr")
+            || nl.contains("cash w/d")
+            || nl.contains("cash w-d")
+            || nl.contains("withdrawal")
+            || nl.contains("payment to")
     };
 
     let mut prev_bal = op_balance;
@@ -578,57 +710,63 @@ pub fn extract_cosmos_transactions(
 
     for mut p in pending {
         let bal = p.t.balance.unwrap();
-        let tv  = p.txn_val;
+        let tv = p.txn_val;
 
         if prev_bal.is_none() {
-            // Anchor: assign by narration keyword
             let nl = p.t.narration.to_lowercase();
-            if is_cosmos_credit(&nl)      { p.t.credit = Some(tv); }
-            else if is_cosmos_debit(&nl)  { p.t.debit  = Some(tv); }
-            else                           { p.t.debit  = Some(tv); }
+            if is_cosmos_credit(&nl) {
+                p.t.credit = Some(tv);
+            } else {
+                p.t.debit = Some(tv);
+            }
             prev_bal = Some(bal);
             resolved.push(p.t);
             continue;
         }
 
         let diff = ((bal - prev_bal.unwrap()) * 100.0).round() / 100.0;
-        let tol  = (tv * 0.001_f64).max(0.02);
+        let tol = (tv * 0.001_f64).max(0.02);
 
         if (diff - tv).abs() <= tol {
-            p.t.credit = Some(tv);          // balance UP → Deposits / credit
+            p.t.credit = Some(tv); // balance UP → Deposits / credit
         } else if (diff + tv).abs() <= tol {
-            p.t.debit  = Some(tv);          // balance DOWN → Withdrawals / debit
+            p.t.debit = Some(tv); // balance DOWN → Withdrawals / debit
         } else {
             // Reconciliation miss → narration keyword fallback
             let nl = p.t.narration.to_lowercase();
-            if is_cosmos_credit(&nl)      { p.t.credit = Some(tv); }
-            else if is_cosmos_debit(&nl)  { p.t.debit  = Some(tv); }
-            else                           { p.t.debit  = Some(tv); }
+            if is_cosmos_credit(&nl) {
+                p.t.credit = Some(tv);
+            } else {
+                p.t.debit = Some(tv);
+            }
         }
 
         prev_bal = Some(bal);
         resolved.push(p.t);
     }
 
-    let valid: Vec<Transaction> = resolved.into_iter()
+    let valid: Vec<Transaction> = resolved
+        .into_iter()
         .filter(|t| t.debit.is_some() || t.credit.is_some())
         .collect();
-    if valid.len() < 2 { return None; }
+    if valid.len() < 2 {
+        return None;
+    }
 
     let mut txns = valid;
     let op_balance = compute_prev_balances(&mut txns, op_balance);
     prepend_opening_balance_row(&mut txns, op_balance, "Cosmos Co-operative Bank", "");
 
     Some(ParseResult {
-        transactions:       txns,
-        opening_balance:    op_balance,
+        transactions: txns,
+        opening_balance: op_balance,
         closing_balance,
-        bank_name:          "Cosmos Co-operative Bank".to_string(),
-        account_no:         String::new(),
-        source_name:        file_name.to_string(),
-        col_map:            Default::default(),
-        header_row_idx:     hdr_idx,
-        noise_row_count:    0,
+        bank_name: "Cosmos Co-operative Bank".to_string(),
+        account_no: String::new(),
+        source_name: file_name.to_string(),
+        col_map: Default::default(),
+        header_row_idx: hdr_idx,
+        noise_row_count: 0,
         rejected_row_count: 0,
     })
 }
@@ -643,13 +781,21 @@ fn extract_cosmos_ref(text_part: &str) -> (String, String) {
             if last.len() >= 4 && last.len() <= 7 && last.chars().all(|c| c.is_ascii_digit()) {
                 let trailing_start = text_part.rfind(last).unwrap();
                 Some((trailing_start, last))
-            } else { None }
-        } else { None }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     };
 
     if let Some((pos, chq)) = re_end {
         let narr = text_part[..pos].trim().to_string();
-        let narr = if narr.is_empty() { text_part.to_string() } else { narr };
+        let narr = if narr.is_empty() {
+            text_part.to_string()
+        } else {
+            narr
+        };
         (narr, chq.to_string())
     } else {
         (text_part.trim().to_string(), String::new())
@@ -663,7 +809,11 @@ mod tests {
     use super::*;
 
     fn pdf_item(text: &str) -> PdfItem {
-        PdfItem { x: 10.0, text: text.to_owned(), w: 400.0 }
+        PdfItem {
+            x: 10.0,
+            text: text.to_owned(),
+            w: 400.0,
+        }
     }
 
     fn row_of(text: &str) -> Vec<PdfItem> {
@@ -725,7 +875,8 @@ mod tests {
 
     #[test]
     fn balance_suffix_cr() {
-        let (val, _, _) = extract_balance_suffix("01/01/2024 SALARY 50000.00 1,50,000.00Cr").unwrap();
+        let (val, _, _) =
+            extract_balance_suffix("01/01/2024 SALARY 50000.00 1,50,000.00Cr").unwrap();
         assert!((val - 150000.0).abs() < 0.01);
     }
 
@@ -753,7 +904,10 @@ mod tests {
     fn cosmos_long_digits_stay_in_narration() {
         // 12+ digit UTR stays in narration — not extracted as reference
         let (narr, chq) = extract_cosmos_ref("UPI-DR/305561534108/AMAZON");
-        assert!(chq.is_empty() || chq.len() <= 7, "long digit run should not be chq ref");
+        assert!(
+            chq.is_empty() || chq.len() <= 7,
+            "long digit run should not be chq ref"
+        );
         let _ = narr; // consumed to suppress warning
     }
 
@@ -808,8 +962,13 @@ mod tests {
     fn fw_format_b_upi_cr_is_credit() {
         let rows = fw_format_b_rows();
         let (txns, _, _) = extract_fw_transactions(&rows, "test.pdf").unwrap();
-        let salary = txns.iter().find(|t| t.narration.to_lowercase().contains("salary")
-            || t.narration.to_lowercase().contains("cr")).expect("UPI-CR row");
+        let salary = txns
+            .iter()
+            .find(|t| {
+                t.narration.to_lowercase().contains("salary")
+                    || t.narration.to_lowercase().contains("cr")
+            })
+            .expect("UPI-CR row");
         assert!(salary.credit.is_some(), "UPI-CR row should be credit");
     }
 
@@ -817,8 +976,13 @@ mod tests {
     fn fw_format_b_upi_dr_is_debit() {
         let rows = fw_format_b_rows();
         let (txns, _, _) = extract_fw_transactions(&rows, "test.pdf").unwrap();
-        let atm = txns.iter().find(|t| t.narration.to_lowercase().contains("atm")
-            || t.narration.to_lowercase().contains("upi-dr")).expect("UPI-DR row");
+        let atm = txns
+            .iter()
+            .find(|t| {
+                t.narration.to_lowercase().contains("atm")
+                    || t.narration.to_lowercase().contains("upi-dr")
+            })
+            .expect("UPI-DR row");
         assert!(atm.debit.is_some(), "UPI-DR row should be debit");
     }
 
@@ -839,7 +1003,8 @@ mod tests {
         let result = extract_fw_transactions(&rows, "test.pdf"); // must not panic
         if let Some((txns, _, _)) = result {
             assert!(
-                txns.iter().any(|t| t.narration.to_lowercase().contains("atm")),
+                txns.iter()
+                    .any(|t| t.narration.to_lowercase().contains("atm")),
                 "the normally-separated row should still be extracted"
             );
         }
@@ -874,7 +1039,10 @@ mod tests {
             t.narration
         );
         assert!(
-            !t.narration.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            !t.narration
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()),
             "narration must not start with a stray digit leaked from the date: {:?}",
             t.narration
         );
@@ -919,7 +1087,11 @@ mod tests {
         let rows = cosmos_rows();
         let result = extract_cosmos_transactions(&rows, "cosmos.pdf").unwrap();
         // Transactions + synthetic OB row
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         assert!(!real.is_empty(), "real transactions extracted");
     }
 
@@ -935,10 +1107,16 @@ mod tests {
             row_of("04-01-2024 NEFT FROM RAJESH                         25000.00 1,65,000.00Cr"),
         ];
         let result = extract_cosmos_transactions(&rows, "cosmos.pdf").unwrap();
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         assert!(real.len() >= 2, "at least 2 real transactions");
         // First transaction: salary credit (balance went from 100000 to 150000 = UP → credit)
-        let salary = real.iter().find(|t| t.narration.to_lowercase().contains("salary"));
+        let salary = real
+            .iter()
+            .find(|t| t.narration.to_lowercase().contains("salary"));
         if let Some(t) = salary {
             assert!(t.credit.is_some(), "salary → credit (balance moved up)");
         }
@@ -946,9 +1124,7 @@ mod tests {
 
     #[test]
     fn cosmos_no_header_returns_none() {
-        let rows = vec![
-            row_of("01-01-2024 SALARY 50000.00 150000.00Cr"),
-        ];
+        let rows = vec![row_of("01-01-2024 SALARY 50000.00 150000.00Cr")];
         assert!(extract_cosmos_transactions(&rows, "x.pdf").is_none());
     }
 }

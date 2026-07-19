@@ -5,12 +5,12 @@
 /// Per-file result for the batch monitor table.
 #[derive(Debug, Clone, Default)]
 pub struct BatchFileResult {
-    pub file:    String,
-    pub bank:    String,
+    pub file: String,
+    pub bank: String,
     pub account: String,
-    pub period:  String,
-    pub txns:    usize,
-    pub ok:      bool,
+    pub period: String,
+    pub txns: usize,
+    pub ok: bool,
     pub err_msg: String,
 }
 
@@ -27,21 +27,21 @@ pub struct BatchFileResult {
 /// effect — see `continue_batch`'s doc comment in main.rs.
 #[derive(Debug, Clone, Default)]
 pub struct BatchProgress {
-    pub remaining:        std::collections::VecDeque<std::path::PathBuf>,
-    pub all_txns:         Vec<crate::parser::Transaction>,
-    pub loaded:           usize,
-    pub skipped:          usize,
-    pub errors:           usize,
-    pub first_bank:       String,
-    pub first_ob:         Option<f64>,
-    pub new_import_ids:   Vec<i64>,
-    pub batch_results:    Vec<BatchFileResult>,
+    pub remaining: std::collections::VecDeque<std::path::PathBuf>,
+    pub all_txns: Vec<crate::parser::Transaction>,
+    pub loaded: usize,
+    pub skipped: usize,
+    pub errors: usize,
+    pub first_bank: String,
+    pub first_ob: Option<f64>,
+    pub new_import_ids: Vec<i64>,
+    pub batch_results: Vec<BatchFileResult>,
     pub persisted_hashes: std::collections::HashSet<String>,
-    pub client_id:        Option<i64>,
+    pub client_id: Option<i64>,
     /// User clicked "Pause" — `continue_batch` checks this before starting
     /// the next file and, if set, stops rescheduling itself entirely
     /// (no polling) until "Resume" is clicked, which re-invokes it directly.
-    pub paused:  bool,
+    pub paused: bool,
     /// User clicked "Abort" — takes effect at the next file boundary, same
     /// granularity as the old app (`_aborted` checked once per loop
     /// iteration, never mid-file). Kept distinct from just dropping
@@ -53,52 +53,52 @@ pub struct BatchProgress {
 /// Snapshot of editable transaction fields for the undo stack.
 #[derive(Debug, Clone)]
 pub struct UndoEntry {
-    pub txn_id:     String,
-    pub vendor:     String,
-    pub head:       String,
-    pub txn_type:   crate::parser::VoucherType,
-    pub status:     crate::parser::TransactionStatus,
+    pub txn_id: String,
+    pub vendor: String,
+    pub head: String,
+    pub txn_type: crate::parser::VoucherType,
+    pub status: crate::parser::TransactionStatus,
     pub confidence: f64,
 }
 
 /// Runtime state shared between Rust logic and the Slint UI.
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
-    pub client_id:       Option<i64>,
-    pub client_name:     String,
-    pub tally_ledger:    String,   // Tally bank ledger name for the current client
-    pub file_name:       String,
-    pub bank_name:       String,
-    pub account_no:      String,
+    pub client_id: Option<i64>,
+    pub client_name: String,
+    pub tally_ledger: String, // Tally bank ledger name for the current client
+    pub file_name: String,
+    pub bank_name: String,
+    pub account_no: String,
 
     pub opening_balance: Option<f64>,
     pub closing_balance: Option<f64>,
-    pub total_debits:    f64,
-    pub total_credits:   f64,
-    pub txn_count:       usize,
-    pub unreviewed:      usize,
-    pub vendor_count:    usize,
-    pub has_mismatch:    bool,
+    pub total_debits: f64,
+    pub total_credits: f64,
+    pub txn_count: usize,
+    pub unreviewed: usize,
+    pub vendor_count: usize,
+    pub has_mismatch: bool,
 
     // Full transaction list for dashboard re-aggregation on filter change
-    pub transactions:    Vec<crate::parser::Transaction>,
+    pub transactions: Vec<crate::parser::Transaction>,
 
     // Active filter state — kept in sync with Slint UI
-    pub active_filter:  String,   // "all" | "unreviewed" | "suspense" | "high" | "duplicates" | "gst" | "needs_review" | "multi"
+    pub active_filter: String, // "all" | "unreviewed" | "suspense" | "high" | "duplicates" | "gst" | "needs_review" | "multi"
     pub filter_statuses: Vec<String>, // OR-logic multi-status set; empty = "all"
-    pub date_from:      String,   // DD/MM/YYYY
-    pub date_to:        String,   // DD/MM/YYYY
-    pub bank_filter:    String,   // "" means All Banks
-    pub vendor_filter:  String,   // "" means no vendor filter
-    pub head_filter:    String,   // "" means no ledger/head filter
-    pub dedup_enabled:  bool,     // mirrors the Dedupe checkbox in the toolbar
+    pub date_from: String,     // DD/MM/YYYY
+    pub date_to: String,       // DD/MM/YYYY
+    pub bank_filter: String,   // "" means All Banks
+    pub vendor_filter: String, // "" means no vendor filter
+    pub head_filter: String,   // "" means no ledger/head filter
+    pub dedup_enabled: bool,   // mirrors the Dedupe checkbox in the toolbar
 
     // Export wizard state (synced from the UI before generating)
-    pub wiz_sw_idx:    i32,   // 0=Tally 1=Zoho 2=QB 3=Odoo 4=Excel 5=XML
-    pub wiz_company:   String,
-    pub wiz_gstin:     String,
-    pub wiz_date_from: String,  // ISO YYYY-MM-DD
-    pub wiz_date_to:   String,
+    pub wiz_sw_idx: i32, // 0=Tally 1=Zoho 2=QB 3=Odoo 4=Excel 5=XML
+    pub wiz_company: String,
+    pub wiz_gstin: String,
+    pub wiz_date_from: String, // ISO YYYY-MM-DD
+    pub wiz_date_to: String,
 
     // Import history: parallel vec to the UI import-records list (DB import ids)
     pub import_ids: Vec<i64>,
@@ -108,9 +108,9 @@ pub struct AppState {
     pub rule_ids: Vec<i64>,
 
     // AI settings (loaded from DB settings table)
-    pub ai_provider:  String,   // "openai" | "claude" | "gemini"
-    pub ai_api_key:   String,
-    pub ai_enabled:   bool,
+    pub ai_provider: String, // "openai" | "claude" | "gemini"
+    pub ai_api_key: String,
+    pub ai_enabled: bool,
 
     // Audit trail — in-memory event log, newest appended last
     pub audit_events: Vec<String>,
@@ -120,7 +120,7 @@ pub struct AppState {
     // Reconcile — vouchers parsed from the last "Import Tally Export" click,
     // kept around so "Run Reconciliation" can (re-)match against them without
     // re-picking the file (e.g. after tweaking the recon tolerance settings).
-    pub recon_vouchers:   Vec<crate::reconciliation::Voucher>,
+    pub recon_vouchers: Vec<crate::reconciliation::Voucher>,
     pub recon_file_label: String,
     // CSV text built after the last successful reconciliation run; empty until then.
     pub recon_csv: String,
@@ -129,7 +129,7 @@ pub struct AppState {
     // kept around so "Start Migration" doesn't need to re-pick it, and the
     // full report text from the last run (for "Save Full Report…").
     pub migration_export_path: Option<std::path::PathBuf>,
-    pub migration_report_md:   String,
+    pub migration_report_md: String,
 
     // PDF password — path waiting for a password prompt
     pub pending_pdf_path: Option<std::path::PathBuf>,
@@ -149,7 +149,7 @@ impl AppState {
     /// Format an optional f64 as Indian locale amount string (e.g. "₹ 1,23,456.78").
     pub fn fmt_amount(v: Option<f64>) -> String {
         match v {
-            None    => "₹ —".to_string(),
+            None => "₹ —".to_string(),
             Some(n) => format!("₹ {}", fmt_inr(n)),
         }
     }
@@ -157,8 +157,8 @@ impl AppState {
 
 /// Format a float in Indian numbering system with 2 decimal places.
 pub fn fmt_inr(amount: f64) -> String {
-    let abs   = amount.abs();
-    let sign  = if amount < 0.0 { "-" } else { "" };
+    let abs = amount.abs();
+    let sign = if amount < 0.0 { "-" } else { "" };
     let cents = (abs * 100.0).round() as u64;
     let paise = cents % 100;
     let rupees = cents / 100;
@@ -204,10 +204,10 @@ mod tests {
 
     #[test]
     fn fmt_inr_basic() {
-        assert_eq!(fmt_inr(1000.0),      "1,000.00");
-        assert_eq!(fmt_inr(100000.0),    "1,00,000.00");
-        assert_eq!(fmt_inr(1234567.89),  "12,34,567.89");
-        assert_eq!(fmt_inr(0.5),         "0.50");
+        assert_eq!(fmt_inr(1000.0), "1,000.00");
+        assert_eq!(fmt_inr(100000.0), "1,00,000.00");
+        assert_eq!(fmt_inr(1234567.89), "12,34,567.89");
+        assert_eq!(fmt_inr(0.5), "0.50");
     }
 
     #[test]

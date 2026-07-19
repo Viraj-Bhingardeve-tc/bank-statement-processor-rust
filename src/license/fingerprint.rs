@@ -82,11 +82,22 @@ mod tests {
     #[test]
     fn generate_device_id_produces_the_expected_shape() {
         let id = generate_device_id();
-        assert_eq!(id.len(), 36, "expected 8-4-4-4-12 hyphenated form, got: {id}");
+        assert_eq!(
+            id.len(),
+            36,
+            "expected 8-4-4-4-12 hyphenated form, got: {id}"
+        );
         let parts: Vec<&str> = id.split('-').collect();
-        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
         // Version nibble must be '4' (v4 UUID).
-        assert!(parts[2].starts_with('4'), "expected version 4, got: {}", parts[2]);
+        assert!(
+            parts[2].starts_with('4'),
+            "expected version 4, got: {}",
+            parts[2]
+        );
     }
 
     #[test]

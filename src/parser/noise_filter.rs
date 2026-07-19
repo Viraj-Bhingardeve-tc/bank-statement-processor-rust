@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn grand_total_noise() {
         noise("grand total");
-        noise("Grand Total");        // case-insensitive via lowercase
+        noise("Grand Total"); // case-insensitive via lowercase
         noise("GRAND TOTAL");
     }
 
@@ -206,7 +206,7 @@ mod tests {
         noise("c/f");
         noise("B/F");
         noise("C/F");
-        noise("b\\f");  // back-slash variant
+        noise("b\\f"); // back-slash variant
     }
 
     #[test]
@@ -273,7 +273,7 @@ mod tests {
     fn page_total_noise() {
         noise("page total");
         noise("Page Total");
-        noise("Monthly page total");   // mid-string match (no ^ anchor)
+        noise("Monthly page total"); // mid-string match (no ^ anchor)
     }
 
     #[test]
@@ -287,9 +287,9 @@ mod tests {
 
     #[test]
     fn bank_metadata_rows_noise() {
-        noise("idbi bank 0460xxx3948");    // masked account
-        noise("IDBI BANK 0460XXX3948");    // uppercase (via lowercase)
-        noise("sbi bank 30120456789012");  // unmasked long account (≥10 digits)
+        noise("idbi bank 0460xxx3948"); // masked account
+        noise("IDBI BANK 0460XXX3948"); // uppercase (via lowercase)
+        noise("sbi bank 30120456789012"); // unmasked long account (≥10 digits)
     }
 
     // ── HDRS patterns ─────────────────────────────────────────────────────────
@@ -405,7 +405,7 @@ mod tests {
         // "totals for the month" starts with "total" then "s" — \b is between l and s?
         // In "totals", \b is at start and end of the word, NOT between 'l' and 's'.
         // So /^total\b/ does NOT match "totals" since the 's' breaks the boundary.
-        real("totals for the month");    // "totals" → ^(grand\s*)?total\b → "totals" has no \b after "total"
+        real("totals for the month"); // "totals" → ^(grand\s*)?total\b → "totals" has no \b after "total"
     }
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         // "balance enquiry" starts with "balance" → NOISE
         // But "low account balance alert" doesn't start with "balance"
         real("low account balance alert");
-        real("minimum balance charge deducted");  // starts with "minimum" → not noise
+        real("minimum balance charge deducted"); // starts with "minimum" → not noise
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
     fn page_number_in_narration_not_noise() {
         // "transferred on page 3" contains "page" but doesn't start with "page \d+"
         // BUT page_total: \bpage\s*total\b is a non-anchored pattern → matches if "page total" anywhere
-        real("transferred on page 3 from branch");  // no "total" adjacent → not noise
+        real("transferred on page 3 from branch"); // no "total" adjacent → not noise
     }
 
     // ── Case-insensitivity (via lowercase) ───────────────────────────────────

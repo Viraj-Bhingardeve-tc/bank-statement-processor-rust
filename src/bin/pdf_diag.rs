@@ -13,7 +13,9 @@ fn main() {
 
     for name in &test_files {
         let path = std::path::PathBuf::from(assets).join(name);
-        if !path.exists() { continue; }
+        if !path.exists() {
+            continue;
+        }
 
         println!("\n{}", "=".repeat(60));
         println!("FILE: {}", name);
@@ -29,7 +31,11 @@ fn main() {
 
         // Stage 2a: direct OCR parse
         let ocr = bank_statement_processor::parser::ocr_parser::parse_ocr_text(&full_text, name);
-        let real_a: Vec<_> = ocr.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real_a: Vec<_> = ocr
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         println!("  Stage-2a (ocr_text):  {} transactions", real_a.len());
 
         // Stage 2b: multiline preprocess
@@ -39,16 +45,26 @@ fn main() {
             println!("    [{:02}] {}", i, l);
         }
         let ml = bank_statement_processor::parser::ocr_parser::parse_ocr_text(&pre, name);
-        let real_b: Vec<_> = ml.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real_b: Vec<_> = ml
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         println!("  Stage-2b (multiline): {} transactions", real_b.len());
 
         // Show first 3 parsed transactions
         for (i, t) in real_b.iter().take(3).enumerate() {
-            println!("  T{}: date={} narr='{}' dr={:?} cr={:?} bal={:?}",
-                i, t.date, bank_statement_processor::text_safety::safe_prefix(&t.narration, 40),
-                t.debit, t.credit, t.balance);
+            println!(
+                "  T{}: date={} narr='{}' dr={:?} cr={:?} bal={:?}",
+                i,
+                t.date,
+                bank_statement_processor::text_safety::safe_prefix(&t.narration, 40),
+                t.debit,
+                t.credit,
+                t.balance
+            );
         }
-        if real_a.len() == 0 && real_b.len() == 0 {
+        if real_a.is_empty() && real_b.is_empty() {
             println!("  *** NOTHING PARSED — first 10 raw lines:");
             for (i, l) in full_text.lines().take(10).enumerate() {
                 println!("    [{}] {}", i, l.trim());

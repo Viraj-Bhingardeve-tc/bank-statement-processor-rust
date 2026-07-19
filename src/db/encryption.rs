@@ -126,16 +126,22 @@ fn try_open_with_key(path: &Path, key: &str) -> Result<Connection> {
     let conn = Connection::open(path).context("open db file")?;
     conn.pragma_update(None, "key", key)
         .context("set encryption key")?;
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-        .context("validate encryption key by reading sqlite_master")?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .context("validate encryption key by reading sqlite_master")?;
     Ok(conn)
 }
 
 /// True if `path` is openable as a normal, unencrypted SQLite file.
 fn is_plaintext_sqlite(path: &Path) -> bool {
-    let Ok(conn) = Connection::open(path) else { return false };
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-        .is_ok()
+    let Ok(conn) = Connection::open(path) else {
+        return false;
+    };
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .is_ok()
 }
 
 /// Opens (or creates) the database at `path` as an encrypted SQLCipher
@@ -195,7 +201,8 @@ pub fn open_encrypted(path: &Path) -> Result<Connection> {
         log::warn!(
             "[db] {path:?} looks corrupted or partially migrated — restoring from backup {bak:?} and retrying"
         );
-        std::fs::copy(&bak, path).context("restore from .bak after detecting a corrupted/partial db file")?;
+        std::fs::copy(&bak, path)
+            .context("restore from .bak after detecting a corrupted/partial db file")?;
         recovered_once = true;
     }
 }
@@ -262,11 +269,15 @@ fn migrate_plaintext_to_encrypted(path: &Path, key: &str) -> Result<()> {
 
     if let Err(e) = verify_migrated_db(path, &tmp, key) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e).context("verification failed — original plaintext db left untouched, backup retained");
+        return Err(e).context(
+            "verification failed — original plaintext db left untouched, backup retained",
+        );
     }
 
     std::fs::rename(&tmp, path).context("replace plaintext db with verified encrypted copy")?;
-    log::info!("[db] migrated {path:?} to an encrypted database (plaintext backup retained at {bak:?})");
+    log::info!(
+        "[db] migrated {path:?} to an encrypted database (plaintext backup retained at {bak:?})"
+    );
     Ok(())
 }
 
@@ -293,29 +304,42 @@ fn verify_migrated_db(original_path: &Path, new_path: &Path, key: &str) -> Resul
         let mut stmt = new_conn
             .prepare("PRAGMA cipher_integrity_check")
             .context("prepare cipher_integrity_check")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
             .context("run cipher_integrity_check on migrated db")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().context("collect cipher_integrity_check results")?
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect cipher_integrity_check results")?
     };
     if !cipher_problems.is_empty() {
-        anyhow::bail!("cipher_integrity_check on migrated db found problems: {}", cipher_problems.join("; "));
+        anyhow::bail!(
+            "cipher_integrity_check on migrated db found problems: {}",
+            cipher_problems.join("; ")
+        );
     }
 
-    let orig_conn = Connection::open(original_path).context("reopen original plaintext db for row-count comparison")?;
+    let orig_conn = Connection::open(original_path)
+        .context("reopen original plaintext db for row-count comparison")?;
     let tables: Vec<String> = {
         let mut stmt = orig_conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
             .context("list tables in original db")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().context("collect table names")?
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("collect table names")?
     };
 
     for table in &tables {
         let orig_count: i64 = orig_conn
-            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |r| r.get(0))
+            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |r| {
+                r.get(0)
+            })
             .with_context(|| format!("count rows in original.{table}"))?;
         let new_count: i64 = new_conn
-            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |r| r.get(0))
+            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |r| {
+                r.get(0)
+            })
             .with_context(|| format!("count rows in migrated.{table}"))?;
         if orig_count != new_count {
             anyhow::bail!(
@@ -331,7 +355,9 @@ mod tests {
     use super::*;
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        ENCRYPTION_KEYRING_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        ENCRYPTION_KEYRING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn clear_test_key() {
@@ -384,7 +410,8 @@ mod tests {
 
         {
             let conn = open_encrypted(&path).expect("create fresh encrypted db");
-            conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('secret');").unwrap();
+            conn.execute_batch("CREATE TABLE t (v TEXT); INSERT INTO t VALUES ('secret');")
+                .unwrap();
         }
         // A keyless open must NOT be able to read it — proves it's really encrypted.
         assert!(
@@ -431,23 +458,37 @@ mod tests {
         let conn = open_encrypted(&path).expect("migrate plaintext db to encrypted");
 
         // Data survived the migration intact.
-        let client_count: i64 = conn.query_row("SELECT count(*) FROM clients", [], |r| r.get(0)).unwrap();
+        let client_count: i64 = conn
+            .query_row("SELECT count(*) FROM clients", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(client_count, 2);
         let narr: String = conn
-            .query_row("SELECT narration FROM transactions WHERE account_no = '9876543210'", [], |r| r.get(0))
+            .query_row(
+                "SELECT narration FROM transactions WHERE account_no = '9876543210'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(narr, "NEFT/Vendor Payment");
 
         // The main file is now genuinely encrypted, not plaintext.
-        assert!(!is_plaintext_sqlite(&path), "migrated file must be encrypted, not plaintext");
+        assert!(
+            !is_plaintext_sqlite(&path),
+            "migrated file must be encrypted, not plaintext"
+        );
 
         // The backup exists, was never deleted, and is itself still plaintext
         // and fully readable — the safety net the user asked for.
         let bak = backup_path(&path);
         assert!(bak.exists(), ".bak must exist after migration");
-        assert!(is_plaintext_sqlite(&bak), ".bak must remain a readable plaintext copy");
+        assert!(
+            is_plaintext_sqlite(&bak),
+            ".bak must remain a readable plaintext copy"
+        );
         let bak_conn = Connection::open(&bak).unwrap();
-        let bak_count: i64 = bak_conn.query_row("SELECT count(*) FROM clients", [], |r| r.get(0)).unwrap();
+        let bak_count: i64 = bak_conn
+            .query_row("SELECT count(*) FROM clients", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(bak_count, 2, ".bak must contain the original data");
 
         // No leftover temp file.
@@ -466,14 +507,25 @@ mod tests {
         make_plaintext_db_with_data(&path);
 
         open_encrypted(&path).unwrap(); // first open: migrates
-        let bak_mtime_1 = std::fs::metadata(backup_path(&path)).unwrap().modified().unwrap();
+        let bak_mtime_1 = std::fs::metadata(backup_path(&path))
+            .unwrap()
+            .modified()
+            .unwrap();
 
         // Second open must NOT touch the backup again (no re-migration).
         let conn2 = open_encrypted(&path).expect("second open of already-encrypted db");
-        let bak_mtime_2 = std::fs::metadata(backup_path(&path)).unwrap().modified().unwrap();
-        assert_eq!(bak_mtime_1, bak_mtime_2, "re-opening must not touch the existing backup");
+        let bak_mtime_2 = std::fs::metadata(backup_path(&path))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            bak_mtime_1, bak_mtime_2,
+            "re-opening must not touch the existing backup"
+        );
 
-        let client_count: i64 = conn2.query_row("SELECT count(*) FROM clients", [], |r| r.get(0)).unwrap();
+        let client_count: i64 = conn2
+            .query_row("SELECT count(*) FROM clients", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(client_count, 2);
 
         cleanup(&path);
@@ -501,10 +553,16 @@ mod tests {
 
         // open_encrypted must detect this, restore from .bak, and complete
         // the migration successfully rather than failing outright.
-        let conn = open_encrypted(&path).expect("must self-heal from backup and complete migration");
-        let client_count: i64 = conn.query_row("SELECT count(*) FROM clients", [], |r| r.get(0)).unwrap();
+        let conn =
+            open_encrypted(&path).expect("must self-heal from backup and complete migration");
+        let client_count: i64 = conn
+            .query_row("SELECT count(*) FROM clients", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(client_count, 2, "data recovered via backup must be intact");
-        assert!(!is_plaintext_sqlite(&path), "recovered db must end up encrypted, not left plaintext");
+        assert!(
+            !is_plaintext_sqlite(&path),
+            "recovered db must end up encrypted, not left plaintext"
+        );
 
         cleanup(&path);
         clear_test_key();
@@ -519,7 +577,10 @@ mod tests {
         std::fs::write(&path, b"garbage, not a sqlite file, and no .bak anywhere").unwrap();
 
         let result = open_encrypted(&path);
-        assert!(result.is_err(), "must not silently succeed or fabricate a working db with no recovery source");
+        assert!(
+            result.is_err(),
+            "must not silently succeed or fabricate a working db with no recovery source"
+        );
 
         cleanup(&path);
         clear_test_key();

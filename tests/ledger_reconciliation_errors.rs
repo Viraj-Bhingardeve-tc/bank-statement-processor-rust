@@ -247,12 +247,12 @@ fn parsing_garbage_bytes_as_a_pdf_does_not_panic() {
     // Err/empty-rows result from a corrupt file as "no transactions found",
     // never a crash — this proves that contract holds for the parser layer.
     let result = text_extractor::extract_pages(&path);
-    match result {
-        Ok(rows) => assert!(
+    // Err is also acceptable here — the point is no panic either way.
+    if let Ok(rows) = result {
+        assert!(
             rows.is_empty(),
             "garbage bytes must not produce fabricated rows"
-        ),
-        Err(_) => {} // also acceptable — the point is no panic either way
+        );
     }
 
     let _ = std::fs::remove_file(&path);

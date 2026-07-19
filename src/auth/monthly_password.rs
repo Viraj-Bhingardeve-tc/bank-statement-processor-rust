@@ -75,7 +75,7 @@ fn normalize_entered(raw: &str) -> String {
 /// Returns `None` only if the HMAC digest produces fewer than 32 alphanumeric chars
 /// (essentially impossible with SHA-512 output).
 fn generate_password(email: &str, month: &str) -> Option<String> {
-    let key     = secret_key();
+    let key = secret_key();
     let message = format!("{}|{}", email.trim().to_lowercase(), month);
 
     let mut mac = HmacSha512::new_from_slice(key.as_bytes()).ok()?;
@@ -97,7 +97,7 @@ fn generate_password(email: &str, month: &str) -> Option<String> {
     }
 
     // Format: XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX
-    let raw    = &alphanum[..32];
+    let raw = &alphanum[..32];
     let groups: Vec<&str> = (0..4).map(|i| &raw[i * 8..(i + 1) * 8]).collect();
     Some(groups.join("-"))
 }
@@ -129,7 +129,9 @@ mod tests {
         assert_eq!(parts.len(), 4, "must have 4 groups");
         for part in &parts {
             assert_eq!(part.len(), 8, "each group must be 8 chars");
-            assert!(part.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+            assert!(part
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
         }
     }
 
@@ -155,6 +157,9 @@ mod tests {
 
     #[test]
     fn wrong_password_rejected() {
-        assert!(!validate_credentials("user@firm.com", "AAAAAAAA-BBBBBBBB-CCCCCCCC-DDDDDDDD"));
+        assert!(!validate_credentials(
+            "user@firm.com",
+            "AAAAAAAA-BBBBBBBB-CCCCCCCC-DDDDDDDD"
+        ));
     }
 }

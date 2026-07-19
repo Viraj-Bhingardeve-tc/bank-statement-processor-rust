@@ -57,7 +57,8 @@ pub fn find_ascii_ci(s: &str, pat: &str) -> Option<usize> {
     if pb.is_empty() || sb.len() < pb.len() {
         return None;
     }
-    (0..=sb.len() - pb.len()).find(|&i| s.is_char_boundary(i) && sb[i..i + pb.len()].eq_ignore_ascii_case(pb))
+    (0..=sb.len() - pb.len())
+        .find(|&i| s.is_char_boundary(i) && sb[i..i + pb.len()].eq_ignore_ascii_case(pb))
 }
 
 #[cfg(test)]
@@ -95,7 +96,11 @@ mod tests {
         let s = "x😀y";
         assert_eq!(s.len(), 6);
         for mid in 2..=4 {
-            assert_eq!(floor_char_boundary(s, mid), 1, "byte {mid} should round down to 1");
+            assert_eq!(
+                floor_char_boundary(s, mid),
+                1,
+                "byte {mid} should round down to 1"
+            );
         }
         assert_eq!(floor_char_boundary(s, 5), 5);
     }
@@ -116,7 +121,7 @@ mod tests {
         // only string instead, for every possible cut point.
         let samples = [
             "Reliance Jio ₹499 Recharge",
-            "मुंबई शाखा - ACCOUNT TRANSFER",     // Devanagari (Mumbai branch)
+            "मुंबई शाखा - ACCOUNT TRANSFER", // Devanagari (Mumbai branch)
             "café Münchën 😀 payment",
             "पैसे",
         ];
@@ -151,13 +156,18 @@ mod tests {
     }
 
     #[test]
-    fn find_ascii_ci_returns_a_position_valid_in_the_original_string_even_past_a_length_changing_lowercase_char() {
+    fn find_ascii_ci_returns_a_position_valid_in_the_original_string_even_past_a_length_changing_lowercase_char(
+    ) {
         // 'İ' (U+0130, 2 bytes) lowercases to "i̇" (3 bytes) — the classic
         // case where `s.to_lowercase().find(pat)` returns an offset that
         // no longer corresponds to the same position in `s`.
         let s = "\u{0130}Cafe Page 2";
         let pos = find_ascii_ci(s, "page ").expect("should find \"Page \"");
-        assert_eq!(&s[pos..pos + 5], "Page ", "the returned offset must point at the real match in s");
+        assert_eq!(
+            &s[pos..pos + 5],
+            "Page ",
+            "the returned offset must point at the real match in s"
+        );
     }
 
     #[test]

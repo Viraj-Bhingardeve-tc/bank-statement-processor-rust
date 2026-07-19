@@ -12,20 +12,20 @@
 use std::collections::HashMap;
 
 use crate::parser::{
-    ParseResult, Transaction,
     amount_parser::parse_amount_str,
     bank_detection::{detect, DetectOptions},
     column_detector::{
-        assign_cells, calc_col_boundaries, find_pdf_header,
-        infer_header_from_data, ColField, PdfHeaderResult, PdfItem,
+        assign_cells, calc_col_boundaries, find_pdf_header, infer_header_from_data, ColField,
+        PdfHeaderResult, PdfItem,
     },
     date_parser::normalize_transaction_date,
     excel_parser::{
-        compute_prev_balances, correct_debit_credit_by_balance,
-        deduplicate_txns, prepend_opening_balance_row, validate_balances,
+        compute_prev_balances, correct_debit_credit_by_balance, deduplicate_txns,
+        prepend_opening_balance_row, validate_balances,
     },
     noise_filter::is_noise_row,
     transaction_extractor::{extract_cosmos_transactions, extract_fw_transactions},
+    ParseResult, Transaction,
 };
 
 // ── is_fw_format ──────────────────────────────────────────────────────────────
@@ -35,17 +35,19 @@ use crate::parser::{
 /// Returns true when ≥ 85 % of the first 30 non-empty rows have all their items
 /// within 5 px of each other in X — the hallmark of a fixed-width text PDF.
 pub fn is_fw_format(rows: &[Vec<PdfItem>]) -> bool {
-    let check: Vec<&Vec<PdfItem>> = rows.iter()
-        .filter(|r| !r.is_empty())
-        .take(30)
-        .collect();
-    if check.len() < 5 { return false; }
+    let check: Vec<&Vec<PdfItem>> = rows.iter().filter(|r| !r.is_empty()).take(30).collect();
+    if check.len() < 5 {
+        return false;
+    }
 
-    let fw_count = check.iter().filter(|row| {
-        let min_x = row.iter().map(|it| it.x).fold(f64::INFINITY, f64::min);
-        let max_x = row.iter().map(|it| it.x).fold(f64::NEG_INFINITY, f64::max);
-        (max_x - min_x) < 5.0
-    }).count();
+    let fw_count = check
+        .iter()
+        .filter(|row| {
+            let min_x = row.iter().map(|it| it.x).fold(f64::INFINITY, f64::min);
+            let max_x = row.iter().map(|it| it.x).fold(f64::NEG_INFINITY, f64::max);
+            (max_x - min_x) < 5.0
+        })
+        .count();
 
     (fw_count as f64 / check.len() as f64) >= 0.85
 }
@@ -69,21 +71,32 @@ fn cell_str(cells: &HashMap<ColField, String>, f: ColField) -> String {
 ///
 /// Returns `None` when no valid layout can be detected.
 pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseResult> {
-
     // ── Early Cosmos detection ────────────────────────────────────────────────
-    let early_text: String = rows.iter().take(30)
-        .map(|r| r.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>().join("\n");
+    let early_text: String = rows
+        .iter()
+        .take(30)
+        .map(|r| {
+            r.iter()
+                .map(|it| it.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let cosmos_re = |s: &str| -> bool {
         let l = s.to_lowercase();
-        l.contains("cosmos co-operative") || l.contains("cosmos cooperative")
-        || l.contains("cosmosbank.com") || l.contains("cosmos co-op")
-        || l.contains("cosmos bank")
+        l.contains("cosmos co-operative")
+            || l.contains("cosmos cooperative")
+            || l.contains("cosmosbank.com")
+            || l.contains("cosmos co-op")
+            || l.contains("cosmos bank")
     };
 
     if cosmos_re(&early_text) {
-        log::debug!("[BSP PDF] Cosmos Co-operative Bank detected — running extract_cosmos_transactions");
+        log::debug!(
+            "[BSP PDF] Cosmos Co-operative Bank detected — running extract_cosmos_transactions"
+        );
         if let Some(result) = extract_cosmos_transactions(&rows, file_name) {
             return Some(result);
         }
@@ -91,8 +104,8 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
     }
 
     // ── Header detection ──────────────────────────────────────────────────────
-    let hdr_info: Option<PdfHeaderResult> = find_pdf_header(&rows)
-        .or_else(|| infer_header_from_data(&rows));
+    let hdr_info: Option<PdfHeaderResult> =
+        find_pdf_header(&rows).or_else(|| infer_header_from_data(&rows));
 
     let hdr_info = match hdr_info {
         Some(h) => h,
@@ -103,11 +116,16 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
                     let op_balance = compute_prev_balances(&mut txns, op_bal);
                     prepend_opening_balance_row(&mut txns, op_balance, file_name, "");
                     return Some(ParseResult {
-                        transactions: txns, opening_balance: op_balance,
-                        closing_balance: cl_bal, bank_name: file_name.to_string(),
-                        account_no: String::new(), source_name: file_name.to_string(),
-                        col_map: Default::default(), header_row_idx: 0,
-                        noise_row_count: 0, rejected_row_count: 0,
+                        transactions: txns,
+                        opening_balance: op_balance,
+                        closing_balance: cl_bal,
+                        bank_name: file_name.to_string(),
+                        account_no: String::new(),
+                        source_name: file_name.to_string(),
+                        col_map: Default::default(),
+                        header_row_idx: 0,
+                        noise_row_count: 0,
+                        rejected_row_count: 0,
                     });
                 }
             }
@@ -116,48 +134,88 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
         }
     };
 
-    let hdr_idx        = hdr_info.hdr_idx;          // None = inferred from data
-    let col_x          = hdr_info.col_x;
-    let hdr_row        = hdr_info.hdr_row;
-    let header_inferred = hdr_idx.is_none();         // mirrors JS `hdrIdx < 0`
-    let boundaries     = calc_col_boundaries(&col_x, &hdr_row);
+    let hdr_idx = hdr_info.hdr_idx; // None = inferred from data
+    let col_x = hdr_info.col_x;
+    let hdr_row = hdr_info.hdr_row;
+    let header_inferred = hdr_idx.is_none(); // mirrors JS `hdrIdx < 0`
+    let boundaries = calc_col_boundaries(&col_x, &hdr_row);
 
-    let start_idx = hdr_idx.map_or(0, |i| i + 1);   // JS: hdrIdx < 0 ? 0 : hdrIdx + 1
+    let start_idx = hdr_idx.map_or(0, |i| i + 1); // JS: hdrIdx < 0 ? 0 : hdrIdx + 1
 
     // ── Main extraction loop ──────────────────────────────────────────────────
-    let mut txns:            Vec<Transaction> = Vec::new();
-    let mut op_balance:      Option<f64>      = None;
-    let mut closing_balance: Option<f64>      = None;
-    let mut pending:         Option<Transaction> = None;  // BOB-style sub-row merge
-    let mut type_buffer      = String::new();             // BOM/BOB pre-date type code
-    let mut narr_buffer      = String::new();             // pre-first-txn narration
+    let mut txns: Vec<Transaction> = Vec::new();
+    let mut op_balance: Option<f64> = None;
+    let mut closing_balance: Option<f64> = None;
+    let mut pending: Option<Transaction> = None; // BOB-style sub-row merge
+    let mut type_buffer = String::new(); // BOM/BOB pre-date type code
+    let mut narr_buffer = String::new(); // pre-first-txn narration
     let mut txn_counter = 0usize;
-    let mut noise_rows  = 0usize;
+    let mut noise_rows = 0usize;
 
     // Type codes that appear on their own row before the date row (BOM/BOB layout)
     let is_type_code = |s: &str| -> bool {
         let up = s.trim().to_uppercase();
-        matches!(up.as_str(), "UPI" | "NEFT" | "IMPS" | "RTGS" | "CHQ" | "CASH" | "ATM"
-            | "POS" | "ECS" | "EMI" | "SWP" | "RFD" | "REV" | "CLG" | "NACH" | "TRF"
-            | "FT" | "DD" | "SI")
-        || (up.ends_with('-') || up.ends_with('/'))
-            && matches!(up.trim_end_matches(|c| c == '-' || c == '/').as_ref(),
-                "UPI" | "NEFT" | "IMPS" | "RTGS" | "CHQ" | "CASH" | "ATM"
-                | "POS" | "ECS" | "EMI" | "TRF" | "NACH" | "DD")
+        matches!(
+            up.as_str(),
+            "UPI"
+                | "NEFT"
+                | "IMPS"
+                | "RTGS"
+                | "CHQ"
+                | "CASH"
+                | "ATM"
+                | "POS"
+                | "ECS"
+                | "EMI"
+                | "SWP"
+                | "RFD"
+                | "REV"
+                | "CLG"
+                | "NACH"
+                | "TRF"
+                | "FT"
+                | "DD"
+                | "SI"
+        ) || (up.ends_with('-') || up.ends_with('/'))
+            && matches!(
+                up.trim_end_matches(['-', '/']),
+                "UPI"
+                    | "NEFT"
+                    | "IMPS"
+                    | "RTGS"
+                    | "CHQ"
+                    | "CASH"
+                    | "ATM"
+                    | "POS"
+                    | "ECS"
+                    | "EMI"
+                    | "TRF"
+                    | "NACH"
+                    | "DD"
+            )
     };
 
     let n_rows = rows.len();
-    let mut i  = start_idx;
+    let mut i = start_idx;
     while i < n_rows {
         let row = &rows[i];
 
         // ── ICICI WM: stop before FD / TDS summary section ───────────────────
-        let row_joined: String = row.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" ");
+        let row_joined: String = row
+            .iter()
+            .map(|it| it.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         if regex_match_simple(&row_joined, "statement of fixed deposit")
             || regex_match_simple(&row_joined, "fixed deposit a/c")
             || regex_match_simple(&row_joined, "summary of tds")
-            || (row_joined.to_lowercase().contains("additions") && row_joined.to_lowercase().contains("deductions")) {
-            log::debug!("[BSP ICICI WM] FD/TDS section detected at row {} — stopping", i);
+            || (row_joined.to_lowercase().contains("additions")
+                && row_joined.to_lowercase().contains("deductions"))
+        {
+            log::debug!(
+                "[BSP ICICI WM] FD/TDS section detected at row {} — stopping",
+                i
+            );
             break;
         }
 
@@ -165,19 +223,19 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
 
         let raw_date = cell_str(&cells, ColField::Date);
         let raw_narr = cell_str(&cells, ColField::Narration);
-        let raw_ref  = cell_str(&cells, ColField::Reference);
-        let raw_dr   = cell_str(&cells, ColField::Debit);
-        let raw_cr   = cell_str(&cells, ColField::Credit);
-        let raw_bal  = cell_str(&cells, ColField::Balance);
+        let raw_ref = cell_str(&cells, ColField::Reference);
+        let raw_dr = cell_str(&cells, ColField::Debit);
+        let raw_cr = cell_str(&cells, ColField::Credit);
+        let raw_bal = cell_str(&cells, ColField::Balance);
         let raw_drcr = cell_str(&cells, ColField::DebitCredit);
 
-        let mut nd   = normalize_transaction_date(&raw_date);
+        let mut nd = normalize_transaction_date(&raw_date);
         let mut narr = raw_narr.trim().to_string();
 
         // ── Kotak signed combined column ──────────────────────────────────────
         let (debit, credit): (Option<f64>, Option<f64>) = if !raw_drcr.is_empty() {
             let signed = parse_amount_str(&raw_drcr);
-            let raw_str = raw_drcr.replace(|c: char| c == '₹' || c == ' ' || c == ',', "");
+            let raw_str = raw_drcr.replace(['₹', ' ', ','], "");
             match signed {
                 None => (None, None),
                 Some(v) if v < 0.0 || raw_str.starts_with('-') => (Some(v.abs()), None),
@@ -199,7 +257,7 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
         let trunc_year = {
             let t = raw_date.trim();
             // DD/Month/NN or DD/Month/N patterns
-            let parts: Vec<&str> = t.splitn(3, |c| c == '/' || c == '-' || c == '.').collect();
+            let parts: Vec<&str> = t.splitn(3, ['/', '-', '.']).collect();
             parts.len() == 3
                 && parts[0].chars().all(|c| c.is_ascii_digit())
                 && parts[1].chars().all(|c| c.is_alphabetic())
@@ -223,9 +281,15 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
                 let pnd = normalize_transaction_date(&patched);
                 if pnd.valid && (!nd.valid || pnd.display != nd.display) {
                     nd = pnd;
-                    let cont_narr = cell_str(&next_cells, ColField::Narration).trim().to_string();
+                    let cont_narr = cell_str(&next_cells, ColField::Narration)
+                        .trim()
+                        .to_string();
                     if !cont_narr.is_empty() {
-                        narr = if narr.is_empty() { cont_narr } else { format!("{} {}", narr, cont_narr) };
+                        narr = if narr.is_empty() {
+                            cont_narr
+                        } else {
+                            format!("{} {}", narr, cont_narr)
+                        };
                     }
                     i += 1; // consume the year-completion row
                 }
@@ -235,140 +299,219 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
         let nl = narr.to_lowercase();
 
         // ── 1. Skip completely blank rows ─────────────────────────────────────
-        if raw_date.is_empty() && narr.is_empty()
-            && debit.is_none() && credit.is_none() && bal.is_none() {
-            i += 1; continue;
+        if raw_date.is_empty()
+            && narr.is_empty()
+            && debit.is_none()
+            && credit.is_none()
+            && bal.is_none()
+        {
+            i += 1;
+            continue;
         }
 
         // ── 2. Balance-only rows ───────────────────────────────────────────────
-        if bal.is_some() && debit.is_none() && credit.is_none() {
-            let bval = bal.unwrap();
-            if closing_balance.is_none()
-                && (nl.contains("closing") || nl.contains("c/f") || nl.contains("carried forward")) {
-                closing_balance = Some(bval);
-                i += 1; continue;
-            }
-            // Attach to previous transaction missing its balance (e.g. Kotak wrap)
-            if narr.is_empty() {
-                if let Some(last) = txns.last_mut() {
-                    if last.balance.is_none() {
-                        last.balance = Some(bval);
-                        i += 1; continue;
+        if let Some(bval) = bal {
+            if debit.is_none() && credit.is_none() {
+                if closing_balance.is_none()
+                    && (nl.contains("closing")
+                        || nl.contains("c/f")
+                        || nl.contains("carried forward"))
+                {
+                    closing_balance = Some(bval);
+                    i += 1;
+                    continue;
+                }
+
+                // Attach to previous transaction missing its balance (e.g. Kotak wrap)
+                if narr.is_empty() {
+                    if let Some(last) = txns.last_mut() {
+                        if last.balance.is_none() {
+                            last.balance = Some(bval);
+                            i += 1;
+                            continue;
+                        }
+                    }
+
+                    if let Some(p) = pending.as_mut() {
+                        if p.balance.is_none() {
+                            p.balance = Some(bval);
+                            i += 1;
+                            continue;
+                        }
                     }
                 }
-                if let Some(p) = pending.as_mut() {
-                    if p.balance.is_none() { p.balance = Some(bval); i += 1; continue; }
+
+                if op_balance.is_none()
+                    && (narr.is_empty()
+                        || nl.contains("opening")
+                        || nl.contains("brought forward")
+                        || nl.contains("b/f")
+                        || nl.contains("b/d"))
+                {
+                    op_balance = Some(bval);
+                    i += 1;
+                    continue;
                 }
-            }
-            if op_balance.is_none()
-                && (narr.is_empty() || nl.contains("opening") || nl.contains("brought forward")
-                    || nl.contains("b/f") || nl.contains("b/d")) {
-                op_balance = Some(bval);
-                i += 1; continue;
             }
         }
 
         // ── 3. Noise filter ───────────────────────────────────────────────────
         if is_noise_row(&narr) {
             noise_rows += 1;
-            i += 1; continue;
+            i += 1;
+            continue;
         }
 
         // ── 3.3. Pre-date narration buffer (before first txn) ─────────────────
-        if !nd.valid && !narr.is_empty()
-            && debit.is_none() && credit.is_none() && bal.is_none()
-            && txns.is_empty() {
-            narr_buffer = if narr_buffer.is_empty() { narr.clone() } else { format!("{} {}", narr_buffer, narr) };
-            i += 1; continue;
+        if !nd.valid
+            && !narr.is_empty()
+            && debit.is_none()
+            && credit.is_none()
+            && bal.is_none()
+            && txns.is_empty()
+        {
+            narr_buffer = if narr_buffer.is_empty() {
+                narr.clone()
+            } else {
+                format!("{} {}", narr_buffer, narr)
+            };
+            i += 1;
+            continue;
         }
 
         // ── 3.5. Pre-date type buffer (BOM/BOB type code on own row) ──────────
-        if !nd.valid && !narr.is_empty()
-            && debit.is_none() && credit.is_none() && bal.is_none()
-            && is_type_code(&narr) {
+        if !nd.valid
+            && !narr.is_empty()
+            && debit.is_none()
+            && credit.is_none()
+            && bal.is_none()
+            && is_type_code(&narr)
+        {
             type_buffer = narr.trim().to_string();
-            i += 1; continue;
+            i += 1;
+            continue;
         }
 
         // ── 4. Continuation row ───────────────────────────────────────────────
-        if !nd.valid && (!narr.is_empty() || bal.is_some())
-            && debit.is_none() && credit.is_none()
-            && !txns.is_empty() {
+        if !nd.valid
+            && (!narr.is_empty() || bal.is_some())
+            && debit.is_none()
+            && credit.is_none()
+            && !txns.is_empty()
+        {
             let prev = txns.last_mut().unwrap();
-            if !narr.is_empty() { prev.narration.push(' '); prev.narration.push_str(&narr); }
+            if !narr.is_empty() {
+                prev.narration.push(' ');
+                prev.narration.push_str(&narr);
+            }
             if let (Some(bval), true) = (bal, prev.balance.is_none()) {
                 prev.balance = Some(bval);
             }
-            i += 1; continue;
+            i += 1;
+            continue;
         }
 
         // ── 5. Require valid date ─────────────────────────────────────────────
-        if !nd.valid { i += 1; continue; }
+        if !nd.valid {
+            i += 1;
+            continue;
+        }
 
         // Prepend buffered type code
         if !type_buffer.is_empty() {
-            let tb = type_buffer.clone(); type_buffer.clear();
-            narr = if narr.is_empty() { tb } else { format!("{} {}", tb, narr) };
+            let tb = type_buffer.clone();
+            type_buffer.clear();
+            narr = if narr.is_empty() {
+                tb
+            } else {
+                format!("{} {}", tb, narr)
+            };
         }
         // Prepend buffered pre-date narration
         if !narr_buffer.is_empty() {
-            let nb = narr_buffer.clone(); narr_buffer.clear();
-            narr = if narr.is_empty() { nb } else { format!("{} {}", nb, narr) };
+            let nb = narr_buffer.clone();
+            narr_buffer.clear();
+            narr = if narr.is_empty() {
+                nb
+            } else {
+                format!("{} {}", nb, narr)
+            };
         }
 
         // ── 6. Dr/Cr combined column resolution ───────────────────────────────
-        let mut final_debit  = debit;
+        let mut final_debit = debit;
         let mut final_credit = credit;
 
         if final_debit.is_none() && final_credit.is_none() {
             let combined = format!("{}{}", raw_dr, raw_cr).trim().to_string();
             if !combined.is_empty() {
                 let stripped = combined.to_lowercase();
-                let stripped = stripped.trim_matches(|c: char| c == 'd' || c == 'r' || c == 'c' || c == ' ');
+                let stripped =
+                    stripped.trim_matches(|c: char| c == 'd' || c == 'r' || c == 'c' || c == ' ');
                 let amt = parse_amount_str(stripped);
-                if combined.to_lowercase().contains("dr") { final_debit  = amt; }
-                else if combined.to_lowercase().contains("cr") { final_credit = amt; }
+                if combined.to_lowercase().contains("dr") {
+                    final_debit = amt;
+                } else if combined.to_lowercase().contains("cr") {
+                    final_credit = amt;
+                }
             }
         }
 
         // ── 6b. Signed column cleanup ─────────────────────────────────────────
         if raw_drcr.is_empty() {
             if let (Some(d), None) = (final_debit, final_credit) {
-                if d < 0.0 { final_debit = Some(d.abs()); }
+                if d < 0.0 {
+                    final_debit = Some(d.abs());
+                }
             }
             if let (None, Some(c)) = (final_debit, final_credit) {
-                if c < 0.0 { final_credit = Some(c.abs()); }
+                if c < 0.0 {
+                    final_credit = Some(c.abs());
+                }
             }
             // "+" prefix in a debit-only column with no separate credit col → credit
             if final_debit.is_some() && final_credit.is_none() && col_x.credit.is_none() {
-                let raw_str = raw_dr.replace(|c: char| c == '₹' || c == ' ' || c == ',', "");
+                let raw_str = raw_dr.replace(['₹', ' ', ','], "");
                 if raw_str.starts_with('+') {
-                    final_credit = final_debit; final_debit = None;
+                    final_credit = final_debit;
+                    final_debit = None;
                 }
             }
         }
 
         // ── Dr/Cr suffix correction ───────────────────────────────────────────
-        if final_debit.is_some() && final_credit.is_none() {
-            if raw_dr.trim_end().to_lowercase().ends_with("cr") || raw_dr.trim_end().to_lowercase().ends_with("cr.") {
-                final_credit = final_debit; final_debit = None;
-            }
+        if final_debit.is_some()
+            && final_credit.is_none()
+            && (raw_dr.trim_end().to_lowercase().ends_with("cr")
+                || raw_dr.trim_end().to_lowercase().ends_with("cr."))
+        {
+            final_credit = final_debit;
+            final_debit = None;
         }
-        if final_credit.is_some() && final_debit.is_none() {
-            if raw_cr.trim_end().to_lowercase().ends_with("dr") || raw_cr.trim_end().to_lowercase().ends_with("dr.") {
-                final_debit = final_credit; final_credit = None;
-            }
+        if final_credit.is_some()
+            && final_debit.is_none()
+            && (raw_cr.trim_end().to_lowercase().ends_with("dr")
+                || raw_cr.trim_end().to_lowercase().ends_with("dr."))
+        {
+            final_debit = final_credit;
+            final_credit = None;
         }
 
         // ── 6c. BOB-style sub-row: amount arrives on a separate row ───────────
-        if pending.is_some() && nd.valid && narr.is_empty()
-            && (final_debit.is_some() || final_credit.is_some()) {
+        if pending.is_some()
+            && nd.valid
+            && narr.is_empty()
+            && (final_debit.is_some() || final_credit.is_some())
+        {
             let mut p = pending.take().unwrap();
-            p.debit  = final_debit;
+            p.debit = final_debit;
             p.credit = final_credit;
-            if p.balance.is_none() { p.balance = bal; }
+            if p.balance.is_none() {
+                p.balance = bal;
+            }
             txns.push(p);
-            i += 1; continue;
+            i += 1;
+            continue;
         }
         // Flush stale pending when a new narration row arrives
         if pending.is_some() && nd.valid && !narr.is_empty() {
@@ -381,25 +524,26 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
             if nd.valid && !narr.is_empty() && bal.is_some() {
                 txn_counter += 1;
                 let mut p = Transaction::new(format!("t_{}_pdf_{}", i, txn_counter));
-                p.date      = nd.display.clone();
-                p.date_ts   = nd.ts;
+                p.date = nd.display.clone();
+                p.date_ts = nd.ts;
                 p.narration = narr.clone();
                 p.reference = raw_ref.trim().to_string();
-                p.balance   = bal;
+                p.balance = bal;
                 pending = Some(p);
             }
-            i += 1; continue;
+            i += 1;
+            continue;
         }
 
         txn_counter += 1;
         let mut t = Transaction::new(format!("t_{}_pdf_{}", i, txn_counter));
-        t.date      = nd.display;
-        t.date_ts   = nd.ts;
+        t.date = nd.display;
+        t.date_ts = nd.ts;
         t.narration = narr;
         t.reference = raw_ref.trim().to_string();
-        t.debit     = final_debit;
-        t.credit    = final_credit;
-        t.balance   = bal;
+        t.debit = final_debit;
+        t.credit = final_credit;
+        t.balance = bal;
         txns.push(t);
         i += 1;
     }
@@ -409,28 +553,48 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
     // ── Pre-header OB / CB scan ───────────────────────────────────────────────
     if op_balance.is_none() {
         if let Some(hdr) = hdr_idx {
-            for pi in 0..hdr {
-                let ptext = rows[pi].iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" ");
-                if regex_match_simple(&ptext, "opening balance") || regex_match_simple(&ptext, "opening bal") {
-                    let amts: Vec<f64> = rows[pi].iter()
+            for row in rows.iter().take(hdr) {
+                let ptext = row
+                    .iter()
+                    .map(|it| it.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if regex_match_simple(&ptext, "opening balance")
+                    || regex_match_simple(&ptext, "opening bal")
+                {
+                    let amts: Vec<f64> = row
+                        .iter()
                         .filter_map(|it| parse_amount_str(&it.text))
                         .filter(|&v| v > 0.0)
                         .collect();
-                    if let Some(&v) = amts.first() { op_balance = Some(v); break; }
+                    if let Some(&v) = amts.first() {
+                        op_balance = Some(v);
+                        break;
+                    }
                 }
             }
         }
     }
     if closing_balance.is_none() {
         if let Some(hdr) = hdr_idx {
-            for pi in 0..hdr {
-                let ptext = rows[pi].iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" ");
-                if regex_match_simple(&ptext, "closing balance") || regex_match_simple(&ptext, "closing bal") {
-                    let amts: Vec<f64> = rows[pi].iter()
+            for row in rows.iter().take(hdr) {
+                let ptext = row
+                    .iter()
+                    .map(|it| it.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if regex_match_simple(&ptext, "closing balance")
+                    || regex_match_simple(&ptext, "closing bal")
+                {
+                    let amts: Vec<f64> = row
+                        .iter()
                         .filter_map(|it| parse_amount_str(&it.text))
                         .filter(|&v| v > 0.0)
                         .collect();
-                    if let Some(&v) = amts.last() { closing_balance = Some(v); break; }
+                    if let Some(&v) = amts.last() {
+                        closing_balance = Some(v);
+                        break;
+                    }
                 }
             }
         }
@@ -440,29 +604,50 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
     if header_inferred && !txns.is_empty() {
         // Pass 1: narration keyword hints
         for t in &mut txns {
-            if t.debit.is_none() && t.credit.is_none() { continue; }
+            if t.debit.is_none() && t.credit.is_none() {
+                continue;
+            }
             let amount = t.debit.or(t.credit).unwrap();
             let nl = t.narration.to_lowercase();
-            let is_d = nl.contains("upi-dr") || nl.contains("upi dr")
+            let is_d = nl.contains("upi-dr")
+                || nl.contains("upi dr")
                 || (nl.contains("/dr/") || nl.contains("-dr/") || nl.contains("-dr-"))
                 || nl.contains("neft") && nl.contains("dr")
                 || nl.contains("rtgs") && nl.contains("dr")
-                || nl.contains("cash wd") || nl.contains("atm wd");
-            let is_c = nl.contains("upi-cr") || nl.contains("upi cr")
+                || nl.contains("cash wd")
+                || nl.contains("atm wd");
+            let is_c = nl.contains("upi-cr")
+                || nl.contains("upi cr")
                 || (nl.contains("/cr/") || nl.contains("-cr/") || nl.contains("-cr-"))
                 || nl.contains("neft") && nl.contains("cr")
                 || nl.contains("rtgs") && nl.contains("cr")
-                || nl.contains("interest") || nl.contains("refund")
-                || nl.contains("reversal") || nl.contains("salary");
-            if is_d && !is_c { t.debit = Some(amount); t.credit = None; }
-            else if is_c && !is_d { t.credit = Some(amount); t.debit = None; }
+                || nl.contains("interest")
+                || nl.contains("refund")
+                || nl.contains("reversal")
+                || nl.contains("salary");
+            if is_d && !is_c {
+                t.debit = Some(amount);
+                t.credit = None;
+            } else if is_c && !is_d {
+                t.credit = Some(amount);
+                t.debit = None;
+            }
         }
 
         // Pass 2: balance movement (overrides Pass 1 if balance math disagrees)
         let mut prev_bal = op_balance;
         if prev_bal.is_none() {
-            if let Some(seed) = txns.iter().find(|t| t.balance.is_some() && (t.debit.is_some() || t.credit.is_some())) {
-                prev_bal = Some(((seed.balance.unwrap() - seed.credit.unwrap_or(0.0) + seed.debit.unwrap_or(0.0)) * 100.0).round() / 100.0);
+            if let Some(seed) = txns
+                .iter()
+                .find(|t| t.balance.is_some() && (t.debit.is_some() || t.credit.is_some()))
+            {
+                prev_bal = Some(
+                    ((seed.balance.unwrap() - seed.credit.unwrap_or(0.0)
+                        + seed.debit.unwrap_or(0.0))
+                        * 100.0)
+                        .round()
+                        / 100.0,
+                );
             }
         }
         for t in &mut txns {
@@ -471,10 +656,16 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
                     let tol = |amt: f64| (amt * 0.02_f64).max(1.0);
                     if let (Some(d), None) = (t.debit, t.credit) {
                         let diff = bal - prev;
-                        if (diff - d).abs() < tol(d) { t.credit = Some(d); t.debit = None; }
+                        if (diff - d).abs() < tol(d) {
+                            t.credit = Some(d);
+                            t.debit = None;
+                        }
                     } else if let (None, Some(c)) = (t.debit, t.credit) {
                         let diff = bal - prev;
-                        if (diff + c).abs() < tol(c) { t.debit = Some(c); t.credit = None; }
+                        if (diff + c).abs() < tol(c) {
+                            t.debit = Some(c);
+                            t.credit = None;
+                        }
                     }
                     prev_bal = Some(bal);
                 }
@@ -487,25 +678,45 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
 
     // Build text for bank detection
     let header_text: String = match hdr_idx {
-        Some(h) if h > 0 => rows[..h].iter()
-            .map(|r| r.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" "))
-            .collect::<Vec<_>>().join("\n"),
+        Some(h) if h > 0 => rows[..h]
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|it| it.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => String::new(),
     };
-    let full_text: String = rows.iter()
-        .map(|r| r.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>().join("\n");
+    let full_text: String = rows
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|it| it.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let narrations: Vec<&str> = txns.iter().map(|t| t.narration.as_str()).collect();
 
     let bank_meta = detect(DetectOptions {
-        text: &full_text, header_text: &header_text,
-        filename: file_name, narrations: &narrations,
+        text: &full_text,
+        header_text: &header_text,
+        filename: file_name,
+        narrations: &narrations,
     });
-    let bank_name  = bank_meta.bank_name.clone();
+    let bank_name = bank_meta.bank_name.clone();
     let account_no = bank_meta.account_no.clone();
     for t in &mut txns {
-        if t.bank_name.is_empty()  { t.bank_name  = bank_name.clone(); }
-        if t.account_no.is_empty() { t.account_no = account_no.clone(); }
+        if t.bank_name.is_empty() {
+            t.bank_name = bank_name.clone();
+        }
+        if t.account_no.is_empty() {
+            t.account_no = account_no.clone();
+        }
     }
 
     let mut deduped = deduplicate_txns(txns);
@@ -516,15 +727,15 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
     let header_row_idx = hdr_idx.unwrap_or(0);
 
     Some(ParseResult {
-        transactions:       deduped,
-        opening_balance:    op_balance,
+        transactions: deduped,
+        opening_balance: op_balance,
         closing_balance,
         bank_name,
         account_no,
-        source_name:        file_name.to_string(),
-        col_map:            Default::default(),
+        source_name: file_name.to_string(),
+        col_map: Default::default(),
         header_row_idx,
-        noise_row_count:    noise_rows,
+        noise_row_count: noise_rows,
         rejected_row_count: 0,
     })
 }
@@ -542,7 +753,11 @@ mod tests {
     use crate::parser::column_detector::PdfItem;
 
     fn item(x: f64, text: &str) -> PdfItem {
-        PdfItem { x, text: text.to_owned(), w: 40.0 }
+        PdfItem {
+            x,
+            text: text.to_owned(),
+            w: 40.0,
+        }
     }
 
     fn row(pairs: &[(f64, &str)]) -> Vec<PdfItem> {
@@ -561,9 +776,16 @@ mod tests {
     #[test]
     fn fw_format_items_spread_out_not_fw() {
         // Items spread across 0–400 → NOT fixed-width
-        let rows: Vec<Vec<PdfItem>> = (0..10).map(|_| {
-            row(&[(10.0, "Date"), (100.0, "Narration"), (300.0, "5000.00"), (400.0, "95000.00")])
-        }).collect();
+        let rows: Vec<Vec<PdfItem>> = (0..10)
+            .map(|_| {
+                row(&[
+                    (10.0, "Date"),
+                    (100.0, "Narration"),
+                    (300.0, "5000.00"),
+                    (400.0, "95000.00"),
+                ])
+            })
+            .collect();
         assert!(!is_fw_format(&rows));
     }
 
@@ -583,7 +805,7 @@ mod tests {
             row(&[(10.0, "Statement of Account")]),
             // Header row
             row(&[
-                (10.0,  "Date"),
+                (10.0, "Date"),
                 (100.0, "Narration"),
                 (280.0, "Chq/Ref No."),
                 (360.0, "Withdrawal Amt."),
@@ -591,15 +813,35 @@ mod tests {
                 (520.0, "Closing Balance"),
             ]),
             // Transactions
-            row(&[(10.0,"01/01/2024"),(100.0,"SALARY CREDIT ACME"),(280.0,"SAL001"),
-                  (440.0,"50000.00"),(520.0,"135000.00")]),
-            row(&[(10.0,"02/01/2024"),(100.0,"ATM WDL BANDRA"),(280.0,"ATM001"),
-                  (360.0,"10000.00"),(520.0,"125000.00")]),
-            row(&[(10.0,"05/01/2024"),(100.0,"SWIGGY ORDER"),(280.0,"SWG001"),
-                  (360.0,"850.00"),(520.0,"124150.00")]),
+            row(&[
+                (10.0, "01/01/2024"),
+                (100.0, "SALARY CREDIT ACME"),
+                (280.0, "SAL001"),
+                (440.0, "50000.00"),
+                (520.0, "135000.00"),
+            ]),
+            row(&[
+                (10.0, "02/01/2024"),
+                (100.0, "ATM WDL BANDRA"),
+                (280.0, "ATM001"),
+                (360.0, "10000.00"),
+                (520.0, "125000.00"),
+            ]),
+            row(&[
+                (10.0, "05/01/2024"),
+                (100.0, "SWIGGY ORDER"),
+                (280.0, "SWG001"),
+                (360.0, "850.00"),
+                (520.0, "124150.00"),
+            ]),
             // Noise rows
-            row(&[(10.0,""), (100.0,"Closing Balance"), (520.0,"124150.00")]),
-            row(&[(10.0,""), (100.0,"Grand Total"), (360.0,"10850.00"), (440.0,"50000.00")]),
+            row(&[(10.0, ""), (100.0, "Closing Balance"), (520.0, "124150.00")]),
+            row(&[
+                (10.0, ""),
+                (100.0, "Grand Total"),
+                (360.0, "10850.00"),
+                (440.0, "50000.00"),
+            ]),
         ]
     }
 
@@ -614,7 +856,11 @@ mod tests {
     fn parse_hdfc_correct_txn_count() {
         let rows = hdfc_pdf_rows();
         let result = parse_pdf_rows(rows, "hdfc.pdf").unwrap();
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         assert_eq!(real.len(), 3, "3 real transactions (noise rows excluded)");
     }
 
@@ -622,15 +868,24 @@ mod tests {
     fn parse_hdfc_has_opening_balance() {
         let rows = hdfc_pdf_rows();
         let result = parse_pdf_rows(rows, "hdfc.pdf").unwrap();
-        assert!(result.transactions.first().map_or(false, |t| t.is_opening_balance),
-            "first row is synthetic opening balance");
+        assert!(
+            result
+                .transactions
+                .first()
+                .is_some_and(|t| t.is_opening_balance),
+            "first row is synthetic opening balance"
+        );
     }
 
     #[test]
     fn parse_hdfc_debit_credit_correct() {
         let rows = hdfc_pdf_rows();
         let result = parse_pdf_rows(rows, "hdfc.pdf").unwrap();
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         // First txn: Deposit 50000
         assert!(real[0].credit.is_some(), "salary = credit");
         // Second txn: Withdrawal 10000
@@ -644,8 +899,10 @@ mod tests {
         let rows = hdfc_pdf_rows();
         let result = parse_pdf_rows(rows, "hdfc.pdf").unwrap();
         for t in &result.transactions {
-            assert!(!t.narration.to_lowercase().contains("grand total"),
-                "Grand Total row must not appear as transaction");
+            assert!(
+                !t.narration.to_lowercase().contains("grand total"),
+                "Grand Total row must not appear as transaction"
+            );
         }
     }
 
@@ -653,13 +910,24 @@ mod tests {
 
     fn sbi_split_date_rows() -> Vec<Vec<PdfItem>> {
         vec![
-            row(&[(10.0,"Txn Date"),(90.0,"Description"),(250.0,"Debit"),(320.0,"Credit"),(400.0,"Balance")]),
+            row(&[
+                (10.0, "Txn Date"),
+                (90.0, "Description"),
+                (250.0, "Debit"),
+                (320.0, "Credit"),
+                (400.0, "Balance"),
+            ]),
             // Row with partial date "25 May"
-            row(&[(10.0,"25 May"),(90.0,"NEFT FROM RAJESH")]),
+            row(&[(10.0, "25 May"), (90.0, "NEFT FROM RAJESH")]),
             // Continuation row: "2024" in date column, no amounts
-            row(&[(10.0,"2024")]),
+            row(&[(10.0, "2024")]),
             // Normal row
-            row(&[(10.0,"26/05/2024"),(90.0,"ATM WDL"),(250.0,"5000.00"),(400.0,"45000.00")]),
+            row(&[
+                (10.0, "26/05/2024"),
+                (90.0, "ATM WDL"),
+                (250.0, "5000.00"),
+                (400.0, "45000.00"),
+            ]),
         ]
     }
 
@@ -674,8 +942,11 @@ mod tests {
         // as a separate transaction.
         if let Some(r) = result {
             for t in &r.transactions {
-                assert_ne!(t.narration.trim(), "2024",
-                    "'2024' continuation row must not become a transaction");
+                assert_ne!(
+                    t.narration.trim(),
+                    "2024",
+                    "'2024' continuation row must not become a transaction"
+                );
             }
         }
     }
@@ -684,13 +955,29 @@ mod tests {
 
     fn bom_type_buffer_rows() -> Vec<Vec<PdfItem>> {
         vec![
-            row(&[(10.0,"Date"),(100.0,"Description"),(300.0,"Debit"),(380.0,"Credit"),(450.0,"Balance")]),
+            row(&[
+                (10.0, "Date"),
+                (100.0, "Description"),
+                (300.0, "Debit"),
+                (380.0, "Credit"),
+                (450.0, "Balance"),
+            ]),
             // Pre-date type row: "UPI" alone on a row (no date, no amounts)
-            row(&[(100.0,"UPI")]),
+            row(&[(100.0, "UPI")]),
             // Actual transaction row
-            row(&[(10.0,"01/01/2024"),(100.0,"PAYMENT TO AMAZON"),(300.0,"1500.00"),(450.0,"83500.00")]),
+            row(&[
+                (10.0, "01/01/2024"),
+                (100.0, "PAYMENT TO AMAZON"),
+                (300.0, "1500.00"),
+                (450.0, "83500.00"),
+            ]),
             // Normal row without type buffer
-            row(&[(10.0,"02/01/2024"),(100.0,"NEFT FROM RAJESH"),(380.0,"25000.00"),(450.0,"108500.00")]),
+            row(&[
+                (10.0, "02/01/2024"),
+                (100.0, "NEFT FROM RAJESH"),
+                (380.0, "25000.00"),
+                (450.0, "108500.00"),
+            ]),
         ]
     }
 
@@ -699,12 +986,20 @@ mod tests {
         let rows = bom_type_buffer_rows();
         let result = parse_pdf_rows(rows, "bom.pdf");
         if let Some(r) = result {
-            let real: Vec<_> = r.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+            let real: Vec<_> = r
+                .transactions
+                .iter()
+                .filter(|t| !t.is_opening_balance)
+                .collect();
             if !real.is_empty() {
                 // "UPI" type code should be prepended to the AMAZON narration
                 let first_narr = &real[0].narration;
-                assert!(first_narr.to_lowercase().contains("upi") || first_narr.to_lowercase().contains("amazon"),
-                    "Type buffer 'UPI' should be in narration: {}", first_narr);
+                assert!(
+                    first_narr.to_lowercase().contains("upi")
+                        || first_narr.to_lowercase().contains("amazon"),
+                    "Type buffer 'UPI' should be in narration: {}",
+                    first_narr
+                );
             }
         }
     }
@@ -713,13 +1008,28 @@ mod tests {
 
     fn bob_pending_rows() -> Vec<Vec<PdfItem>> {
         vec![
-            row(&[(10.0,"Date"),(100.0,"Narration"),(300.0,"Debit"),(380.0,"Credit"),(450.0,"Balance")]),
+            row(&[
+                (10.0, "Date"),
+                (100.0, "Narration"),
+                (300.0, "Debit"),
+                (380.0, "Credit"),
+                (450.0, "Balance"),
+            ]),
             // BOB-style: date + narration + balance, but NO amount
-            row(&[(10.0,"01/01/2024"),(100.0,"NEFT FROM RAJESH"),(450.0,"1,25,000.00")]),
+            row(&[
+                (10.0, "01/01/2024"),
+                (100.0, "NEFT FROM RAJESH"),
+                (450.0, "1,25,000.00"),
+            ]),
             // Sub-row: date + amount, NO narration → merged into pending
-            row(&[(10.0,"01/01/2024"),(380.0,"25000.00")]),
+            row(&[(10.0, "01/01/2024"), (380.0, "25000.00")]),
             // Normal row
-            row(&[(10.0,"02/01/2024"),(100.0,"ATM WDL DADAR"),(300.0,"10000.00"),(450.0,"1,15,000.00")]),
+            row(&[
+                (10.0, "02/01/2024"),
+                (100.0, "ATM WDL DADAR"),
+                (300.0, "10000.00"),
+                (450.0, "1,15,000.00"),
+            ]),
         ]
     }
 
@@ -728,7 +1038,11 @@ mod tests {
         let rows = bob_pending_rows();
         let result = parse_pdf_rows(rows, "bob.pdf");
         if let Some(r) = result {
-            let real: Vec<_> = r.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+            let real: Vec<_> = r
+                .transactions
+                .iter()
+                .filter(|t| !t.is_opening_balance)
+                .collect();
             // BOB pending merge may or may not work depending on exact column detection
             // Key invariant: sub-row "25000.00" must NOT appear as its own transaction
             // with no narration
@@ -747,10 +1061,22 @@ mod tests {
         let rows = vec![
             // First row explicitly names Cosmos
             row(&[(10.0, "Cosmos Co-operative Bank")]),
-            row(&[(10.0, "Date     Particulars     Chq.No. Withdrawals Deposits Balance")]),
-            row(&[(10.0, "01-01-2024 SALARY CREDIT UPI-CR 123456       50000.00 1,50,000.00Cr")]),
-            row(&[(10.0, "02-01-2024 ATM WDL                10000.00            1,40,000.00Cr")]),
-            row(&[(10.0, "03-01-2024 NEFT CR RAJESH 234567             25000.00 1,65,000.00Cr")]),
+            row(&[(
+                10.0,
+                "Date     Particulars     Chq.No. Withdrawals Deposits Balance",
+            )]),
+            row(&[(
+                10.0,
+                "01-01-2024 SALARY CREDIT UPI-CR 123456       50000.00 1,50,000.00Cr",
+            )]),
+            row(&[(
+                10.0,
+                "02-01-2024 ATM WDL                10000.00            1,40,000.00Cr",
+            )]),
+            row(&[(
+                10.0,
+                "03-01-2024 NEFT CR RAJESH 234567             25000.00 1,65,000.00Cr",
+            )]),
         ];
         // Should not panic; result can be Some or None depending on Cosmos parser
         let result = parse_pdf_rows(rows, "cosmos_statement.pdf");
@@ -758,7 +1084,6 @@ mod tests {
         // (exact behavior depends on whether extract_cosmos_transactions succeeds)
         if result.is_none() {
             // Acceptable — Cosmos parser may return None for this synthetic data
-            return;
         }
     }
 }

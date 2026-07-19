@@ -28,77 +28,190 @@ use super::ColumnMap;
 // comparison is case-insensitive by construction.
 
 const COL_DATE: &[&str] = &[
-    "date", "dt",
-    "transaction date", "txn date", "tran date", "trans date",
-    "value date", "value dt", "posting date", "booking date", "entry date",
-    "transaction dt", "trans dt",
-    "effective date", "process date",
+    "date",
+    "dt",
+    "transaction date",
+    "txn date",
+    "tran date",
+    "trans date",
+    "value date",
+    "value dt",
+    "posting date",
+    "booking date",
+    "entry date",
+    "transaction dt",
+    "trans dt",
+    "effective date",
+    "process date",
 ];
 
 const COL_NARRATION: &[&str] = &[
-    "narration", "description", "particulars", "details", "remarks",
-    "transaction description", "transaction remarks", "transaction narration",
-    "transaction details", "tran description", "tran remarks",
+    "narration",
+    "description",
+    "particulars",
+    "details",
+    "remarks",
+    "transaction description",
+    "transaction remarks",
+    "transaction narration",
+    "transaction details",
+    "tran description",
+    "tran remarks",
     "transaction particulars",
     "transaction details/remarks",
-    "tran particulars", "trans particulars", "chq/trn details",
-    "trn description", "particulars of transaction", "payment details",
-    "beneficiary details", "sender details",
+    "tran particulars",
+    "trans particulars",
+    "chq/trn details",
+    "trn description",
+    "particulars of transaction",
+    "payment details",
+    "beneficiary details",
+    "sender details",
 ];
 
 const COL_REFERENCE: &[&str] = &[
-    "reference", "ref no", "ref number", "ref.no.",
-    "chq/ref no", "chq/ref. no.", "cheque / ref no", "cheque/ref no",
-    "chq / ref number", "ref / chq no",
-    "chq./ref.no.", "chq.ref.no.", "chq./ref no.", "chq. / ref. no.",
-    "cheque no", "cheque no.", "cheque number", "chq no", "chq no.",
-    "chq.no.", "chq. no.",
-    "chq./txn. no.", "chq./txn.no.", "chq/txn no", "chq/txn no.",
-    "txn no", "txn no.", "txn. no.", "txn number",
+    "reference",
+    "ref no",
+    "ref number",
+    "ref.no.",
+    "chq/ref no",
+    "chq/ref. no.",
+    "cheque / ref no",
+    "cheque/ref no",
+    "chq / ref number",
+    "ref / chq no",
+    "chq./ref.no.",
+    "chq.ref.no.",
+    "chq./ref no.",
+    "chq. / ref. no.",
+    "cheque no",
+    "cheque no.",
+    "cheque number",
+    "chq no",
+    "chq no.",
+    "chq.no.",
+    "chq. no.",
+    "chq./txn. no.",
+    "chq./txn.no.",
+    "chq/txn no",
+    "chq/txn no.",
+    "txn no",
+    "txn no.",
+    "txn. no.",
+    "txn number",
     "chq.",
-    "transaction id", "utr", "utr no", "utr no.", "utr number",
-    "instrument no", "instrument no.", "instrument", "instruments",
-    "tran id", "chq / instrument no", "chq/instrument no",
-    "ref.no", "ref no.", "ref num", "ref",
+    "transaction id",
+    "utr",
+    "utr no",
+    "utr no.",
+    "utr number",
+    "instrument no",
+    "instrument no.",
+    "instrument",
+    "instruments",
+    "tran id",
+    "chq / instrument no",
+    "chq/instrument no",
+    "ref.no",
+    "ref no.",
+    "ref num",
+    "ref",
 ];
 
 const COL_DEBIT: &[&str] = &[
-    "debit", "dr", "dr.",
-    "withdrawal", "withdrawal amt", "withdrawal amount", "withdrawal amt.",
-    "withdrawals", "debit amount", "dr amount", "dr amt", "debit amt",
-    "withdrawal amt.(inr)", "withdrawal amt. (inr)", "withdrawal amount (inr)",
-    "withdrawal (dr)", "withdrawal (dr.)", "withdrawal(dr)", "withdrawal(dr.)",
-    "debit (inr)", "debit(dr)",
-    "paid out", "amount debit", "debit amount (inr)", "w/d",
+    "debit",
+    "dr",
+    "dr.",
+    "withdrawal",
+    "withdrawal amt",
+    "withdrawal amount",
+    "withdrawal amt.",
+    "withdrawals",
+    "debit amount",
+    "dr amount",
+    "dr amt",
+    "debit amt",
+    "withdrawal amt.(inr)",
+    "withdrawal amt. (inr)",
+    "withdrawal amount (inr)",
+    "withdrawal (dr)",
+    "withdrawal (dr.)",
+    "withdrawal(dr)",
+    "withdrawal(dr.)",
+    "debit (inr)",
+    "debit(dr)",
+    "paid out",
+    "amount debit",
+    "debit amount (inr)",
+    "w/d",
 ];
 
 const COL_CREDIT: &[&str] = &[
-    "credit", "cr", "cr.",
-    "deposit", "deposit amt", "deposit amount", "deposit amt.",
-    "deposits", "credit amount", "cr amount", "cr amt", "credit amt",
-    "deposit amt.(inr)", "deposit amt. (inr)", "deposit amount (inr)",
-    "deposit (cr)", "deposit (cr.)", "deposit(cr)", "deposit(cr.)",
-    "credit (inr)", "credit(cr)",
-    "paid in", "amount credit", "credit amount (inr)",
+    "credit",
+    "cr",
+    "cr.",
+    "deposit",
+    "deposit amt",
+    "deposit amount",
+    "deposit amt.",
+    "deposits",
+    "credit amount",
+    "cr amount",
+    "cr amt",
+    "credit amt",
+    "deposit amt.(inr)",
+    "deposit amt. (inr)",
+    "deposit amount (inr)",
+    "deposit (cr)",
+    "deposit (cr.)",
+    "deposit(cr)",
+    "deposit(cr.)",
+    "credit (inr)",
+    "credit(cr)",
+    "paid in",
+    "amount credit",
+    "credit amount (inr)",
 ];
 
 const COL_BALANCE: &[&str] = &[
-    "balance", "bal",
-    "closing balance", "running balance", "closing bal",
-    "available balance", "balance amt", "bal amt",
-    "balance (inr)", "closing balance (inr)", "balance(inr)",
-    "outstanding balance", "total balance", "ledger balance",
-    "total amount", "total amt", "total bal", "running total",
-    "closing amount", "book balance", "net balance",
+    "balance",
+    "bal",
+    "closing balance",
+    "running balance",
+    "closing bal",
+    "available balance",
+    "balance amt",
+    "bal amt",
+    "balance (inr)",
+    "closing balance (inr)",
+    "balance(inr)",
+    "outstanding balance",
+    "total balance",
+    "ledger balance",
+    "total amount",
+    "total amt",
+    "total bal",
+    "running total",
+    "closing amount",
+    "book balance",
+    "net balance",
 ];
 
 const COL_DEBITCREDIT: &[&str] = &[
-    "debit/credit", "debit / credit",
-    "debit/credit(\u{20b9})", "debit / credit(\u{20b9})",
-    "debit/credit (\u{20b9})", "debit / credit (\u{20b9})",
-    "debit/credit(inr)", "debit / credit(inr)",
-    "debit/credit (inr)", "debit / credit (inr)",
-    "dr/cr", "dr / cr", "dr/cr(\u{20b9})", "dr / cr(\u{20b9})",
+    "debit/credit",
+    "debit / credit",
+    "debit/credit(\u{20b9})",
+    "debit / credit(\u{20b9})",
+    "debit/credit (\u{20b9})",
+    "debit / credit (\u{20b9})",
+    "debit/credit(inr)",
+    "debit / credit(inr)",
+    "debit/credit (inr)",
+    "debit / credit (inr)",
+    "dr/cr",
+    "dr / cr",
+    "dr/cr(\u{20b9})",
+    "dr / cr(\u{20b9})",
 ];
 // \u{20b9} = ₹  (Indian Rupee Sign, U+20B9)
 
@@ -132,24 +245,24 @@ pub enum ColField {
 impl ColField {
     pub fn patterns(self) -> &'static [&'static str] {
         match self {
-            ColField::Date        => COL_DATE,
-            ColField::Narration   => COL_NARRATION,
-            ColField::Reference   => COL_REFERENCE,
-            ColField::Debit       => COL_DEBIT,
-            ColField::Credit      => COL_CREDIT,
-            ColField::Balance     => COL_BALANCE,
+            ColField::Date => COL_DATE,
+            ColField::Narration => COL_NARRATION,
+            ColField::Reference => COL_REFERENCE,
+            ColField::Debit => COL_DEBIT,
+            ColField::Credit => COL_CREDIT,
+            ColField::Balance => COL_BALANCE,
             ColField::DebitCredit => COL_DEBITCREDIT,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            ColField::Date        => "date",
-            ColField::Narration   => "narration",
-            ColField::Reference   => "reference",
-            ColField::Debit       => "debit",
-            ColField::Credit      => "credit",
-            ColField::Balance     => "balance",
+            ColField::Date => "date",
+            ColField::Narration => "narration",
+            ColField::Reference => "reference",
+            ColField::Debit => "debit",
+            ColField::Credit => "credit",
+            ColField::Balance => "balance",
             ColField::DebitCredit => "debitcredit",
         }
     }
@@ -157,8 +270,12 @@ impl ColField {
     /// All seven fields in the canonical order used for iteration.
     pub fn all() -> &'static [ColField] {
         &[
-            ColField::Date, ColField::Narration, ColField::Reference,
-            ColField::Debit, ColField::Credit, ColField::Balance,
+            ColField::Date,
+            ColField::Narration,
+            ColField::Reference,
+            ColField::Debit,
+            ColField::Credit,
+            ColField::Balance,
             ColField::DebitCredit,
         ]
     }
@@ -184,43 +301,44 @@ pub struct PdfItem {
 /// `None` = column not detected.  Mirrors the dynamic `colX` object in JS.
 #[derive(Debug, Clone, Default)]
 pub struct PdfColX {
-    pub date:         Option<f64>,
-    pub narration:    Option<f64>,
-    pub reference:    Option<f64>,
-    pub debit:        Option<f64>,
-    pub credit:       Option<f64>,
-    pub balance:      Option<f64>,
+    pub date: Option<f64>,
+    pub narration: Option<f64>,
+    pub reference: Option<f64>,
+    pub debit: Option<f64>,
+    pub credit: Option<f64>,
+    pub balance: Option<f64>,
     pub debit_credit: Option<f64>,
 }
 
 impl PdfColX {
     pub fn get(&self, f: ColField) -> Option<f64> {
         match f {
-            ColField::Date        => self.date,
-            ColField::Narration   => self.narration,
-            ColField::Reference   => self.reference,
-            ColField::Debit       => self.debit,
-            ColField::Credit      => self.credit,
-            ColField::Balance     => self.balance,
+            ColField::Date => self.date,
+            ColField::Narration => self.narration,
+            ColField::Reference => self.reference,
+            ColField::Debit => self.debit,
+            ColField::Credit => self.credit,
+            ColField::Balance => self.balance,
             ColField::DebitCredit => self.debit_credit,
         }
     }
 
     fn set(&mut self, f: ColField, x: f64) {
         match f {
-            ColField::Date        => self.date        = Some(x),
-            ColField::Narration   => self.narration   = Some(x),
-            ColField::Reference   => self.reference   = Some(x),
-            ColField::Debit       => self.debit       = Some(x),
-            ColField::Credit      => self.credit      = Some(x),
-            ColField::Balance     => self.balance     = Some(x),
+            ColField::Date => self.date = Some(x),
+            ColField::Narration => self.narration = Some(x),
+            ColField::Reference => self.reference = Some(x),
+            ColField::Debit => self.debit = Some(x),
+            ColField::Credit => self.credit = Some(x),
+            ColField::Balance => self.balance = Some(x),
             ColField::DebitCredit => self.debit_credit = Some(x),
         }
     }
 
     /// Iterator over (ColField, x) for all detected columns (Some values only).
     pub fn detected(&self) -> Vec<(ColField, f64)> {
-        ColField::all().iter()
+        ColField::all()
+            .iter()
             .filter_map(|&f| self.get(f).map(|x| (f, x)))
             .collect()
     }
@@ -344,12 +462,12 @@ pub fn detect_excel_cols<S: AsRef<str>>(row: &[S]) -> ColumnMap {
     for &field in ASSIGN_ORDER {
         // Find best column for this field (minimum score to win = 10, i.e. > 9)
         let mut best_col = -1i32;
-        let mut best_sc  = 9u32;
+        let mut best_sc = 9u32;
 
         // BTreeMap iterates in ascending key order → lower col index wins on tie
         for (&col, &sc) in &scores[&field] {
             if sc > best_sc && !taken.contains(&col) {
-                best_sc  = sc;
+                best_sc = sc;
                 best_col = col as i32;
             }
         }
@@ -357,12 +475,12 @@ pub fn detect_excel_cols<S: AsRef<str>>(row: &[S]) -> ColumnMap {
         if best_col >= 0 {
             let c = best_col as usize;
             match field {
-                ColField::Date        => map.date         = best_col,
-                ColField::Narration   => map.narration    = best_col,
-                ColField::Reference   => map.reference    = best_col,
-                ColField::Debit       => map.debit        = best_col,
-                ColField::Credit      => map.credit       = best_col,
-                ColField::Balance     => map.balance      = best_col,
+                ColField::Date => map.date = best_col,
+                ColField::Narration => map.narration = best_col,
+                ColField::Reference => map.reference = best_col,
+                ColField::Debit => map.debit = best_col,
+                ColField::Credit => map.credit = best_col,
+                ColField::Balance => map.balance = best_col,
                 ColField::DebitCredit => map.debit_credit = best_col,
             }
             taken.insert(c);
@@ -420,7 +538,7 @@ pub fn merge_adjacent_items(row: &[PdfItem], gap_threshold: f64) -> Vec<PdfItem>
 /// Returns `None` when no valid header is found within the first 60 rows.
 pub fn find_pdf_header(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> {
     for (i, row) in rows.iter().enumerate().take(60) {
-        let merged   = merge_adjacent_items(row, 40.0);
+        let merged = merge_adjacent_items(row, 40.0);
         // allItems = [...row, ...merged]  (original first, merged second)
         let all_items: Vec<&PdfItem> = row.iter().chain(merged.iter()).collect();
 
@@ -442,7 +560,7 @@ pub fn find_pdf_header(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> {
 
         // Assign fields in priority order (ties keep the first found since we
         // use strict `sc > prev_sc` above and original items come first).
-        let mut col_x  = PdfColX::default();
+        let mut col_x = PdfColX::default();
         let mut taken_x: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
         for &field in ASSIGN_ORDER {
@@ -479,7 +597,7 @@ pub fn find_pdf_header(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> {
                 if is_compound {
                     let dc_x = dx.min(cx);
                     col_x.debit_credit = Some(dc_x);
-                    col_x.debit  = None;
+                    col_x.debit = None;
                     col_x.credit = None;
                     log::debug!(
                         "[BSP Header] Split DEBIT/CREDIT merged → debitcredit x={}",
@@ -492,9 +610,7 @@ pub fn find_pdf_header(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> {
         // Valid header: date + narration + at least one amount column
         if col_x.date.is_some()
             && col_x.narration.is_some()
-            && (col_x.debit.is_some()
-                || col_x.credit.is_some()
-                || col_x.debit_credit.is_some())
+            && (col_x.debit.is_some() || col_x.credit.is_some() || col_x.debit_credit.is_some())
         {
             return Some(PdfHeaderResult {
                 hdr_idx: Some(i),
@@ -552,7 +668,7 @@ pub fn calc_col_boundaries(col_x: &PdfColX, hdr_row: &[PdfItem]) -> Vec<ColBound
             let x_min = fences
                 .iter()
                 .filter(|&&fx| fx < col_x_pos)
-                .last()
+                .next_back()
                 .map(|&left| ((left + col_x_pos) / 2.0).round())
                 .unwrap_or(0.0);
 
@@ -563,7 +679,11 @@ pub fn calc_col_boundaries(col_x: &PdfColX, hdr_row: &[PdfItem]) -> Vec<ColBound
                 .map(|&right| ((col_x_pos + right) / 2.0).round())
                 .unwrap_or(f64::INFINITY);
 
-            ColBoundary { field, x_min, x_max }
+            ColBoundary {
+                field,
+                x_min,
+                x_max,
+            }
         })
         .collect()
 }
@@ -593,15 +713,15 @@ pub fn assign_cells(
     boundaries: &[ColBoundary],
 ) -> HashMap<ColField, String> {
     const MONETARY: &[ColField] = &[
-        ColField::Debit, ColField::Credit,
-        ColField::Balance, ColField::DebitCredit,
+        ColField::Debit,
+        ColField::Credit,
+        ColField::Balance,
+        ColField::DebitCredit,
     ];
 
     // Bucket items by field
-    let mut buckets: HashMap<ColField, Vec<String>> = boundaries
-        .iter()
-        .map(|b| (b.field, Vec::new()))
-        .collect();
+    let mut buckets: HashMap<ColField, Vec<String>> =
+        boundaries.iter().map(|b| (b.field, Vec::new())).collect();
 
     for item in row_items {
         for b in boundaries {
@@ -636,7 +756,7 @@ pub fn assign_cells(
             let valid = texts.iter().find(|t| is_valid_date_str(t.trim()));
             match valid {
                 Some(s) => s.trim().to_owned(),
-                None    => texts[0].trim().to_owned(),
+                None => texts[0].trim().to_owned(),
             }
         } else {
             texts.join(" ").trim().to_owned()
@@ -667,20 +787,28 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
     // Regex-like checks using simple string operations for performance.
     let is_date_text = |t: &str| -> bool {
         let t = t.trim();
-        if t.len() < 6 || t.len() > 10 { return false; }
-        let parts: Vec<&str> = t.splitn(3, |c| c == '/' || c == '-').collect();
-        if parts.len() != 3 { return false; }
-        parts[0].chars().all(|c| c.is_ascii_digit()) &&
-        parts[1].chars().all(|c| c.is_ascii_digit()) &&
-        parts[2].chars().all(|c| c.is_ascii_digit()) &&
-        parts[2].len() >= 2
+        if t.len() < 6 || t.len() > 10 {
+            return false;
+        }
+        let parts: Vec<&str> = t.splitn(3, ['/', '-']).collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        parts[0].chars().all(|c| c.is_ascii_digit())
+            && parts[1].chars().all(|c| c.is_ascii_digit())
+            && parts[2].chars().all(|c| c.is_ascii_digit())
+            && parts[2].len() >= 2
     };
 
     let is_balcr = |t: &str| -> bool {
         let t = t.trim();
         let lower = t.to_lowercase();
-        (lower.ends_with("cr") || lower.ends_with("dr")) &&
-        t[..t.len()-2].trim_end().chars().last().map_or(false, |c| c.is_ascii_digit())
+        (lower.ends_with("cr") || lower.ends_with("dr"))
+            && t[..t.len() - 2]
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_digit())
     };
 
     // Plain decimal: optional "Rs." prefix, optional minus, digits with commas, dot, 2 decimals.
@@ -688,20 +816,25 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
         let t = t.trim();
         let s = if t.to_lowercase().starts_with("rs") {
             t.trim_start_matches(|c: char| c.is_alphabetic() || c == '.')
-              .trim_start()
-        } else { t };
+                .trim_start()
+        } else {
+            t
+        };
         let s = s.trim_start_matches('-');
-        if s.is_empty() { return false; }
+        if s.is_empty() {
+            return false;
+        }
         let dot_pos = s.rfind('.');
         match dot_pos {
             None => false,
             Some(dp) => {
-                let decimals = &s[dp+1..];
+                let decimals = &s[dp + 1..];
                 let int_part = &s[..dp];
-                decimals.chars().all(|c| c.is_ascii_digit()) &&
-                decimals.len() >= 1 && decimals.len() <= 2 &&
-                int_part.chars().all(|c| c.is_ascii_digit() || c == ',') &&
-                !int_part.is_empty()
+                decimals.chars().all(|c| c.is_ascii_digit())
+                    && !decimals.is_empty()
+                    && decimals.len() <= 2
+                    && int_part.chars().all(|c| c.is_ascii_digit() || c == ',')
+                    && !int_part.is_empty()
             }
         }
     };
@@ -709,30 +842,48 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
     let int_digit_count = |t: &str| -> usize {
         // Number of digits before the decimal point, ignoring commas.
         let t = t.replace(',', "");
-        let s = if let Some(dp) = t.find('.') { &t[..dp] } else { &t };
+        let s = if let Some(dp) = t.find('.') {
+            &t[..dp]
+        } else {
+            &t
+        };
         s.chars().filter(|c| c.is_ascii_digit()).count()
     };
 
     // Collect up to 12 date-anchored rows from the first 40 rows.
     let mut data_rows: Vec<&Vec<PdfItem>> = Vec::new();
     for row in rows.iter().take(40) {
-        if row.is_empty() { continue; }
+        if row.is_empty() {
+            continue;
+        }
         if is_date_text(row[0].text.trim()) {
             data_rows.push(row);
-            if data_rows.len() >= 12 { break; }
+            if data_rows.len() >= 12 {
+                break;
+            }
         }
     }
-    if data_rows.len() < 2 { return None; }
+    if data_rows.len() < 2 {
+        return None;
+    }
 
     // Bucket by X/10 resolution.
     #[derive(Default, Clone)]
-    struct Bucket { date: u32, amt_cr: u32, amount: u32, ref_amt: u32, text: u32 }
+    struct Bucket {
+        date: u32,
+        amt_cr: u32,
+        amount: u32,
+        ref_amt: u32,
+        text: u32,
+    }
     let mut buckets: std::collections::BTreeMap<i64, Bucket> = std::collections::BTreeMap::new();
 
     for row in &data_rows {
         for item in row.iter() {
             let t = item.text.trim();
-            if t.is_empty() { continue; }
+            if t.is_empty() {
+                continue;
+            }
             let bx = (item.x / 10.0).round() as i64 * 10;
             let b = buckets.entry(bx).or_default();
             if is_date_text(t) {
@@ -740,32 +891,39 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
             } else if is_balcr(t) {
                 b.amt_cr += 1;
             } else if is_amount(t) {
-                if int_digit_count(t) <= 10 { b.amount += 1; }
-                else                         { b.ref_amt += 1; }
+                if int_digit_count(t) <= 10 {
+                    b.amount += 1;
+                } else {
+                    b.ref_amt += 1;
+                }
             } else if t.len() > 5 {
                 b.text += 1;
             }
         }
     }
 
-    if buckets.len() < 2 { return None; }
+    if buckets.len() < 2 {
+        return None;
+    }
 
-    let entries: Vec<(f64, Bucket)> = buckets.into_iter()
-        .map(|(x, b)| (x as f64, b))
-        .collect(); // already sorted ascending by x (BTreeMap)
+    let entries: Vec<(f64, Bucket)> = buckets.into_iter().map(|(x, b)| (x as f64, b)).collect(); // already sorted ascending by x (BTreeMap)
 
     let mut col_x = PdfColX::default();
 
     // Leftmost date cluster → date column.
-    let date_cols: Vec<f64> = entries.iter()
+    let date_cols: Vec<f64> = entries
+        .iter()
         .filter(|(_, b)| b.date >= 2)
         .map(|(x, _)| *x)
         .collect();
-    if date_cols.is_empty() { return None; }
+    if date_cols.is_empty() {
+        return None;
+    }
     col_x.date = Some(date_cols[0]);
 
     // Rightmost Cr/Dr-suffixed amount → balance column (BOB, Cosmos).
-    let balcr_cols: Vec<f64> = entries.iter()
+    let balcr_cols: Vec<f64> = entries
+        .iter()
         .filter(|(_, b)| b.amt_cr >= 1)
         .map(|(x, _)| *x)
         .collect();
@@ -775,7 +933,8 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
 
     // Plain-amount columns right of date, with no ref_amt mixing.
     let date_x = col_x.date.unwrap();
-    let all_amt: Vec<f64> = entries.iter()
+    let all_amt: Vec<f64> = entries
+        .iter()
         .filter(|(x, b)| b.amount >= 1 && b.ref_amt == 0 && *x > date_x)
         .map(|(x, _)| *x)
         .collect();
@@ -789,27 +948,33 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
 
     // Remaining amount columns (excl. balance) → debit / credit.
     let bal_x = col_x.balance;
-    let txn_amt: Vec<f64> = all_amt.iter()
+    let txn_amt: Vec<f64> = all_amt
+        .iter()
         .filter(|&&x| Some(x) != bal_x)
         .copied()
         .collect();
 
     match txn_amt.len() {
         n if n >= 2 => {
-            col_x.debit  = Some(txn_amt[n - 2]);
+            col_x.debit = Some(txn_amt[n - 2]);
             col_x.credit = Some(txn_amt[n - 1]);
         }
-        1 => { col_x.debit = Some(txn_amt[0]); } // direction resolved later
+        1 => {
+            col_x.debit = Some(txn_amt[0]);
+        } // direction resolved later
         0 if col_x.balance.is_some() => return None, // all amounts = balance, can't split
         _ => {}
     }
 
     // Leftmost text cluster between date and first amount → narration.
     let nar_max_x = [col_x.debit, col_x.credit, col_x.balance]
-        .iter().flatten().copied()
+        .iter()
+        .flatten()
+        .copied()
         .fold(f64::INFINITY, f64::min);
 
-    let text_cols: Vec<f64> = entries.iter()
+    let text_cols: Vec<f64> = entries
+        .iter()
         .filter(|(x, b)| b.text >= 2 && *x > date_x && *x < nar_max_x)
         .map(|(x, _)| *x)
         .collect();
@@ -818,11 +983,14 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
     }
 
     // Reference/UTR column: large-digit amounts between narration and first txn amount.
-    let ref_left  = col_x.narration.unwrap_or(date_x);
+    let ref_left = col_x.narration.unwrap_or(date_x);
     let ref_right = [col_x.debit, col_x.credit, col_x.balance]
-        .iter().flatten().copied()
+        .iter()
+        .flatten()
+        .copied()
         .fold(f64::INFINITY, f64::min);
-    let ref_cols: Vec<f64> = entries.iter()
+    let ref_cols: Vec<f64> = entries
+        .iter()
         .filter(|(x, b)| b.ref_amt >= 1 && *x > ref_left && *x < ref_right)
         .map(|(x, _)| *x)
         .collect();
@@ -831,8 +999,9 @@ pub fn infer_header_from_data(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> 
     }
 
     // Minimum viable: date + at least one amount.
-    if col_x.date.is_none() ||
-       (col_x.debit.is_none() && col_x.credit.is_none() && col_x.balance.is_none()) {
+    if col_x.date.is_none()
+        || (col_x.debit.is_none() && col_x.credit.is_none() && col_x.balance.is_none())
+    {
         return None;
     }
 
@@ -890,8 +1059,8 @@ mod tests {
 
     #[test]
     fn score_short_val_is_zero() {
-        assert_eq!(score_cell("a",  COL_DATE), 0);
-        assert_eq!(score_cell("",   COL_DATE), 0);
+        assert_eq!(score_cell("a", COL_DATE), 0);
+        assert_eq!(score_cell("", COL_DATE), 0);
     }
 
     #[test]
@@ -917,16 +1086,21 @@ mod tests {
     #[test]
     fn hdfc_header() {
         let row = &[
-            "Date", "Narration", "Value Dt", "Chq/Ref No.",
-            "Withdrawal Amt.", "Deposit Amt.", "Closing Balance",
+            "Date",
+            "Narration",
+            "Value Dt",
+            "Chq/Ref No.",
+            "Withdrawal Amt.",
+            "Deposit Amt.",
+            "Closing Balance",
         ];
         let m = col(row);
-        assert_eq!(m.date,     0, "date col");
+        assert_eq!(m.date, 0, "date col");
         assert_eq!(m.narration, 1, "narration col");
         assert_eq!(m.reference, 3, "reference col");
-        assert_eq!(m.debit,    4, "debit col");
-        assert_eq!(m.credit,   5, "credit col");
-        assert_eq!(m.balance,  6, "balance col");
+        assert_eq!(m.debit, 4, "debit col");
+        assert_eq!(m.credit, 5, "credit col");
+        assert_eq!(m.balance, 6, "balance col");
         assert_eq!(m.debit_credit, -1, "no debitcredit");
     }
 
@@ -940,62 +1114,92 @@ mod tests {
     #[test]
     fn sbi_header() {
         let row = &[
-            "Txn Date", "Value Date", "Description",
-            "Ref No./Cheque No", "Debit", "Credit", "Balance",
+            "Txn Date",
+            "Value Date",
+            "Description",
+            "Ref No./Cheque No",
+            "Debit",
+            "Credit",
+            "Balance",
         ];
         let m = col(row);
-        assert_eq!(m.date,         0, "date col (Txn Date wins over Value Date)");
-        assert_eq!(m.narration,    2, "narration col");
-        assert_eq!(m.reference,    3, "reference col");
+        assert_eq!(m.date, 0, "date col (Txn Date wins over Value Date)");
+        assert_eq!(m.narration, 2, "narration col");
+        assert_eq!(m.reference, 3, "reference col");
         // "Debit" → debitcredit scores 10 (p.starts_with(val)) > threshold 9 → claims col 4
-        assert_eq!(m.debit_credit, 4, "debitcredit steals 'Debit' col (score 10 > 9)");
-        assert_eq!(m.debit,       -1, "debit stolen by debitcredit");
-        assert_eq!(m.credit,       5, "credit col ('Credit' scores 0 for debitcredit)");
-        assert_eq!(m.balance,      6, "balance col");
+        assert_eq!(
+            m.debit_credit, 4,
+            "debitcredit steals 'Debit' col (score 10 > 9)"
+        );
+        assert_eq!(m.debit, -1, "debit stolen by debitcredit");
+        assert_eq!(
+            m.credit, 5,
+            "credit col ('Credit' scores 0 for debitcredit)"
+        );
+        assert_eq!(m.balance, 6, "balance col");
     }
 
     // Axis Bank header — "PARTICULARS" maps to narration
     #[test]
     fn axis_header() {
         let row = &[
-            "Tran Date", "PARTICULARS", "Chq./Ref.No.",
-            "Withdrawal Amt.(INR)", "Deposit Amt.(INR)", "Balance (INR)",
+            "Tran Date",
+            "PARTICULARS",
+            "Chq./Ref.No.",
+            "Withdrawal Amt.(INR)",
+            "Deposit Amt.(INR)",
+            "Balance (INR)",
         ];
         let m = col(row);
-        assert_eq!(m.date,      0);
+        assert_eq!(m.date, 0);
         assert_eq!(m.narration, 1);
         assert_eq!(m.reference, 2);
-        assert_eq!(m.debit,     3);
-        assert_eq!(m.credit,    4);
-        assert_eq!(m.balance,   5);
+        assert_eq!(m.debit, 3);
+        assert_eq!(m.credit, 4);
+        assert_eq!(m.balance, 5);
     }
 
     // ICICI Bank header — "S No." at col 0 must NOT be assigned to any field
     #[test]
     fn icici_header() {
         let row = &[
-            "S No.", "Transaction Date", "Value Date", "Transaction Remarks",
-            "Ref No./Cheque No.", "Withdrawal Amt.(INR)", "Deposit Amt.(INR)", "Balance (INR)",
+            "S No.",
+            "Transaction Date",
+            "Value Date",
+            "Transaction Remarks",
+            "Ref No./Cheque No.",
+            "Withdrawal Amt.(INR)",
+            "Deposit Amt.(INR)",
+            "Balance (INR)",
         ];
         let m = col(row);
-        assert_eq!(m.date,      1, "Transaction Date → col 1");
+        assert_eq!(m.date, 1, "Transaction Date → col 1");
         assert_eq!(m.narration, 3, "Transaction Remarks → col 3");
         assert_eq!(m.reference, 4, "Ref No./Cheque No. → col 4");
-        assert_eq!(m.debit,     5);
-        assert_eq!(m.credit,    6);
-        assert_eq!(m.balance,   7);
+        assert_eq!(m.debit, 5);
+        assert_eq!(m.credit, 6);
+        assert_eq!(m.balance, 7);
     }
 
     // Kotak debitcredit column wins over plain debit/credit
     #[test]
     fn kotak_debitcredit_header() {
-        let row = &["Date", "Narration", "Reference", "DEBIT/CREDIT(\u{20b9})", "Balance"];
+        let row = &[
+            "Date",
+            "Narration",
+            "Reference",
+            "DEBIT/CREDIT(\u{20b9})",
+            "Balance",
+        ];
         let m = col(row);
-        assert_eq!(m.date,         0);
-        assert_eq!(m.narration,    1);
-        assert_eq!(m.reference,    2);
-        assert_eq!(m.debit_credit, 3, "compound DEBIT/CREDIT(₹) → debitcredit col");
-        assert_eq!(m.debit,  -1, "debit not assigned separately");
+        assert_eq!(m.date, 0);
+        assert_eq!(m.narration, 1);
+        assert_eq!(m.reference, 2);
+        assert_eq!(
+            m.debit_credit, 3,
+            "compound DEBIT/CREDIT(₹) → debitcredit col"
+        );
+        assert_eq!(m.debit, -1, "debit not assigned separately");
         assert_eq!(m.credit, -1, "credit not assigned separately");
         assert_eq!(m.balance, 4);
     }
@@ -1004,9 +1208,9 @@ mod tests {
     #[test]
     fn empty_row() {
         let m = col(&["", "", "", ""]);
-        assert_eq!(m.date,     -1);
+        assert_eq!(m.date, -1);
         assert_eq!(m.narration, -1);
-        assert_eq!(m.debit,    -1);
+        assert_eq!(m.debit, -1);
     }
 
     // Short single-character cells are ignored (length < 2)
@@ -1027,20 +1231,31 @@ mod tests {
         // BTreeMap iterates ascending by col index → col 0 wins (strict sc > bestSc,
         // so col 1's equal score cannot displace col 0 once it is set).
         let m = col(&[
-            "Date", "Transaction Date", "Narration",
-            "Withdrawal Amt.", "Deposit Amt.", "Balance",
+            "Date",
+            "Transaction Date",
+            "Narration",
+            "Withdrawal Amt.",
+            "Deposit Amt.",
+            "Balance",
         ]);
-        assert_eq!(m.date,      0, "col 0 'Date' wins tie with col 1 'Transaction Date'");
+        assert_eq!(
+            m.date, 0,
+            "col 0 'Date' wins tie with col 1 'Transaction Date'"
+        );
         assert_eq!(m.narration, 2);
-        assert_eq!(m.debit,     3, "Withdrawal Amt. → debit");
-        assert_eq!(m.credit,    4, "Deposit Amt. → credit");
-        assert_eq!(m.balance,   5);
+        assert_eq!(m.debit, 3, "Withdrawal Amt. → debit");
+        assert_eq!(m.credit, 4, "Deposit Amt. → credit");
+        assert_eq!(m.balance, 5);
     }
 
     // ── merge_adjacent_items ──────────────────────────────────────────────────
 
     fn item(x: f64, text: &str, w: f64) -> PdfItem {
-        PdfItem { x, text: text.to_owned(), w }
+        PdfItem {
+            x,
+            text: text.to_owned(),
+            w,
+        }
     }
 
     #[test]
@@ -1059,7 +1274,10 @@ mod tests {
     #[test]
     fn merge_two_items_within_gap() {
         // item1 ends at x=10+30=40, item2 starts at x=45 → gap = 5 ≤ 40 → merge
-        let row = vec![item(10.0, "DEBIT/", 30.0), item(45.0, "CREDIT(\u{20b9})", 60.0)];
+        let row = vec![
+            item(10.0, "DEBIT/", 30.0),
+            item(45.0, "CREDIT(\u{20b9})", 60.0),
+        ];
         let merged = merge_adjacent_items(&row, 40.0);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "DEBIT/ CREDIT(\u{20b9})");
@@ -1081,9 +1299,9 @@ mod tests {
     fn merge_three_items_first_two_close() {
         // gap(0→1) = 40-(10+25) = 5 ≤ 40 → merge; gap(merged→2) = 200-(40+25) = 135 > 40 → separate
         let row = vec![
-            item(10.0,  "DEBIT/",       25.0),
-            item(40.0,  "CREDIT(\u{20b9})", 25.0),
-            item(200.0, "Balance",      40.0),
+            item(10.0, "DEBIT/", 25.0),
+            item(40.0, "CREDIT(\u{20b9})", 25.0),
+            item(200.0, "Balance", 40.0),
         ];
         let merged = merge_adjacent_items(&row, 40.0);
         assert_eq!(merged.len(), 2);
@@ -1095,9 +1313,9 @@ mod tests {
     fn merge_custom_gap_threshold() {
         // gap = 60 > 40 (default) but ≤ 100 (custom)
         let row = vec![item(0.0, "A", 30.0), item(100.0, "B", 30.0)];
-        let merged40  = merge_adjacent_items(&row, 40.0);
+        let merged40 = merge_adjacent_items(&row, 40.0);
         let merged100 = merge_adjacent_items(&row, 100.0);
-        assert_eq!(merged40.len(),  2, "gap 70 > 40 → separate");
+        assert_eq!(merged40.len(), 2, "gap 70 > 40 → separate");
         assert_eq!(merged100.len(), 1, "gap 70 ≤ 100 → merged");
     }
 
@@ -1127,18 +1345,15 @@ mod tests {
     fn two_columns_midpoint() {
         // date at x=50, balance at x=150, hdrRow has both
         let hdr = vec![item(50.0, "Date", 30.0), item(150.0, "Balance", 40.0)];
-        let b = bounds(
-            &[(ColField::Date, 50.0), (ColField::Balance, 150.0)],
-            &hdr,
-        );
+        let b = bounds(&[(ColField::Date, 50.0), (ColField::Balance, 150.0)], &hdr);
         // Sorted by x: date=50, balance=150
         // fences = [50, 150]
         // date:    leftFences=[], xMin=0; rightFences=[150], xMax=round((50+150)/2)=100
         // balance: leftFences=[50], xMin=round((50+150)/2)=100; rightFences=[], xMax=∞
-        let date_b    = b.iter().find(|b| b.field == ColField::Date).unwrap();
+        let date_b = b.iter().find(|b| b.field == ColField::Date).unwrap();
         let balance_b = b.iter().find(|b| b.field == ColField::Balance).unwrap();
-        assert_eq!(date_b.x_min,    0.0);
-        assert_eq!(date_b.x_max,  100.0, "midpoint of 50 and 150");
+        assert_eq!(date_b.x_min, 0.0);
+        assert_eq!(date_b.x_max, 100.0, "midpoint of 50 and 150");
         assert_eq!(balance_b.x_min, 100.0);
         assert_eq!(balance_b.x_max, f64::INFINITY);
     }
@@ -1148,16 +1363,16 @@ mod tests {
         // date=50, narration=150, balance=300.
         // hdrRow includes an unmapped item at x=100 (e.g. "#" col).
         let hdr = vec![
-            item(50.0,  "Date",       30.0),
-            item(100.0, "#",          10.0),  // unmapped — acts as fence
-            item(150.0, "Narration",  60.0),
-            item(300.0, "Balance",    40.0),
+            item(50.0, "Date", 30.0),
+            item(100.0, "#", 10.0), // unmapped — acts as fence
+            item(150.0, "Narration", 60.0),
+            item(300.0, "Balance", 40.0),
         ];
         let b = bounds(
             &[
-                (ColField::Date,      50.0),
+                (ColField::Date, 50.0),
                 (ColField::Narration, 150.0),
-                (ColField::Balance,   300.0),
+                (ColField::Balance, 300.0),
             ],
             &hdr,
         );
@@ -1167,22 +1382,19 @@ mod tests {
         // balance (x=300): leftFences=[50,100,150], nearest=150, xMin=round((150+300)/2)=225; rightFences=[], xMax=∞
         let date_b = b.iter().find(|b| b.field == ColField::Date).unwrap();
         let narr_b = b.iter().find(|b| b.field == ColField::Narration).unwrap();
-        let bal_b  = b.iter().find(|b| b.field == ColField::Balance).unwrap();
-        assert_eq!(date_b.x_min,  0.0);
+        let bal_b = b.iter().find(|b| b.field == ColField::Balance).unwrap();
+        assert_eq!(date_b.x_min, 0.0);
         assert_eq!(date_b.x_max, 75.0, "fence at 100 narrows date boundary");
         assert_eq!(narr_b.x_min, 125.0);
         assert_eq!(narr_b.x_max, 225.0);
-        assert_eq!(bal_b.x_min,  225.0);
-        assert_eq!(bal_b.x_max,  f64::INFINITY);
+        assert_eq!(bal_b.x_min, 225.0);
+        assert_eq!(bal_b.x_max, f64::INFINITY);
     }
 
     #[test]
     fn empty_hdr_row_falls_back_to_col_positions() {
         // When hdr_row is empty, fences = mapped col x-positions only
-        let b = bounds(
-            &[(ColField::Date, 50.0), (ColField::Balance, 200.0)],
-            &[],
-        );
+        let b = bounds(&[(ColField::Date, 50.0), (ColField::Balance, 200.0)], &[]);
         let date_b = b.iter().find(|b| b.field == ColField::Date).unwrap();
         // fences = [50, 200]; date midpoint = (50+200)/2 = 125
         assert_eq!(date_b.x_max, 125.0);
@@ -1192,25 +1404,45 @@ mod tests {
 
     fn simple_bounds() -> Vec<ColBoundary> {
         vec![
-            ColBoundary { field: ColField::Date,      x_min: 0.0,   x_max: 100.0 },
-            ColBoundary { field: ColField::Narration,  x_min: 100.0, x_max: 200.0 },
-            ColBoundary { field: ColField::Debit,      x_min: 200.0, x_max: 280.0 },
-            ColBoundary { field: ColField::Credit,     x_min: 280.0, x_max: 360.0 },
-            ColBoundary { field: ColField::Balance,    x_min: 360.0, x_max: f64::INFINITY },
+            ColBoundary {
+                field: ColField::Date,
+                x_min: 0.0,
+                x_max: 100.0,
+            },
+            ColBoundary {
+                field: ColField::Narration,
+                x_min: 100.0,
+                x_max: 200.0,
+            },
+            ColBoundary {
+                field: ColField::Debit,
+                x_min: 200.0,
+                x_max: 280.0,
+            },
+            ColBoundary {
+                field: ColField::Credit,
+                x_min: 280.0,
+                x_max: 360.0,
+            },
+            ColBoundary {
+                field: ColField::Balance,
+                x_min: 360.0,
+                x_max: f64::INFINITY,
+            },
         ]
     }
 
     #[test]
     fn assign_basic_row() {
         let items = vec![
-            item(10.0,  "15/01/2024",  50.0),
-            item(110.0, "NEFT PAYMENT",80.0),
-            item(370.0, "100000.00",   60.0),
+            item(10.0, "15/01/2024", 50.0),
+            item(110.0, "NEFT PAYMENT", 80.0),
+            item(370.0, "100000.00", 60.0),
         ];
         let a = assign_cells(&items, &simple_bounds());
-        assert_eq!(a[&ColField::Date],      "15/01/2024");
+        assert_eq!(a[&ColField::Date], "15/01/2024");
         assert_eq!(a[&ColField::Narration], "NEFT PAYMENT");
-        assert_eq!(a[&ColField::Balance],   "100000.00");
+        assert_eq!(a[&ColField::Balance], "100000.00");
         assert_eq!(a.get(&ColField::Debit).map(|s| s.as_str()), Some(""));
         assert_eq!(a.get(&ColField::Credit).map(|s| s.as_str()), Some(""));
     }
@@ -1218,71 +1450,84 @@ mod tests {
     // ICICI WM: "(-)" and "4,85,878.84" in same monetary bucket → join wins
     #[test]
     fn assign_monetary_joined_wins_for_icici_wm() {
-        let bounds = vec![
-            ColBoundary { field: ColField::Debit, x_min: 0.0, x_max: f64::INFINITY },
-        ];
-        let items = vec![
-            item(10.0, "(-)",        20.0),
-            item(35.0, "4,85,878.84", 60.0),
-        ];
+        let bounds = vec![ColBoundary {
+            field: ColField::Debit,
+            x_min: 0.0,
+            x_max: f64::INFINITY,
+        }];
+        let items = vec![item(10.0, "(-)", 20.0), item(35.0, "4,85,878.84", 60.0)];
         let a = assign_cells(&items, &bounds);
-        assert_eq!(a[&ColField::Debit], "(-) 4,85,878.84",
-            "joined \"(-) 4,85,878.84\" parses as amount → use joined");
+        assert_eq!(
+            a[&ColField::Debit],
+            "(-) 4,85,878.84",
+            "joined \"(-) 4,85,878.84\" parses as amount → use joined"
+        );
     }
 
     // BOM: ref# + amount in same bucket → joined fails → last individual parseable wins
     #[test]
     fn assign_monetary_last_parseable_wins_for_bom() {
-        let bounds = vec![
-            ColBoundary { field: ColField::Balance, x_min: 0.0, x_max: f64::INFINITY },
-        ];
+        let bounds = vec![ColBoundary {
+            field: ColField::Balance,
+            x_min: 0.0,
+            x_max: f64::INFINITY,
+        }];
         // "303213675227" has 12 digits → parse_amount_str returns None
         // "22000.00" parses → wins as last parseable
         let items = vec![
             item(10.0, "303213675227", 60.0),
-            item(80.0, "22000.00",     50.0),
+            item(80.0, "22000.00", 50.0),
         ];
         let a = assign_cells(&items, &bounds);
-        assert_eq!(a[&ColField::Balance], "22000.00",
-            "joined fails (12-digit ref); last individual parseable wins");
+        assert_eq!(
+            a[&ColField::Balance],
+            "22000.00",
+            "joined fails (12-digit ref); last individual parseable wins"
+        );
     }
 
     // Date bucket: "Cheque" lands in date zone alongside the real date → pick date
     #[test]
     fn assign_date_picks_first_valid() {
-        let bounds = vec![
-            ColBoundary { field: ColField::Date, x_min: 0.0, x_max: f64::INFINITY },
-        ];
-        let items = vec![
-            item(10.0, "15/01/2024", 50.0),
-            item(60.0, "Cheque",     40.0),
-        ];
+        let bounds = vec![ColBoundary {
+            field: ColField::Date,
+            x_min: 0.0,
+            x_max: f64::INFINITY,
+        }];
+        let items = vec![item(10.0, "15/01/2024", 50.0), item(60.0, "Cheque", 40.0)];
         let a = assign_cells(&items, &bounds);
-        assert_eq!(a[&ColField::Date], "15/01/2024",
-            "first valid date picked over trailing 'Cheque' text");
+        assert_eq!(
+            a[&ColField::Date],
+            "15/01/2024",
+            "first valid date picked over trailing 'Cheque' text"
+        );
     }
 
     // Date bucket: no valid date → fall back to first item
     #[test]
     fn assign_date_fallback_to_first_item() {
-        let bounds = vec![
-            ColBoundary { field: ColField::Date, x_min: 0.0, x_max: f64::INFINITY },
-        ];
-        let items = vec![
-            item(10.0, "Cheque", 40.0),
-            item(60.0, "123",    20.0),
-        ];
+        let bounds = vec![ColBoundary {
+            field: ColField::Date,
+            x_min: 0.0,
+            x_max: f64::INFINITY,
+        }];
+        let items = vec![item(10.0, "Cheque", 40.0), item(60.0, "123", 20.0)];
         let a = assign_cells(&items, &bounds);
-        assert_eq!(a[&ColField::Date], "Cheque",
-            "no valid date → fall back to first item");
+        assert_eq!(
+            a[&ColField::Date],
+            "Cheque",
+            "no valid date → fall back to first item"
+        );
     }
 
     // Single monetary item → returned as-is (no multi-item logic)
     #[test]
     fn assign_single_monetary_item_as_is() {
-        let bounds = vec![
-            ColBoundary { field: ColField::Credit, x_min: 0.0, x_max: f64::INFINITY },
-        ];
+        let bounds = vec![ColBoundary {
+            field: ColField::Credit,
+            x_min: 0.0,
+            x_max: f64::INFINITY,
+        }];
         let items = vec![item(10.0, "50,000.00", 60.0)];
         let a = assign_cells(&items, &bounds);
         assert_eq!(a[&ColField::Credit], "50,000.00");
@@ -1291,9 +1536,11 @@ mod tests {
     // Non-monetary multi-item → joined with space
     #[test]
     fn assign_narration_multi_item_joined() {
-        let bounds = vec![
-            ColBoundary { field: ColField::Narration, x_min: 0.0, x_max: f64::INFINITY },
-        ];
+        let bounds = vec![ColBoundary {
+            field: ColField::Narration,
+            x_min: 0.0,
+            x_max: f64::INFINITY,
+        }];
         let items = vec![
             item(10.0, "NEFT", 25.0),
             item(40.0, "PAYMENT FROM RAM", 80.0),
@@ -1305,9 +1552,11 @@ mod tests {
     // Item outside all boundaries → not assigned
     #[test]
     fn assign_item_outside_boundaries_ignored() {
-        let bounds = vec![
-            ColBoundary { field: ColField::Date, x_min: 0.0, x_max: 50.0 },
-        ];
+        let bounds = vec![ColBoundary {
+            field: ColField::Date,
+            x_min: 0.0,
+            x_max: 50.0,
+        }];
         let items = vec![item(100.0, "orphan", 20.0)]; // x=100 ≥ 50 = x_max → not in date
         let a = assign_cells(&items, &bounds);
         // "orphan" doesn't land in the date bucket
@@ -1322,9 +1571,11 @@ mod tests {
 
     #[test]
     fn find_pdf_header_simple_row() {
-        let rows = vec![
-            make_row(&[(10.0, "Date", 30.0), (100.0, "Narration", 60.0), (300.0, "Credit", 40.0)]),
-        ];
+        let rows = vec![make_row(&[
+            (10.0, "Date", 30.0),
+            (100.0, "Narration", 60.0),
+            (300.0, "Credit", 40.0),
+        ])];
         let result = find_pdf_header(&rows).expect("should find header");
         assert_eq!(result.hdr_idx, Some(0));
         assert!(result.col_x.date.is_some());
@@ -1340,9 +1591,9 @@ mod tests {
             // Row 1: valid header — needs date + narration + at least one of debit/credit/debitcredit
             // (balance alone is not sufficient per the JS validity check)
             make_row(&[
-                (10.0,  "Date",      30.0),
+                (10.0, "Date", 30.0),
                 (100.0, "Narration", 60.0),
-                (300.0, "Credit",    40.0),
+                (300.0, "Credit", 40.0),
             ]),
         ];
         let result = find_pdf_header(&rows).expect("should find header");
@@ -1351,18 +1602,17 @@ mod tests {
 
     #[test]
     fn find_pdf_header_returns_none_when_no_header() {
-        let rows = vec![
-            make_row(&[(10.0, "01/01/2024", 40.0), (100.0, "Some narration", 80.0)]),
-        ];
+        let rows = vec![make_row(&[
+            (10.0, "01/01/2024", 40.0),
+            (100.0, "Some narration", 80.0),
+        ])];
         assert!(find_pdf_header(&rows).is_none());
     }
 
     #[test]
     fn find_pdf_header_requires_date_narration_and_amount() {
         // date + debit but no narration → should NOT match
-        let rows = vec![
-            make_row(&[(10.0, "Date", 30.0), (300.0, "Debit", 40.0)]),
-        ];
+        let rows = vec![make_row(&[(10.0, "Date", 30.0), (300.0, "Debit", 40.0)])];
         assert!(find_pdf_header(&rows).is_none(), "narration required");
     }
 
@@ -1371,14 +1621,17 @@ mod tests {
         // "DEBIT/" and "CREDIT(₹)" close together (gap = 40-30 = 10 ≤ 40) →
         // after scoring the merged item, debit_credit should be detected
         let rows = vec![make_row(&[
-            (10.0,  "Date",                30.0),
-            (100.0, "Narration",           60.0),
-            (200.0, "DEBIT/",             25.0),  // split label part 1
-            (230.0, "CREDIT(\u{20b9})",   40.0),  // split label part 2 (gap = 230-225 = 5)
+            (10.0, "Date", 30.0),
+            (100.0, "Narration", 60.0),
+            (200.0, "DEBIT/", 25.0),           // split label part 1
+            (230.0, "CREDIT(\u{20b9})", 40.0), // split label part 2 (gap = 230-225 = 5)
         ])];
         let result = find_pdf_header(&rows).expect("header found");
         // The merged item "DEBIT/ CREDIT(₹)" scores for debitcredit
-        assert!(result.col_x.debit_credit.is_some(), "debitcredit detected via merged item");
+        assert!(
+            result.col_x.debit_credit.is_some(),
+            "debitcredit detected via merged item"
+        );
     }
 
     // The slash guard fires when "DEBIT/(₹)" (with "/" and rupee suffix) and
@@ -1390,18 +1643,24 @@ mod tests {
     #[test]
     fn find_pdf_header_slash_guard_merges_compound_label() {
         let rows = vec![make_row(&[
-            (10.0,  "Date",                   30.0),
-            (100.0, "Narration",              60.0),
-            (200.0, "DEBIT/(\u{20b9})",       30.0),  // "/" + rupee: scores debit=60, debitcredit=0
-            (230.0, "CREDIT(\u{20b9})",       30.0),  // within 120px; scores credit=60
+            (10.0, "Date", 30.0),
+            (100.0, "Narration", 60.0),
+            (200.0, "DEBIT/(\u{20b9})", 30.0), // "/" + rupee: scores debit=60, debitcredit=0
+            (230.0, "CREDIT(\u{20b9})", 30.0), // within 120px; scores credit=60
         ])];
         let result = find_pdf_header(&rows).expect("header found");
-        assert!(result.col_x.debit_credit.is_some(),
-            "compound 'DEBIT/(₹)'+'CREDIT(₹)' merged into debitcredit");
-        assert!(result.col_x.debit.is_none(),
-            "debit cleared after compound merge");
-        assert!(result.col_x.credit.is_none(),
-            "credit cleared after compound merge");
+        assert!(
+            result.col_x.debit_credit.is_some(),
+            "compound 'DEBIT/(₹)'+'CREDIT(₹)' merged into debitcredit"
+        );
+        assert!(
+            result.col_x.debit.is_none(),
+            "debit cleared after compound merge"
+        );
+        assert!(
+            result.col_x.credit.is_none(),
+            "credit cleared after compound merge"
+        );
     }
 
     // Plain "Debit" (no slash) scores 10 for debitcredit via p.starts_with(val).
@@ -1411,26 +1670,36 @@ mod tests {
     #[test]
     fn find_pdf_header_no_slash_no_merge() {
         let rows = vec![make_row(&[
-            (10.0,  "Date",      30.0),
+            (10.0, "Date", 30.0),
             (100.0, "Narration", 60.0),
-            (200.0, "Debit",     30.0),  // no slash; debitcredit steals it (score 10 > 9)
-            (240.0, "Credit",    30.0),
+            (200.0, "Debit", 30.0), // no slash; debitcredit steals it (score 10 > 9)
+            (240.0, "Credit", 30.0),
         ])];
         let result = find_pdf_header(&rows).expect("header found");
         // "Debit" (score 10 for debitcredit) → debitcredit claims x=200 first
-        assert!(result.col_x.debit_credit.is_some(),
-            "debitcredit claims 'Debit' x-pos (score 10 > threshold 9)");
-        assert!(result.col_x.debit.is_none(),
-            "debit not separately set — stolen by debitcredit");
+        assert!(
+            result.col_x.debit_credit.is_some(),
+            "debitcredit claims 'Debit' x-pos (score 10 > threshold 9)"
+        );
+        assert!(
+            result.col_x.debit.is_none(),
+            "debit not separately set — stolen by debitcredit"
+        );
         // "Credit" scores 0 for debitcredit → not stolen; remains as credit
-        assert!(result.col_x.credit.is_some(),
-            "credit separately detected ('Credit' scores 0 for debitcredit)");
+        assert!(
+            result.col_x.credit.is_some(),
+            "credit separately detected ('Credit' scores 0 for debitcredit)"
+        );
     }
 
     // ── infer_header_from_data ────────────────────────────────────────────────
 
     fn data_item(x: f64, text: &str) -> PdfItem {
-        PdfItem { x, text: text.to_owned(), w: 30.0 }
+        PdfItem {
+            x,
+            text: text.to_owned(),
+            w: 30.0,
+        }
     }
 
     fn data_row(pairs: &[(f64, &str)]) -> Vec<PdfItem> {
@@ -1442,22 +1711,38 @@ mod tests {
     fn standard_data_rows() -> Vec<Vec<PdfItem>> {
         // Build 5 rows, each starting with a date at x≈10
         let transactions = [
-            ("01/01/2024", "SALARY CREDIT",   "",          "50000.00", "1,50,000.00"),
-            ("02/01/2024", "ATM WDL BANDRA",  "10000.00",  "",         "1,40,000.00"),
-            ("03/01/2024", "SWIGGY ORDER",     "850.00",    "",         "1,39,150.00"),
-            ("04/01/2024", "NEFT FROM RAJESH", "",          "25000.00", "1,64,150.00"),
-            ("05/01/2024", "BPCL PETROL",      "3500.00",   "",         "1,60,650.00"),
+            ("01/01/2024", "SALARY CREDIT", "", "50000.00", "1,50,000.00"),
+            (
+                "02/01/2024",
+                "ATM WDL BANDRA",
+                "10000.00",
+                "",
+                "1,40,000.00",
+            ),
+            ("03/01/2024", "SWIGGY ORDER", "850.00", "", "1,39,150.00"),
+            (
+                "04/01/2024",
+                "NEFT FROM RAJESH",
+                "",
+                "25000.00",
+                "1,64,150.00",
+            ),
+            ("05/01/2024", "BPCL PETROL", "3500.00", "", "1,60,650.00"),
         ];
-        transactions.iter().map(|&(date, narr, dr, cr, bal)| {
-            let mut row = vec![
-                data_item(10.0,  date),
-                data_item(100.0, narr),
-            ];
-            if !dr.is_empty()  { row.push(data_item(280.0, dr)); }
-            if !cr.is_empty()  { row.push(data_item(360.0, cr)); }
-            row.push(data_item(440.0, bal));
-            row
-        }).collect()
+        transactions
+            .iter()
+            .map(|&(date, narr, dr, cr, bal)| {
+                let mut row = vec![data_item(10.0, date), data_item(100.0, narr)];
+                if !dr.is_empty() {
+                    row.push(data_item(280.0, dr));
+                }
+                if !cr.is_empty() {
+                    row.push(data_item(360.0, cr));
+                }
+                row.push(data_item(440.0, bal));
+                row
+            })
+            .collect()
     }
 
     #[test]
@@ -1466,8 +1751,11 @@ mod tests {
         let result = infer_header_from_data(&rows).expect("should infer");
         assert!(result.col_x.date.is_some(), "date column inferred");
         // date bucket ≈ x=10
-        assert!((result.col_x.date.unwrap() - 10.0).abs() < 5.0,
-            "date x ≈ 10, got {}", result.col_x.date.unwrap());
+        assert!(
+            (result.col_x.date.unwrap() - 10.0).abs() < 5.0,
+            "date x ≈ 10, got {}",
+            result.col_x.date.unwrap()
+        );
     }
 
     #[test]
@@ -1486,29 +1774,39 @@ mod tests {
         let rows = standard_data_rows();
         let result = infer_header_from_data(&rows).expect("should infer");
         assert!(result.hdr_idx.is_none(), "no real header → hdr_idx = None");
-        assert!(result.hdr_row.is_empty(), "hdr_row empty for inferred layout");
+        assert!(
+            result.hdr_row.is_empty(),
+            "hdr_row empty for inferred layout"
+        );
     }
 
     #[test]
     fn infer_requires_two_date_rows() {
         // Only one date row → returns None
-        let rows = vec![
-            data_row(&[(10.0, "01/01/2024"), (100.0, "SALARY"), (300.0, "50000.00")]),
-        ];
-        assert!(infer_header_from_data(&rows).is_none(), "need ≥ 2 date rows");
+        let rows = vec![data_row(&[
+            (10.0, "01/01/2024"),
+            (100.0, "SALARY"),
+            (300.0, "50000.00"),
+        ])];
+        assert!(
+            infer_header_from_data(&rows).is_none(),
+            "need ≥ 2 date rows"
+        );
     }
 
     #[test]
     fn infer_detects_cr_dr_balance() {
         // BOB-style: balance column uses "22,95,856.02Cr" suffix
-        let rows: Vec<Vec<PdfItem>> = (0..3).map(|i| {
-            vec![
-                data_item(10.0,  &format!("0{}/01/2024", i+1)),
-                data_item(100.0, "NARRATION TEXT HERE"),
-                data_item(280.0, "5000.00"),
-                data_item(400.0, &format!("{},000.00Cr", 95 + i)),
-            ]
-        }).collect();
+        let rows: Vec<Vec<PdfItem>> = (0..3)
+            .map(|i| {
+                vec![
+                    data_item(10.0, &format!("0{}/01/2024", i + 1)),
+                    data_item(100.0, "NARRATION TEXT HERE"),
+                    data_item(280.0, "5000.00"),
+                    data_item(400.0, &format!("{},000.00Cr", 95 + i)),
+                ]
+            })
+            .collect();
         let result = infer_header_from_data(&rows).expect("should infer");
         assert!(result.col_x.balance.is_some(), "Cr-suffix column → balance");
         assert!((result.col_x.balance.unwrap() - 400.0).abs() < 5.0);
@@ -1517,21 +1815,27 @@ mod tests {
     #[test]
     fn infer_utr_column_not_treated_as_amount() {
         // UTR numbers (>10 int digits) should NOT be classified as debit/credit.
-        let rows: Vec<Vec<PdfItem>> = (0..3).map(|i| {
-            vec![
-                data_item(10.0,  &format!("0{}/01/2024", i+1)),
-                data_item(100.0, "NEFT PAYMENT"),
-                data_item(200.0, "303213675227.00"), // 12 int digits → refAmt
-                data_item(300.0, "5000.00"),
-                data_item(400.0, "95000.00"),
-            ]
-        }).collect();
+        let rows: Vec<Vec<PdfItem>> = (0..3)
+            .map(|i| {
+                vec![
+                    data_item(10.0, &format!("0{}/01/2024", i + 1)),
+                    data_item(100.0, "NEFT PAYMENT"),
+                    data_item(200.0, "303213675227.00"), // 12 int digits → refAmt
+                    data_item(300.0, "5000.00"),
+                    data_item(400.0, "95000.00"),
+                ]
+            })
+            .collect();
         let result = infer_header_from_data(&rows).expect("should infer");
         // x=200 (UTR) should not be assigned to debit or credit
         let utr_x = 200.0;
         let assigned_utr = [result.col_x.debit, result.col_x.credit]
-            .iter().flatten()
+            .iter()
+            .flatten()
             .any(|&x| (x - utr_x).abs() < 5.0);
-        assert!(!assigned_utr, "UTR/ref column x=200 must not be debit or credit");
+        assert!(
+            !assigned_utr,
+            "UTR/ref column x=200 must not be debit or credit"
+        );
     }
 }

@@ -240,7 +240,11 @@ pub fn get_or_create_device_info(conn: &Connection) -> Result<DeviceInfo> {
     conn.execute(
         "INSERT INTO device_info (id, device_id, machine_fingerprint, fingerprint_inputs)
          VALUES (1, ?1, ?2, ?3)",
-        rusqlite::params![info.device_id, info.machine_fingerprint, info.fingerprint_inputs_json],
+        rusqlite::params![
+            info.device_id,
+            info.machine_fingerprint,
+            info.fingerprint_inputs_json
+        ],
     )
     .context("get_or_create_device_info insert")?;
     Ok(info)
@@ -307,7 +311,9 @@ mod tests {
         second.status = "active".to_string();
         save_local_license(&conn, &second).unwrap();
 
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM local_license", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM local_license", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 1, "must stay a single row (CHECK (id = 1) + upsert)");
         assert_eq!(load_local_license(&conn).unwrap().unwrap().status, "active");
     }
@@ -407,7 +413,10 @@ mod tests {
         let conn = open_migrated();
         let first = get_or_create_device_info(&conn).unwrap();
         let second = get_or_create_device_info(&conn).unwrap();
-        assert_eq!(first.device_id, second.device_id, "must not regenerate on second call");
+        assert_eq!(
+            first.device_id, second.device_id,
+            "must not regenerate on second call"
+        );
         assert_eq!(first.machine_fingerprint, second.machine_fingerprint);
     }
 
@@ -434,7 +443,11 @@ mod tests {
         let conn = open_migrated();
         log_validation(&conn, "Active", true, "server confirmed").unwrap();
         log_validation(&conn, "ActiveOfflineGrace", false, "3 days remaining").unwrap();
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM license_validation_log", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM license_validation_log", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(count, 2);
     }
 }

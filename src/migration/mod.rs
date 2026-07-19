@@ -59,15 +59,9 @@ pub use report::{EntityReport, MigrationReport};
 /// Tunables for a migration run. `skip_backup` exists only for tests that
 /// operate on an in-memory database (which has no file to back up) — real
 /// invocations must always leave it `false`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MigrationOptions {
     pub skip_backup: bool,
-}
-
-impl Default for MigrationOptions {
-    fn default() -> Self {
-        MigrationOptions { skip_backup: false }
-    }
 }
 
 /// Detect what a candidate export file contains without importing anything —

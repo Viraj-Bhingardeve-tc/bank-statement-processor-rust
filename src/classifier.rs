@@ -2,8 +2,8 @@
 // Ports App._classify(), _kwMatch(), _detectGST(), _inferVoucherType(),
 // _extractPartyName(), and _detectDuplicates() from the original app.js.
 
-use crate::parser::{Transaction, TransactionStatus, VoucherType};
 use crate::db::ClassificationRule;
+use crate::parser::{Transaction, TransactionStatus, VoucherType};
 use crate::text_safety::{find_ascii_ci, floor_char_boundary, safe_prefix};
 
 // ── Public entry point ─────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ use crate::text_safety::{find_ascii_ci, floor_char_boundary, safe_prefix};
 /// from the GST engine's suggested expense ledger.
 /// Returns the number of transactions whose status changed.
 pub fn classify_all(
-    txns: &mut Vec<Transaction>,
+    txns: &mut [Transaction],
     bank_ledger: &str,
     rules: &[ClassificationRule],
     run_dedup: bool,
@@ -31,27 +31,41 @@ pub fn classify_all(
 ) -> usize {
     let mut changed = 0;
     for t in txns.iter_mut() {
-        if t.is_opening_balance { continue; }
+        if t.is_opening_balance {
+            continue;
+        }
         // Don't overwrite user-confirmed rows
-        if matches!(t.status, TransactionStatus::Classified) && t.confidence >= 1.0 { continue; }
+        if matches!(t.status, TransactionStatus::Classified) && t.confidence >= 1.0 {
+            continue;
+        }
         // Don't overwrite AI classifications, even below confidence 1.0 — mirrors
         // Electron's explicit `classifiedBy === 'ai'` guard (app.js:554), since AI
         // confidence comes from the model and isn't guaranteed to be 1.0.
-        if matches!(t.status, TransactionStatus::Classified) && t.classification_source == "ai" { continue; }
+        if matches!(t.status, TransactionStatus::Classified) && t.classification_source == "ai" {
+            continue;
+        }
         // Don't overwrite suspense
-        if matches!(t.status, TransactionStatus::Suspense) { continue; }
+        if matches!(t.status, TransactionStatus::Suspense) {
+            continue;
+        }
 
         let before_status = t.status.clone();
         classify_one(t, bank_ledger, rules, gst_enabled, gst_auto_ledgers);
-        if t.status != before_status { changed += 1; }
+        if t.status != before_status {
+            changed += 1;
+        }
     }
-    if run_dedup { detect_duplicates(txns); }
+    if run_dedup {
+        detect_duplicates(txns);
+    }
     changed
 }
 
 /// Apply stored classification rules — returns matched rule or None.
 fn apply_rules<'a>(upper: &str, rules: &'a [ClassificationRule]) -> Option<&'a ClassificationRule> {
-    rules.iter().find(|r| !r.pattern.is_empty() && upper.contains(&r.pattern.to_uppercase()))
+    rules
+        .iter()
+        .find(|r| !r.pattern.is_empty() && upper.contains(&r.pattern.to_uppercase()))
 }
 
 /// Classify a single transaction: stored rules → keyword heuristics.
@@ -66,28 +80,32 @@ fn classify_one(
 
     // 1. Stored user rules (highest priority)
     if let Some(rule) = apply_rules(&upper, rules) {
-        if !rule.vendor.is_empty()       { t.vendor       = rule.vendor.clone(); }
-        if !rule.account_head.is_empty() { t.account_head = rule.account_head.clone(); }
+        if !rule.vendor.is_empty() {
+            t.vendor = rule.vendor.clone();
+        }
+        if !rule.account_head.is_empty() {
+            t.account_head = rule.account_head.clone();
+        }
         if !rule.txn_type.is_empty() {
             t.txn_type = match rule.txn_type.as_str() {
-                "Payment"  => VoucherType::Payment,
-                "Receipt"  => VoucherType::Receipt,
-                "Contra"   => VoucherType::Contra,
-                _          => t.txn_type.clone(),
+                "Payment" => VoucherType::Payment,
+                "Receipt" => VoucherType::Receipt,
+                "Contra" => VoucherType::Contra,
+                _ => t.txn_type.clone(),
             };
         }
         // Client-scoped rules are more trustworthy than global ones — mirrors
         // Electron's app.js:569-578 (client rule 0.9 vs global rule 0.6).
         t.confidence = if rule.client_id == 0 { 0.6 } else { 0.9 };
-        t.status     = TransactionStatus::Classified;
+        t.status = TransactionStatus::Classified;
         t.classification_source = "rule".to_string();
     // 2. Keyword heuristics
     } else if let Some(kw) = kw_match(&upper, t, bank_ledger) {
-        t.vendor       = kw.vendor;
+        t.vendor = kw.vendor;
         t.account_head = kw.head;
-        t.txn_type     = kw.txn_type;
-        t.confidence   = 0.45;
-        t.status       = TransactionStatus::Classified;
+        t.txn_type = kw.txn_type;
+        t.confidence = 0.45;
+        t.status = TransactionStatus::Classified;
         t.classification_source = "keyword".to_string();
     } else {
         // 3. Extract party name for unreviewed
@@ -95,7 +113,7 @@ fn classify_one(
         if !party.is_empty() {
             t.vendor = party;
         }
-        t.status     = TransactionStatus::Unreviewed;
+        t.status = TransactionStatus::Unreviewed;
         t.confidence = 0.0;
         t.classification_source = String::new();
     }
@@ -117,7 +135,9 @@ fn classify_one(
     // GST/IGST/CGST/SGST keyword, and auto-suggesting an expense ledger when blank.
     // Gated by the Settings screen's "Enable GST detection" toggle.
     if gst_enabled {
-        if let Some(gst) = crate::gst_engine::analyse(&t.narration, &t.reference, &t.vendor, t.debit, t.credit) {
+        if let Some(gst) =
+            crate::gst_engine::analyse(&t.narration, &t.reference, &t.vendor, t.debit, t.credit)
+        {
             if !t.tags.contains(&"GST".to_string()) {
                 t.tags.push("GST".to_string());
             }
@@ -134,16 +154,16 @@ fn classify_one(
             // used to be computed and immediately dropped (see
             // PRODUCTION_READINESS_AUDIT_2026-06-22.md Phase 2 item 3). Now
             // persisted on the transaction and consumed by export/accounting.rs.
-            t.gst_rate   = gst.gst_rate;
+            t.gst_rate = gst.gst_rate;
             t.gst_amount = gst.gst_amount;
-            t.gst_type   = gst.gst_type;
+            t.gst_type = gst.gst_type;
         }
     }
 }
 
 struct KwResult {
-    vendor:   String,
-    head:     String,
+    vendor: String,
+    head: String,
     txn_type: VoucherType,
 }
 
@@ -162,172 +182,524 @@ fn kw_match(upper: &str, t: &Transaction, bank_ledger: &str) -> Option<KwResult>
     }
 
     // ATM / Cash
-    kw!("Self", "Cash", VoucherType::Contra,
-        "ATM WDL","ATM-WDL","ATM CASH","ATM/","CASH WITHDRAWAL","CASH WDL","CASH DEP");
+    kw!(
+        "Self",
+        "Cash",
+        VoucherType::Contra,
+        "ATM WDL",
+        "ATM-WDL",
+        "ATM CASH",
+        "ATM/",
+        "CASH WITHDRAWAL",
+        "CASH WDL",
+        "CASH DEP"
+    );
 
     // Bank interest earned
-    kw!(bank_ledger, "Interest Income", VoucherType::Receipt,
-        "INTEREST CREDITED","INT.CR","INTEREST CR","INT CR","INTEREST CREDIT",
-        "FD INTEREST","FD MATURITY","RD MATURITY","INTEREST ON FD");
+    kw!(
+        bank_ledger,
+        "Interest Income",
+        VoucherType::Receipt,
+        "INTEREST CREDITED",
+        "INT.CR",
+        "INTEREST CR",
+        "INT CR",
+        "INTEREST CREDIT",
+        "FD INTEREST",
+        "FD MATURITY",
+        "RD MATURITY",
+        "INTEREST ON FD"
+    );
 
     // Bank interest charged / bank fees
-    kw!(bank_ledger, "Bank Charges", VoucherType::Payment,
-        "INTEREST CHARGED","INT.DEB","INTEREST DR","INTEREST DEBIT",
-        "BANK CHARGES","SERVICE CHARGE","SMS CHARGES","ANNUAL FEE","LEDGER FOLIO",
-        "CHGS RECOVERED","MIN BAL CHGS","PROCESSING FEE","ACCOUNT MAINTENANCE",
-        "DEBIT CARD FEE","CREDIT CARD FEE","LOCKER CHARGES");
+    kw!(
+        bank_ledger,
+        "Bank Charges",
+        VoucherType::Payment,
+        "INTEREST CHARGED",
+        "INT.DEB",
+        "INTEREST DR",
+        "INTEREST DEBIT",
+        "BANK CHARGES",
+        "SERVICE CHARGE",
+        "SMS CHARGES",
+        "ANNUAL FEE",
+        "LEDGER FOLIO",
+        "CHGS RECOVERED",
+        "MIN BAL CHGS",
+        "PROCESSING FEE",
+        "ACCOUNT MAINTENANCE",
+        "DEBIT CARD FEE",
+        "CREDIT CARD FEE",
+        "LOCKER CHARGES"
+    );
 
     // GST payment
-    kw!("Government (GST)", "GST Payable", VoucherType::Payment,
-        "GST PAYMENT","GST PMT","IGST PMT","CGST PMT","SGST PMT",
-        "NSDL GST","GST CHALLAN");
+    kw!(
+        "Government (GST)",
+        "GST Payable",
+        VoucherType::Payment,
+        "GST PAYMENT",
+        "GST PMT",
+        "IGST PMT",
+        "CGST PMT",
+        "SGST PMT",
+        "NSDL GST",
+        "GST CHALLAN"
+    );
 
     // Income Tax / TDS
-    kw!("Income Tax Dept", "Income Tax Payable", VoucherType::Payment,
-        "INCOME TAX","ADVANCE TAX","SELF ASSESSMENT TAX","TDS PAYMENT","TDS PMT",
-        "CHALLAN 280","ITNS 280","TRACES TDS","TAX DEDUCTED");
+    kw!(
+        "Income Tax Dept",
+        "Income Tax Payable",
+        VoucherType::Payment,
+        "INCOME TAX",
+        "ADVANCE TAX",
+        "SELF ASSESSMENT TAX",
+        "TDS PAYMENT",
+        "TDS PMT",
+        "CHALLAN 280",
+        "ITNS 280",
+        "TRACES TDS",
+        "TAX DEDUCTED"
+    );
 
     // Salary / Payroll
-    kw!("Staff", "Salaries", VoucherType::Payment,
-        "SALARY","SAL/","SAL-","SALARY CREDIT","PAYROLL","WAGES");
+    kw!(
+        "Staff",
+        "Salaries",
+        VoucherType::Payment,
+        "SALARY",
+        "SAL/",
+        "SAL-",
+        "SALARY CREDIT",
+        "PAYROLL",
+        "WAGES"
+    );
 
     // Rent
-    kw!("Landlord", "Rent", VoucherType::Payment,
-        "RENT","RENTAL","LEASE PAYMENT","RENT PAYMENT");
+    kw!(
+        "Landlord",
+        "Rent",
+        VoucherType::Payment,
+        "RENT",
+        "RENTAL",
+        "LEASE PAYMENT",
+        "RENT PAYMENT"
+    );
 
     // Fuel
-    kw!("Fuel Station", "Fuel Expense", VoucherType::Payment,
-        "PETROL","DIESEL","FUEL","BPCL","HPCL","IOCL","INDIAN OIL",
-        "BHARAT PETRO","SHELL INDIA","HP PUMP","RELIANCE PETRO");
+    kw!(
+        "Fuel Station",
+        "Fuel Expense",
+        VoucherType::Payment,
+        "PETROL",
+        "DIESEL",
+        "FUEL",
+        "BPCL",
+        "HPCL",
+        "IOCL",
+        "INDIAN OIL",
+        "BHARAT PETRO",
+        "SHELL INDIA",
+        "HP PUMP",
+        "RELIANCE PETRO"
+    );
 
     // Telecom
-    if ["AIRTEL","VODAFONE","VODAFON","VI/","JIO","BSNL","MTNL",
-        "TATASKY","DISH TV","BROADBAND","JIOFIBER","TATA SKY"]
-        .iter().any(|k| upper.contains(k))
+    if [
+        "AIRTEL",
+        "VODAFONE",
+        "VODAFON",
+        "VI/",
+        "JIO",
+        "BSNL",
+        "MTNL",
+        "TATASKY",
+        "DISH TV",
+        "BROADBAND",
+        "JIOFIBER",
+        "TATA SKY",
+    ]
+    .iter()
+    .any(|k| upper.contains(k))
     {
-        let vendor = if upper.contains("AIRTEL") { "Airtel" }
-            else if upper.contains("JIO")        { "Jio" }
-            else if upper.contains("BSNL")       { "BSNL" }
-            else if upper.contains("VODAFONE") || upper.contains("VI/") { "Vodafone" }
-            else                                 { "Telecom" };
-        return Some(KwResult { vendor: vendor.to_string(), head: "Telephone Expense".to_string(), txn_type: VoucherType::Payment });
+        let vendor = if upper.contains("AIRTEL") {
+            "Airtel"
+        } else if upper.contains("JIO") {
+            "Jio"
+        } else if upper.contains("BSNL") {
+            "BSNL"
+        } else if upper.contains("VODAFONE") || upper.contains("VI/") {
+            "Vodafone"
+        } else {
+            "Telecom"
+        };
+        return Some(KwResult {
+            vendor: vendor.to_string(),
+            head: "Telephone Expense".to_string(),
+            txn_type: VoucherType::Payment,
+        });
     }
 
     // Electricity
-    kw!("Electricity Board", "Electricity Charges", VoucherType::Payment,
-        "MSEDCL","BESCOM","BSES","TNEB","WBSEDCL","TORRENT POWER",
-        "TPDDL","TANGEDCO","ELECTRICITY","ELECTRIC BILL","POWER BILL");
+    kw!(
+        "Electricity Board",
+        "Electricity Charges",
+        VoucherType::Payment,
+        "MSEDCL",
+        "BESCOM",
+        "BSES",
+        "TNEB",
+        "WBSEDCL",
+        "TORRENT POWER",
+        "TPDDL",
+        "TANGEDCO",
+        "ELECTRICITY",
+        "ELECTRIC BILL",
+        "POWER BILL"
+    );
 
     // Insurance
-    kw!("Insurance Co", "Insurance Premium", VoucherType::Payment,
-        "LIC PREMIUM","LIC/","HDFC LIFE","MAX LIFE","ICICI PRU",
-        "STAR HEALTH","NIVA BUPA","NEW INDIA ASSURANCE","UNITED INDIA",
-        "ORIENTAL INS","INSURANCE PREMIUM","INS PREM");
+    kw!(
+        "Insurance Co",
+        "Insurance Premium",
+        VoucherType::Payment,
+        "LIC PREMIUM",
+        "LIC/",
+        "HDFC LIFE",
+        "MAX LIFE",
+        "ICICI PRU",
+        "STAR HEALTH",
+        "NIVA BUPA",
+        "NEW INDIA ASSURANCE",
+        "UNITED INDIA",
+        "ORIENTAL INS",
+        "INSURANCE PREMIUM",
+        "INS PREM"
+    );
 
     // Food delivery
-    if ["SWIGGY","ZOMATO","UBER EATS","DUNZO"].iter().any(|k| upper.contains(k)) {
-        let vendor = if upper.contains("SWIGGY") { "Swiggy" }
-            else if upper.contains("ZOMATO")     { "Zomato" }
-            else                                 { "Food Delivery" };
-        return Some(KwResult { vendor: vendor.to_string(), head: "Food Expense".to_string(), txn_type: VoucherType::Payment });
+    if ["SWIGGY", "ZOMATO", "UBER EATS", "DUNZO"]
+        .iter()
+        .any(|k| upper.contains(k))
+    {
+        let vendor = if upper.contains("SWIGGY") {
+            "Swiggy"
+        } else if upper.contains("ZOMATO") {
+            "Zomato"
+        } else {
+            "Food Delivery"
+        };
+        return Some(KwResult {
+            vendor: vendor.to_string(),
+            head: "Food Expense".to_string(),
+            txn_type: VoucherType::Payment,
+        });
     }
 
     // Daily food / restaurants
-    kw!("Food / Dining", "Food Expense", VoucherType::Payment,
-        "BREAD","BAKERY","BISCUIT","CANTEEN","TIFFIN","LUNCH",
-        "DINNER","BREAKFAST","SNACKS","CHAI","TEA STALL","FOOD",
-        "RESTAURANT","HOTEL DINING","MESS","DHABA","CAFE",
-        "HALDIRAM","DOMINOS","PIZZA HUT","MCDONALDS","KFC",
-        "SUBWAY","BURGER KING","STARBUCKS","CHAAYOS");
+    kw!(
+        "Food / Dining",
+        "Food Expense",
+        VoucherType::Payment,
+        "BREAD",
+        "BAKERY",
+        "BISCUIT",
+        "CANTEEN",
+        "TIFFIN",
+        "LUNCH",
+        "DINNER",
+        "BREAKFAST",
+        "SNACKS",
+        "CHAI",
+        "TEA STALL",
+        "FOOD",
+        "RESTAURANT",
+        "HOTEL DINING",
+        "MESS",
+        "DHABA",
+        "CAFE",
+        "HALDIRAM",
+        "DOMINOS",
+        "PIZZA HUT",
+        "MCDONALDS",
+        "KFC",
+        "SUBWAY",
+        "BURGER KING",
+        "STARBUCKS",
+        "CHAAYOS"
+    );
 
     // Grocery
-    kw!("Grocery / Kirana", "Grocery Expense", VoucherType::Payment,
-        "BIGBASKET","BIG BAZAAR","DMART","D-MART","RELIANCE FRESH",
-        "RELIANCE SMART","MORE MEGASTORE","STAR BAZAAR","JIOMART",
-        "GROFERS","BLINKIT","ZEPTO","INSTAMART","MILKBASKET",
-        "GROCERY","KIRANA","SABZI","VEGETABLE","FRUITS","DAIRY",
-        "MILK","PANEER","GHEE","OIL","RICE","WHEAT","ATTA",
-        "PULSES","MASALA","SPICES","PROVISION","BHAJI");
+    kw!(
+        "Grocery / Kirana",
+        "Grocery Expense",
+        VoucherType::Payment,
+        "BIGBASKET",
+        "BIG BAZAAR",
+        "DMART",
+        "D-MART",
+        "RELIANCE FRESH",
+        "RELIANCE SMART",
+        "MORE MEGASTORE",
+        "STAR BAZAAR",
+        "JIOMART",
+        "GROFERS",
+        "BLINKIT",
+        "ZEPTO",
+        "INSTAMART",
+        "MILKBASKET",
+        "GROCERY",
+        "KIRANA",
+        "SABZI",
+        "VEGETABLE",
+        "FRUITS",
+        "DAIRY",
+        "MILK",
+        "PANEER",
+        "GHEE",
+        "OIL",
+        "RICE",
+        "WHEAT",
+        "ATTA",
+        "PULSES",
+        "MASALA",
+        "SPICES",
+        "PROVISION",
+        "BHAJI"
+    );
 
     // Medical / Pharmacy
-    kw!("Medical", "Medical Expense", VoucherType::Payment,
-        "MEDPLUS","APOLLO PHARMACY","NETMEDS","TATA 1MG","1MG",
-        "PHARMEASY","HEALTHKART","PRACTO","LYBRATE");
+    kw!(
+        "Medical",
+        "Medical Expense",
+        VoucherType::Payment,
+        "MEDPLUS",
+        "APOLLO PHARMACY",
+        "NETMEDS",
+        "TATA 1MG",
+        "1MG",
+        "PHARMEASY",
+        "HEALTHKART",
+        "PRACTO",
+        "LYBRATE"
+    );
 
     // Online shopping
-    if ["AMAZON","FLIPKART","MYNTRA","MEESHO","SNAPDEAL","NYKAA","AJIO","SHOPCLUES"]
-        .iter().any(|k| upper.contains(k))
+    if [
+        "AMAZON",
+        "FLIPKART",
+        "MYNTRA",
+        "MEESHO",
+        "SNAPDEAL",
+        "NYKAA",
+        "AJIO",
+        "SHOPCLUES",
+    ]
+    .iter()
+    .any(|k| upper.contains(k))
     {
-        let vendor = if upper.contains("AMAZON")   { "Amazon" }
-            else if upper.contains("FLIPKART")     { "Flipkart" }
-            else if upper.contains("MYNTRA")       { "Myntra" }
-            else if upper.contains("MEESHO")       { "Meesho" }
-            else                                   { "Online Shopping" };
-        return Some(KwResult { vendor: vendor.to_string(), head: "Office Expense".to_string(), txn_type: VoucherType::Payment });
+        let vendor = if upper.contains("AMAZON") {
+            "Amazon"
+        } else if upper.contains("FLIPKART") {
+            "Flipkart"
+        } else if upper.contains("MYNTRA") {
+            "Myntra"
+        } else if upper.contains("MEESHO") {
+            "Meesho"
+        } else {
+            "Online Shopping"
+        };
+        return Some(KwResult {
+            vendor: vendor.to_string(),
+            head: "Office Expense".to_string(),
+            txn_type: VoucherType::Payment,
+        });
     }
 
     // Software / SaaS
-    if ["GOOGLE","MICROSOFT","ZOOM","DROPBOX","CANVA","ADOBE","SLACK","NOTION",
-        "GODADDY","BLUEHOST","HOSTINGER","GSUITE","WORKSPACE","OFFICE 365",
-        "AWS","AZURE","NETLIFY","VERCEL"].iter().any(|k| upper.contains(k))
+    if [
+        "GOOGLE",
+        "MICROSOFT",
+        "ZOOM",
+        "DROPBOX",
+        "CANVA",
+        "ADOBE",
+        "SLACK",
+        "NOTION",
+        "GODADDY",
+        "BLUEHOST",
+        "HOSTINGER",
+        "GSUITE",
+        "WORKSPACE",
+        "OFFICE 365",
+        "AWS",
+        "AZURE",
+        "NETLIFY",
+        "VERCEL",
+    ]
+    .iter()
+    .any(|k| upper.contains(k))
     {
-        let vendor = if upper.contains("GOOGLE")    { "Google" }
-            else if upper.contains("MICROSOFT")     { "Microsoft" }
-            else if upper.contains("ZOOM")          { "Zoom" }
-            else if upper.contains("AWS")           { "Amazon AWS" }
-            else                                    { "Software" };
-        return Some(KwResult { vendor: vendor.to_string(), head: "Software Expense".to_string(), txn_type: VoucherType::Payment });
+        let vendor = if upper.contains("GOOGLE") {
+            "Google"
+        } else if upper.contains("MICROSOFT") {
+            "Microsoft"
+        } else if upper.contains("ZOOM") {
+            "Zoom"
+        } else if upper.contains("AWS") {
+            "Amazon AWS"
+        } else {
+            "Software"
+        };
+        return Some(KwResult {
+            vendor: vendor.to_string(),
+            head: "Software Expense".to_string(),
+            txn_type: VoucherType::Payment,
+        });
     }
 
     // Ride-hailing
-    if ["UBER","OLA CAB","OLA/","RAPIDO","MERU"].iter().any(|k| upper.contains(k)) {
-        let vendor = if upper.contains("UBER") { "Uber" }
-            else if upper.contains("OLA")      { "Ola" }
-            else                               { "Transport" };
-        return Some(KwResult { vendor: vendor.to_string(), head: "Travelling Expense".to_string(), txn_type: VoucherType::Payment });
+    if ["UBER", "OLA CAB", "OLA/", "RAPIDO", "MERU"]
+        .iter()
+        .any(|k| upper.contains(k))
+    {
+        let vendor = if upper.contains("UBER") {
+            "Uber"
+        } else if upper.contains("OLA") {
+            "Ola"
+        } else {
+            "Transport"
+        };
+        return Some(KwResult {
+            vendor: vendor.to_string(),
+            head: "Travelling Expense".to_string(),
+            txn_type: VoucherType::Payment,
+        });
     }
 
     // Travel / Hotels / Airlines
-    kw!("Travel", "Travelling Expense", VoucherType::Payment,
-        "IRCTC","RAILWAY","INDIGO","AIR INDIA","MAKEMYTRIP","YATRA",
-        "CLEARTRIP","GOIBIBO","VISTARA","SPICEJET","AKASA");
+    kw!(
+        "Travel",
+        "Travelling Expense",
+        VoucherType::Payment,
+        "IRCTC",
+        "RAILWAY",
+        "INDIGO",
+        "AIR INDIA",
+        "MAKEMYTRIP",
+        "YATRA",
+        "CLEARTRIP",
+        "GOIBIBO",
+        "VISTARA",
+        "SPICEJET",
+        "AKASA"
+    );
 
     // Professional fees
-    kw!("", "Professional Fees", VoucherType::Payment,
-        "PROFESSIONAL FEES","CONSULTING","CA FEES","AUDIT FEES",
-        "LEGAL FEES","ADVOCATE FEE","CHARTERED ACCOUNTANT");
+    kw!(
+        "",
+        "Professional Fees",
+        VoucherType::Payment,
+        "PROFESSIONAL FEES",
+        "CONSULTING",
+        "CA FEES",
+        "AUDIT FEES",
+        "LEGAL FEES",
+        "ADVOCATE FEE",
+        "CHARTERED ACCOUNTANT"
+    );
 
     // EMI / Loan
-    kw!("Bank/NBFC", "Loan Account", VoucherType::Payment,
-        "EMI","LOAN EMI","HOME LOAN EMI","CAR LOAN","PERSONAL LOAN",
-        "BAJAJ FINSERV","HDFC LOAN","ICICI LOAN","SBI LOAN");
+    kw!(
+        "Bank/NBFC",
+        "Loan Account",
+        VoucherType::Payment,
+        "EMI",
+        "LOAN EMI",
+        "HOME LOAN EMI",
+        "CAR LOAN",
+        "PERSONAL LOAN",
+        "BAJAJ FINSERV",
+        "HDFC LOAN",
+        "ICICI LOAN",
+        "SBI LOAN"
+    );
 
     // Investments
-    kw!("Investment", "Investments", VoucherType::Payment,
-        "MUTUAL FUND","SIP","ZERODHA","GROWW","UPSTOX",
-        "ANGEL BROKING","ICICIDIRECT","HDFC SEC","KOTAK SEC",
-        "MOTILAL","NUVAMA","PAYTM MONEY");
+    kw!(
+        "Investment",
+        "Investments",
+        VoucherType::Payment,
+        "MUTUAL FUND",
+        "SIP",
+        "ZERODHA",
+        "GROWW",
+        "UPSTOX",
+        "ANGEL BROKING",
+        "ICICIDIRECT",
+        "HDFC SEC",
+        "KOTAK SEC",
+        "MOTILAL",
+        "NUVAMA",
+        "PAYTM MONEY"
+    );
 
     // Dividend
-    kw!("Investment", "Dividend Income", VoucherType::Receipt,
-        "DIVIDEND","DIVIDEND CREDIT");
+    kw!(
+        "Investment",
+        "Dividend Income",
+        VoucherType::Receipt,
+        "DIVIDEND",
+        "DIVIDEND CREDIT"
+    );
 
     // Advertisement
-    kw!("Advertisement", "Advertisement Expense", VoucherType::Payment,
-        "GOOGLE ADS","FACEBOOK ADS","META ADS","INSTAGRAM ADS",
-        "YOUTUBE ADS","DIGITAL MARKETING");
+    kw!(
+        "Advertisement",
+        "Advertisement Expense",
+        VoucherType::Payment,
+        "GOOGLE ADS",
+        "FACEBOOK ADS",
+        "META ADS",
+        "INSTAGRAM ADS",
+        "YOUTUBE ADS",
+        "DIGITAL MARKETING"
+    );
 
     // NEFT/RTGS/IMPS/UPI — extract party name + direction
-    if ["NEFT","INFT","RTGS","IMPS","UPI","NACH","ECS","ACH","BBPS"]
-        .iter().any(|k| upper.contains(k))
+    if [
+        "NEFT", "INFT", "RTGS", "IMPS", "UPI", "NACH", "ECS", "ACH", "BBPS",
+    ]
+    .iter()
+    .any(|k| upper.contains(k))
     {
         let party = extract_party_name(&t.narration);
         let (head, tp) = if t.credit.is_some() && t.debit.is_none() {
-            (if party.is_empty() { "Sundry Debtors".to_string() } else { party.clone() }, VoucherType::Receipt)
+            (
+                if party.is_empty() {
+                    "Sundry Debtors".to_string()
+                } else {
+                    party.clone()
+                },
+                VoucherType::Receipt,
+            )
         } else {
-            (if party.is_empty() { "Sundry Creditors".to_string() } else { party.clone() }, VoucherType::Payment)
+            (
+                if party.is_empty() {
+                    "Sundry Creditors".to_string()
+                } else {
+                    party.clone()
+                },
+                VoucherType::Payment,
+            )
         };
-        return Some(KwResult { vendor: party, head, txn_type: tp });
+        return Some(KwResult {
+            vendor: party,
+            head,
+            txn_type: tp,
+        });
     }
 
     None
@@ -339,7 +711,9 @@ pub fn detect_gst(narration: &str, reference: &str) -> Option<String> {
     if n.contains("IGST") || n.contains("CGST") || n.contains("SGST") {
         return Some("GST".to_string());
     }
-    if n.contains("GST") && (n.contains("PAY") || n.contains("PMT") || n.contains("REFUND") || n.contains("CHALLAN")) {
+    if n.contains("GST")
+        && (n.contains("PAY") || n.contains("PMT") || n.contains("REFUND") || n.contains("CHALLAN"))
+    {
         return Some("GST".to_string());
     }
     // GSTIN pattern: 15-char alphanumeric starting with 2 digits
@@ -353,13 +727,15 @@ pub fn detect_gst(narration: &str, reference: &str) -> Option<String> {
         if !n.is_char_boundary(i) || !n.is_char_boundary(i + 15) {
             continue;
         }
-        let chunk = &n[i..i+15];
+        let chunk = &n[i..i + 15];
         // `i`/`i+15` landing on boundaries only guarantees `chunk` itself is
         // a valid &str — it says nothing about the *internal* cut points
         // (2, 7, 11) the sub-slices below need, which can still fall
         // mid-character even then (Phase 4L.2.2).
         if chunk.len() == 15
-            && chunk.is_char_boundary(2) && chunk.is_char_boundary(7) && chunk.is_char_boundary(11)
+            && chunk.is_char_boundary(2)
+            && chunk.is_char_boundary(7)
+            && chunk.is_char_boundary(11)
             && chunk[..2].chars().all(|c| c.is_ascii_digit())
             && chunk[2..7].chars().all(|c| c.is_ascii_alphabetic())
             && chunk[7..11].chars().all(|c| c.is_ascii_digit())
@@ -368,9 +744,12 @@ pub fn detect_gst(narration: &str, reference: &str) -> Option<String> {
             return Some("GST".to_string());
         }
     }
-    if n.contains("INCOME TAX") || n.contains("ADVANCE TAX")
-        || n.contains("TDS PMT") || n.contains("TRACES")
-        || n.contains("CHALLAN 28") {
+    if n.contains("INCOME TAX")
+        || n.contains("ADVANCE TAX")
+        || n.contains("TDS PMT")
+        || n.contains("TRACES")
+        || n.contains("CHALLAN 28")
+    {
         return Some("TAX".to_string());
     }
     None
@@ -383,52 +762,142 @@ pub fn infer_voucher_type(t: &Transaction, upper: &str) -> VoucherType {
     let atm_re = ATM_RE.get_or_init(|| {
         Regex::new(r"\bATM\b|CASH\s*(DEP|WDL|WITHDRAWAL)|\bSELF\s*TRANSFER\b").unwrap()
     });
-    if atm_re.is_match(upper) { return VoucherType::Contra; }
-    if t.credit.is_some() && t.debit.is_none() { return VoucherType::Receipt; }
-    if t.debit.is_some()  && t.credit.is_none() { return VoucherType::Payment; }
+    if atm_re.is_match(upper) {
+        return VoucherType::Contra;
+    }
+    if t.credit.is_some() && t.debit.is_none() {
+        return VoucherType::Receipt;
+    }
+    if t.debit.is_some() && t.credit.is_none() {
+        return VoucherType::Payment;
+    }
     VoucherType::Unknown
 }
 
 /// Extract party name from NEFT/RTGS/UPI-style narrations.
 pub fn extract_party_name(narration: &str) -> String {
     const SKIP: &[&str] = &[
-        "NEFT","RTGS","IMPS","UPI","INFT","NACH","ECS","ACH","BBPS",
-        "CR","DR","CREDIT","DEBIT","INWARD","OUTWARD",
-        "BY","TO","FROM","VIA","FOR","PER","OF","AT","ON","IN",
-        "REF","UTR","TXN","NO","NUMBER","TRF",
-        "TRANSFER","PAYMENT","RECEIVED","PAID","SENT",
-        "P2P","P2M","P2B","P2A",
-        "ONLINE","NET","BANKING","INB","MB",
-        "BANK","BRANCH","IFSC",
-        "CHQ","CHEQUE","DEP","DEPOSIT","WDL","WITHDRAWAL","WITH",
-        "INT","INTEREST","CLG","CLEARING","CL",
-        "SB","CA","OD","FD","RD","SAVINGS","CURRENT",
-        "A/C","AC","ACCT","ACCOUNT",
-        "AMT","AMOUNT","BAL","BALANCE",
-        "CHRGS","CHGS","CHARGES","CHARGE","LEVY",
+        "NEFT",
+        "RTGS",
+        "IMPS",
+        "UPI",
+        "INFT",
+        "NACH",
+        "ECS",
+        "ACH",
+        "BBPS",
+        "CR",
+        "DR",
+        "CREDIT",
+        "DEBIT",
+        "INWARD",
+        "OUTWARD",
+        "BY",
+        "TO",
+        "FROM",
+        "VIA",
+        "FOR",
+        "PER",
+        "OF",
+        "AT",
+        "ON",
+        "IN",
+        "REF",
+        "UTR",
+        "TXN",
+        "NO",
+        "NUMBER",
+        "TRF",
+        "TRANSFER",
+        "PAYMENT",
+        "RECEIVED",
+        "PAID",
+        "SENT",
+        "P2P",
+        "P2M",
+        "P2B",
+        "P2A",
+        "ONLINE",
+        "NET",
+        "BANKING",
+        "INB",
+        "MB",
+        "BANK",
+        "BRANCH",
+        "IFSC",
+        "CHQ",
+        "CHEQUE",
+        "DEP",
+        "DEPOSIT",
+        "WDL",
+        "WITHDRAWAL",
+        "WITH",
+        "INT",
+        "INTEREST",
+        "CLG",
+        "CLEARING",
+        "CL",
+        "SB",
+        "CA",
+        "OD",
+        "FD",
+        "RD",
+        "SAVINGS",
+        "CURRENT",
+        "A/C",
+        "AC",
+        "ACCT",
+        "ACCOUNT",
+        "AMT",
+        "AMOUNT",
+        "BAL",
+        "BALANCE",
+        "CHRGS",
+        "CHGS",
+        "CHARGES",
+        "CHARGE",
+        "LEVY",
     ];
     const BANK_ABBR: &[&str] = &[
-        "HDFC","HDFCBANK","ICICI","ICICIB","SBI","SBIN","AXIS","AXISB",
-        "KOTAK","PNB","BOI","BOB","IOB","CANARA","UNION","IDBI","YES",
-        "RBL","FEDERAL","INDUSIND","UCO","PAYTM","PHONEPE","GPAY",
+        "HDFC", "HDFCBANK", "ICICI", "ICICIB", "SBI", "SBIN", "AXIS", "AXISB", "KOTAK", "PNB",
+        "BOI", "BOB", "IOB", "CANARA", "UNION", "IDBI", "YES", "RBL", "FEDERAL", "INDUSIND", "UCO",
+        "PAYTM", "PHONEPE", "GPAY",
     ];
 
     let is_junk = |s: &str| -> bool {
         let up = s.to_uppercase();
         let up = up.trim();
-        if s.len() < 2 { return true; }
-        if SKIP.contains(&up) { return true; }
-        if s.chars().all(|c| c.is_ascii_digit()) { return true; }
-        if s.contains('@') { return true; }
+        if s.len() < 2 {
+            return true;
+        }
+        if SKIP.contains(&up) {
+            return true;
+        }
+        if s.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        if s.contains('@') {
+            return true;
+        }
         // IFSC code pattern: 4 alpha + 0 + 6 alphanumeric
         // `s.is_char_boundary(4)`: `s` is a raw narration token, not
         // guaranteed ASCII — a real IFSC code's first 4 chars always are,
         // so a non-boundary at byte 4 already means this isn't one; guards
         // `&s[..4]` from panicking on a token containing a multi-byte
         // character in its first 4 bytes (Phase 4L.2.2).
-        if s.len() == 11 && s.is_char_boundary(4) && s[..4].chars().all(|c| c.is_ascii_alphabetic()) && s.chars().nth(4) == Some('0') { return true; }
-        if s.len() >= 14 && s.chars().all(|c| c.is_ascii_alphanumeric()) { return true; }
-        if s.len() <= 2 && s.chars().all(|c| c.is_ascii_alphabetic()) { return true; }
+        if s.len() == 11
+            && s.is_char_boundary(4)
+            && s[..4].chars().all(|c| c.is_ascii_alphabetic())
+            && s.chars().nth(4) == Some('0')
+        {
+            return true;
+        }
+        if s.len() >= 14 && s.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return true;
+        }
+        if s.len() <= 2 && s.chars().all(|c| c.is_ascii_alphabetic()) {
+            return true;
+        }
         false
     };
 
@@ -438,14 +907,24 @@ pub fn extract_party_name(narration: &str) -> String {
     let parts: Vec<&str> = narration.split(['/', '-', '|', ':']).collect();
     if parts.len() > 1 {
         let mut best: Option<(&str, i32)> = None;
-        for p in parts.iter().map(|s| s.trim()).filter(|s| !s.is_empty() && !is_junk(s)) {
+        for p in parts
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && !is_junk(s))
+        {
             let words: Vec<&str> = p.split_whitespace().collect();
             let mut score = (words.len() as i32) * 3;
-            if p.chars().any(|c| c.is_ascii_digit()) { score -= 2; }
-            if is_bank_abbr(p) || words.first().map_or(false, |w| is_bank_abbr(w)) { score -= 6; }
-            if words.len() == 1 && p.len() > 10 && p.chars().all(|c| c.is_ascii_alphanumeric()) { score -= 3; }
-            if score >= 3 {
-                if best.is_none() || score > best.unwrap().1 { best = Some((p, score)); }
+            if p.chars().any(|c| c.is_ascii_digit()) {
+                score -= 2;
+            }
+            if is_bank_abbr(p) || words.first().is_some_and(|w| is_bank_abbr(w)) {
+                score -= 6;
+            }
+            if words.len() == 1 && p.len() > 10 && p.chars().all(|c| c.is_ascii_alphanumeric()) {
+                score -= 3;
+            }
+            if score >= 3 && (best.is_none() || score > best.unwrap().1) {
+                best = Some((p, score));
             }
         }
         if let Some((name, _)) = best {
@@ -454,17 +933,29 @@ pub fn extract_party_name(narration: &str) -> String {
     }
 
     // Case 2: sentence-style — skip junk words and take first run of valid words
-    let words: Vec<&str> = narration.trim().split_whitespace().collect();
-    let is_ref_code = |w: &str| w.len() >= 9 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().all(|c| c.is_ascii_alphanumeric());
+    let words: Vec<&str> = narration.split_whitespace().collect();
+    let is_ref_code = |w: &str| {
+        w.len() >= 9
+            && w.chars().any(|c| c.is_ascii_digit())
+            && w.chars().all(|c| c.is_ascii_alphanumeric())
+    };
     let start = words.iter().position(|w| {
         let up = w.to_uppercase();
-        !SKIP.contains(&up.as_str()) && !w.chars().all(|c| c.is_ascii_digit()) && !w.contains('@') && !is_ref_code(w)
+        !SKIP.contains(&up.as_str())
+            && !w.chars().all(|c| c.is_ascii_digit())
+            && !w.contains('@')
+            && !is_ref_code(w)
     });
     if let Some(s) = start {
         let mut name_words: Vec<&str> = Vec::new();
         for w in words.iter().skip(s).take(6) {
             let up = w.to_uppercase();
-            if SKIP.contains(&up.as_str()) || w.chars().all(|c| c.is_ascii_digit()) || is_ref_code(w) { break; }
+            if SKIP.contains(&up.as_str())
+                || w.chars().all(|c| c.is_ascii_digit())
+                || is_ref_code(w)
+            {
+                break;
+            }
             name_words.push(w);
         }
         if !name_words.is_empty() {
@@ -492,7 +983,7 @@ fn normalize_vendor_name(name: &str) -> String {
         }
     }
     // Remove trailing "L PROP", "PROPR", "PROPRIETOR"
-    for suffix in &["L PROP","PROPR","PROPRIETOR"] {
+    for suffix in &["L PROP", "PROPR", "PROPRIETOR"] {
         let lower = s.to_lowercase();
         if let Some(pos) = lower.rfind(suffix) {
             if pos > 2 {
@@ -506,7 +997,7 @@ fn normalize_vendor_name(name: &str) -> String {
     if words.len() > 1 {
         if let Some(last) = words.last() {
             if last.len() <= 2 && last.chars().all(|c| c.is_ascii_uppercase()) {
-                s = words[..words.len()-1].join(" ");
+                s = words[..words.len() - 1].join(" ");
             }
         }
     }
@@ -514,44 +1005,62 @@ fn normalize_vendor_name(name: &str) -> String {
     let ws: Vec<&str> = s.split_whitespace().collect();
     if let Some(last) = ws.last() {
         if last.len() >= 6 && last.chars().all(|c| c.is_ascii_digit()) {
-            s = ws[..ws.len()-1].join(" ");
+            s = ws[..ws.len() - 1].join(" ");
         }
     }
     // Collapse and cap length
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if s.len() > 40 { safe_prefix(&s, 40).trim().to_string() } else { s }
+    if s.len() > 40 {
+        safe_prefix(&s, 40).trim().to_string()
+    } else {
+        s
+    }
 }
 
 /// Smart duplicate detection — 3 passes (exact hash, ref+amount, similarity).
-pub fn detect_duplicates(txns: &mut Vec<Transaction>) {
+pub fn detect_duplicates(txns: &mut [Transaction]) {
     use std::collections::HashMap;
 
     // Pass 1: Exact hash duplicates
     let mut seen_hashes: HashMap<String, bool> = HashMap::new();
     for t in txns.iter_mut() {
-        if t.is_opening_balance || matches!(t.status, TransactionStatus::Manual) { continue; }
+        if t.is_opening_balance || matches!(t.status, TransactionStatus::Manual) {
+            continue;
+        }
         let h = t.hash();
-        if seen_hashes.contains_key(&h) {
-            t.dup_flag = true;
-            if !t.tags.contains(&"DUP".to_string()) { t.tags.push("DUP".to_string()); }
-        } else {
-            seen_hashes.insert(h, true);
+        match seen_hashes.entry(h) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                t.dup_flag = true;
+                if !t.tags.contains(&"DUP".to_string()) {
+                    t.tags.push("DUP".to_string());
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(true);
+            }
         }
     }
 
     // Pass 2: Reference + amount match
     let mut ref_amt: HashMap<String, bool> = HashMap::new();
     for t in txns.iter_mut() {
-        if t.is_opening_balance || t.dup_flag { continue; }
+        if t.is_opening_balance || t.dup_flag {
+            continue;
+        }
         let r = t.reference.trim().to_string();
         let amt = t.debit.or(t.credit).unwrap_or(0.0);
         if !r.is_empty() && amt > 0.0 {
             let key = format!("{}|{:.2}", r, amt);
-            if ref_amt.contains_key(&key) {
-                t.dup_flag = true;
-                if !t.tags.contains(&"DUP".to_string()) { t.tags.push("DUP".to_string()); }
-            } else {
-                ref_amt.insert(key, true);
+            match ref_amt.entry(key) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    t.dup_flag = true;
+                    if !t.tags.contains(&"DUP".to_string()) {
+                        t.tags.push("DUP".to_string());
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(true);
+                }
             }
         }
     }
@@ -572,7 +1081,9 @@ fn _narr_similarity(a: &str, b: &str) -> f64 {
     };
     let ta = tokens(a);
     let tb = tokens(b);
-    if ta.is_empty() || tb.is_empty() { return 0.0; }
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
     let common = ta.iter().filter(|t| tb.contains(*t)).count();
     common as f64 / ta.len().max(tb.len()) as f64
 }
@@ -588,7 +1099,10 @@ mod tests {
 
     #[test]
     fn detect_gst_tax() {
-        assert_eq!(detect_gst("ADVANCE TAX PAYMENT", ""), Some("TAX".to_string()));
+        assert_eq!(
+            detect_gst("ADVANCE TAX PAYMENT", ""),
+            Some("TAX".to_string())
+        );
     }
 
     #[test]
@@ -648,11 +1162,17 @@ mod tests {
         t.narration = "EXCITEL BILL PAYMENT".to_string();
         t.debit = Some(999.0);
         classify_one(&mut t, "Bank Ledger", &[], false, true);
-        assert_eq!(t.gst_rate, None, "GST engine must not run when gst_enabled=false");
+        assert_eq!(
+            t.gst_rate, None,
+            "GST engine must not run when gst_enabled=false"
+        );
         assert_eq!(t.gst_amount, None);
         assert_eq!(t.gst_type, None);
         assert!(!t.tags.contains(&"GST".to_string()));
-        assert!(t.account_head.is_empty(), "no ledger auto-fill from a disabled engine");
+        assert!(
+            t.account_head.is_empty(),
+            "no ledger auto-fill from a disabled engine"
+        );
     }
 
     #[test]
@@ -661,11 +1181,18 @@ mod tests {
         t.narration = "EXCITEL BILL PAYMENT".to_string();
         t.debit = Some(999.0);
         classify_one(&mut t, "Bank Ledger", &[], true, false);
-        assert_eq!(t.gst_rate, Some(18.0), "rate/amount/type still surface when gst_enabled=true");
+        assert_eq!(
+            t.gst_rate,
+            Some(18.0),
+            "rate/amount/type still surface when gst_enabled=true"
+        );
         assert!(t.gst_amount.is_some());
         assert!(t.gst_type.is_some());
         assert!(t.tags.contains(&"GST".to_string()));
-        assert!(t.account_head.is_empty(), "ledger must not be auto-filled when gst_auto_ledgers=false");
+        assert!(
+            t.account_head.is_empty(),
+            "ledger must not be auto-filled when gst_auto_ledgers=false"
+        );
     }
 
     #[test]
@@ -720,7 +1247,10 @@ mod tests {
     fn extract_party_name_does_not_panic_when_truncating_a_long_multibyte_name() {
         let narration = "NEFT-N123456789012-राजेश कुमार शर्मा एंड संस प्राइवेट लिमिटेड-REF001";
         let name = extract_party_name(narration);
-        assert!(name.len() <= 40, "must be truncated to at most 40 bytes: {name:?}");
+        assert!(
+            name.len() <= 40,
+            "must be truncated to at most 40 bytes: {name:?}"
+        );
     }
 
     /// Phase 4L.2.2 follow-up: `normalize_vendor_name`'s "Page N" strip
@@ -737,6 +1267,9 @@ mod tests {
     #[test]
     fn normalize_vendor_name_finds_page_marker_correctly_past_a_length_changing_unicode_char() {
         let name = normalize_vendor_name("\u{0130}Cafe Page 2 more text");
-        assert_eq!(name, "İCafe", "must cut right before \"Page\", not mid-word");
+        assert_eq!(
+            name, "İCafe",
+            "must cut right before \"Page\", not mid-word"
+        );
     }
 }

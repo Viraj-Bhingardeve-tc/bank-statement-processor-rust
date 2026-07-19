@@ -42,10 +42,10 @@ pub enum TransactionStatus {
 impl std::fmt::Display for TransactionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransactionStatus::Unreviewed  => write!(f, "unreviewed"),
-            TransactionStatus::Classified  => write!(f, "classified"),
-            TransactionStatus::Manual      => write!(f, "manual"),
-            TransactionStatus::Suspense    => write!(f, "suspense"),
+            TransactionStatus::Unreviewed => write!(f, "unreviewed"),
+            TransactionStatus::Classified => write!(f, "classified"),
+            TransactionStatus::Manual => write!(f, "manual"),
+            TransactionStatus::Suspense => write!(f, "suspense"),
             TransactionStatus::NeedsReview => write!(f, "needs_review"),
         }
     }
@@ -68,12 +68,12 @@ pub enum VoucherType {
 impl std::fmt::Display for VoucherType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VoucherType::Unknown  => write!(f, ""),
-            VoucherType::Payment  => write!(f, "Payment"),
-            VoucherType::Receipt  => write!(f, "Receipt"),
-            VoucherType::Contra   => write!(f, "Contra"),
-            VoucherType::Journal  => write!(f, "Journal"),
-            VoucherType::Sales    => write!(f, "Sales"),
+            VoucherType::Unknown => write!(f, ""),
+            VoucherType::Payment => write!(f, "Payment"),
+            VoucherType::Receipt => write!(f, "Receipt"),
+            VoucherType::Contra => write!(f, "Contra"),
+            VoucherType::Journal => write!(f, "Journal"),
+            VoucherType::Sales => write!(f, "Sales"),
             VoucherType::Purchase => write!(f, "Purchase"),
         }
     }
@@ -85,12 +85,12 @@ impl std::fmt::Display for VoucherType {
 /// `-1` means the column was not detected.
 #[derive(Debug, Clone)]
 pub struct ColumnMap {
-    pub date:         i32,
-    pub narration:    i32,
-    pub reference:    i32,
-    pub debit:        i32,
-    pub credit:       i32,
-    pub balance:      i32,
+    pub date: i32,
+    pub narration: i32,
+    pub reference: i32,
+    pub debit: i32,
+    pub credit: i32,
+    pub balance: i32,
     /// Compound "DEBIT/CREDIT" signed column (Kotak-style). -1 if absent.
     pub debit_credit: i32,
 }
@@ -98,18 +98,27 @@ pub struct ColumnMap {
 impl Default for ColumnMap {
     fn default() -> Self {
         ColumnMap {
-            date: -1, narration: -1, reference: -1,
-            debit: -1, credit: -1, balance: -1, debit_credit: -1,
+            date: -1,
+            narration: -1,
+            reference: -1,
+            debit: -1,
+            credit: -1,
+            balance: -1,
+            debit_credit: -1,
         }
     }
 }
 
 impl ColumnMap {
-    pub fn has_date(&self)   -> bool { self.date >= 0 }
+    pub fn has_date(&self) -> bool {
+        self.date >= 0
+    }
     pub fn has_amount(&self) -> bool {
         self.debit >= 0 || self.credit >= 0 || self.debit_credit >= 0
     }
-    pub fn is_usable(&self)  -> bool { self.has_date() && self.has_amount() }
+    pub fn is_usable(&self) -> bool {
+        self.has_date() && self.has_amount()
+    }
 }
 
 // ── Transaction ───────────────────────────────────────────────────────────────
@@ -128,22 +137,22 @@ pub struct Transaction {
     pub narration: String,
     pub reference: String,
 
-    pub debit:   Option<f64>,
-    pub credit:  Option<f64>,
+    pub debit: Option<f64>,
+    pub credit: Option<f64>,
     pub balance: Option<f64>,
 
-    pub vendor:       String,
+    pub vendor: String,
     pub account_head: String,
-    pub txn_type:     VoucherType,
-    pub confidence:   f64,
-    pub status:       TransactionStatus,
+    pub txn_type: VoucherType,
+    pub confidence: f64,
+    pub status: TransactionStatus,
     /// How this transaction was classified: "rule" | "keyword" | "ai" | "user" | "" (unclassified).
     #[serde(default)]
     pub classification_source: String,
 
     pub tags: Vec<String>,
 
-    pub bank_name:  String,
+    pub bank_name: String,
     pub account_no: String,
 
     /// True for the synthetic opening-balance marker row.
@@ -187,8 +196,9 @@ impl Transaction {
     pub fn hash(&self) -> String {
         let s = format!(
             "{}|{}|{}|{}",
-            self.date, self.narration,
-            self.debit .map_or("null".to_string(), |v| format!("{}", v)),
+            self.date,
+            self.narration,
+            self.debit.map_or("null".to_string(), |v| format!("{}", v)),
             self.credit.map_or("null".to_string(), |v| format!("{}", v)),
         );
         let mut h: i32 = 0;
@@ -235,18 +245,18 @@ impl Transaction {
 /// Result of parsing one bank statement file (or one Excel sheet).
 #[derive(Debug, Clone)]
 pub struct ParseResult {
-    pub transactions:    Vec<Transaction>,
+    pub transactions: Vec<Transaction>,
     pub opening_balance: Option<f64>,
     pub closing_balance: Option<f64>,
 
-    pub bank_name:  String,
+    pub bank_name: String,
     pub account_no: String,
 
     /// Excel sheet name or PDF file name.
     pub source_name: String,
 
-    pub col_map:         ColumnMap,
-    pub header_row_idx:  usize,
+    pub col_map: ColumnMap,
+    pub header_row_idx: usize,
     pub noise_row_count: usize,
     pub rejected_row_count: usize,
 }
@@ -275,7 +285,13 @@ mod tests {
     use super::*;
 
     fn txn(date: &str, narration: &str, debit: Option<f64>, credit: Option<f64>) -> Transaction {
-        Transaction { date: date.into(), narration: narration.into(), debit, credit, ..Transaction::new("t") }
+        Transaction {
+            date: date.into(),
+            narration: narration.into(),
+            debit,
+            credit,
+            ..Transaction::new("t")
+        }
     }
 
     // ── Transaction::hash ─────────────────────────────────────────────────────
@@ -285,7 +301,11 @@ mod tests {
         let t = txn("01/01/2024", "SALARY CREDIT", None, Some(50000.0));
         let h = t.hash();
         assert!(!h.is_empty(), "hash must not be empty");
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "hash must be hex: {}", h);
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash must be hex: {}",
+            h
+        );
     }
 
     #[test]
@@ -325,7 +345,11 @@ mod tests {
         let t = txn("", "", None, None);
         let h = t.hash();
         assert!(!h.is_empty(), "hash must never be empty");
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "must be hex: {}", h);
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "must be hex: {}",
+            h
+        );
         // Same input always gives same hash
         assert_eq!(t.hash(), h, "hash must be deterministic");
     }
@@ -348,7 +372,12 @@ mod tests {
     // since we can't run JS in tests — the algorithm is verified by code inspection.
     #[test]
     fn hash_is_8_chars_or_fewer() {
-        let t = txn("01/01/2024", "NEFT PAYMENT FROM RAJESH KUMAR", Some(25000.0), None);
+        let t = txn(
+            "01/01/2024",
+            "NEFT PAYMENT FROM RAJESH KUMAR",
+            Some(25000.0),
+            None,
+        );
         let h = t.hash();
         assert!(h.len() <= 8, "u32::MAX in hex = 8 chars, got: {}", h);
     }

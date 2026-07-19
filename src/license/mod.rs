@@ -88,9 +88,7 @@ pub fn enforce(conn: &Connection, api: &dyn LicenseApiClient) -> EnforcementOutc
         // worth surfacing, since it means this installation's local state
         // is stuck out of sync with the server's.
         if let Err(e) = clear_local_activation(conn) {
-            log::error!(
-                "[license] failed to clear local activation for a revoked license: {e}"
-            );
+            log::error!("[license] failed to clear local activation for a revoked license: {e}");
         }
     }
 
@@ -147,7 +145,12 @@ pub fn check_status(conn: &Connection, api: &dyn LicenseApiClient) -> LicenseSta
     };
 
     let Some(license_id) = record.license_id.clone() else {
-        let _ = storage::log_validation(conn, "NotActivated", false, "record exists but was never activated");
+        let _ = storage::log_validation(
+            conn,
+            "NotActivated",
+            false,
+            "record exists but was never activated",
+        );
         return LicenseStatus::NotActivated;
     };
 
@@ -180,7 +183,12 @@ pub fn check_status(conn: &Connection, api: &dyn LicenseApiClient) -> LicenseSta
             updated.grace_period_days = resp.grace_period_days;
             updated.last_validated_at = Some(now);
             let _ = storage::save_local_license(conn, &updated);
-            let _ = storage::log_validation(conn, &format!("{status:?}"), true, "server validation succeeded");
+            let _ = storage::log_validation(
+                conn,
+                &format!("{status:?}"),
+                true,
+                "server validation succeeded",
+            );
             status
         }
         Err(_) => {
@@ -207,7 +215,12 @@ pub fn check_status(conn: &Connection, api: &dyn LicenseApiClient) -> LicenseSta
                     now,
                 )
             };
-            let _ = storage::log_validation(conn, &format!("{status:?}"), false, "offline or server unreachable");
+            let _ = storage::log_validation(
+                conn,
+                &format!("{status:?}"),
+                false,
+                "offline or server unreachable",
+            );
             status
         }
     }
@@ -218,7 +231,11 @@ pub fn check_status(conn: &Connection, api: &dyn LicenseApiClient) -> LicenseSta
 /// locally so subsequent launches can use `check_status`'s offline path.
 /// Returns the `ApiError` unmodified on failure — nothing is persisted, so
 /// a failed activation attempt leaves any prior local state untouched.
-pub fn activate(conn: &Connection, api: &dyn LicenseApiClient, license_key: &str) -> Result<LicenseStatus, ApiError> {
+pub fn activate(
+    conn: &Connection,
+    api: &dyn LicenseApiClient,
+    license_key: &str,
+) -> Result<LicenseStatus, ApiError> {
     let now = Utc::now();
     let device = storage::get_or_create_device_info(conn)
         .map_err(|e| ApiError::ServerError(format!("failed to read device identity: {e}")))?;
@@ -243,8 +260,11 @@ pub fn activate(conn: &Connection, api: &dyn LicenseApiClient, license_key: &str
         grace_period_days: resp.grace_period_days,
         highest_seen_clock: Some(now),
     };
-    storage::save_local_license(conn, &record)
-        .map_err(|e| ApiError::ServerError(format!("activation succeeded but failed to persist locally: {e}")))?;
+    storage::save_local_license(conn, &record).map_err(|e| {
+        ApiError::ServerError(format!(
+            "activation succeeded but failed to persist locally: {e}"
+        ))
+    })?;
     let _ = storage::log_validation(conn, &format!("{status:?}"), true, "activation succeeded");
     Ok(status)
 }
@@ -377,13 +397,30 @@ mod tests {
         fn login(&self, _req: &LoginRequest) -> Result<LoginResponse, ApiError> {
             Err(ApiError::NoServerConfigured)
         }
-        fn activate_license(&self, _req: &ActivateLicenseRequest) -> Result<ActivateLicenseResponse, ApiError> {
-            self.activate_response.lock().unwrap().take().expect("unexpected activate_license call")
+        fn activate_license(
+            &self,
+            _req: &ActivateLicenseRequest,
+        ) -> Result<ActivateLicenseResponse, ApiError> {
+            self.activate_response
+                .lock()
+                .unwrap()
+                .take()
+                .expect("unexpected activate_license call")
         }
-        fn validate_license(&self, _req: &ValidateLicenseRequest) -> Result<ValidateLicenseResponse, ApiError> {
-            self.validate_response.lock().unwrap().take().expect("unexpected validate_license call")
+        fn validate_license(
+            &self,
+            _req: &ValidateLicenseRequest,
+        ) -> Result<ValidateLicenseResponse, ApiError> {
+            self.validate_response
+                .lock()
+                .unwrap()
+                .take()
+                .expect("unexpected validate_license call")
         }
-        fn refresh_license(&self, req: &ValidateLicenseRequest) -> Result<ValidateLicenseResponse, ApiError> {
+        fn refresh_license(
+            &self,
+            req: &ValidateLicenseRequest,
+        ) -> Result<ValidateLicenseResponse, ApiError> {
             self.validate_license(req)
         }
         fn logout(&self) -> Result<(), ApiError> {
@@ -412,7 +449,9 @@ mod tests {
         let status = activate(&conn, &mock, "TEST-KEY-0000-0000").expect("activation must succeed");
         assert_eq!(status, LicenseStatus::Active);
 
-        let record = storage::load_local_license(&conn).unwrap().expect("must be persisted");
+        let record = storage::load_local_license(&conn)
+            .unwrap()
+            .expect("must be persisted");
         assert_eq!(record.license_id.as_deref(), Some("lic_999"));
         assert_eq!(record.customer_id.as_deref(), Some("cus_999"));
         assert_eq!(record.subscription_type.as_deref(), Some("monthly"));
@@ -424,14 +463,18 @@ mod tests {
     fn check_status_with_successful_online_validation_is_active_and_updates_last_validated_at() {
         let conn = open_migrated();
         let stale = Utc::now() - chrono::Duration::days(20); // would be GracePeriodExpired offline
-        storage::save_local_license(&conn, &storage::LocalLicenseRecord {
-            license_id: Some("lic_1".to_string()),
-            status: "active".to_string(),
-            last_validated_at: Some(stale),
-            grace_period_days: 7,
-            highest_seen_clock: Some(stale),
-            ..Default::default()
-        }).unwrap();
+        storage::save_local_license(
+            &conn,
+            &storage::LocalLicenseRecord {
+                license_id: Some("lic_1".to_string()),
+                status: "active".to_string(),
+                last_validated_at: Some(stale),
+                grace_period_days: 7,
+                highest_seen_clock: Some(stale),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let mock = MockClient::validate_ok(ValidateLicenseResponse {
             status: "active".to_string(),
@@ -445,20 +488,27 @@ mod tests {
         assert_eq!(status, LicenseStatus::Active, "a real server confirming active must override an otherwise-expired offline grace window");
 
         let record = storage::load_local_license(&conn).unwrap().unwrap();
-        assert!(record.last_validated_at.unwrap() > stale, "last_validated_at must be refreshed on successful online validation");
+        assert!(
+            record.last_validated_at.unwrap() > stale,
+            "last_validated_at must be refreshed on successful online validation"
+        );
     }
 
     #[test]
     fn check_status_with_server_reporting_suspended_returns_suspended() {
         let conn = open_migrated();
-        storage::save_local_license(&conn, &storage::LocalLicenseRecord {
-            license_id: Some("lic_1".to_string()),
-            status: "active".to_string(),
-            last_validated_at: Some(Utc::now()),
-            grace_period_days: 7,
-            highest_seen_clock: Some(Utc::now()),
-            ..Default::default()
-        }).unwrap();
+        storage::save_local_license(
+            &conn,
+            &storage::LocalLicenseRecord {
+                license_id: Some("lic_1".to_string()),
+                status: "active".to_string(),
+                last_validated_at: Some(Utc::now()),
+                grace_period_days: 7,
+                highest_seen_clock: Some(Utc::now()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let mock = MockClient::validate_ok(ValidateLicenseResponse {
             status: "suspended".to_string(),
@@ -484,7 +534,9 @@ mod tests {
         let record = storage::LocalLicenseRecord {
             subscription_type: Some("yearly".to_string()),
             expires_at: Some(
-                chrono::DateTime::parse_from_rfc3339("2027-07-09T00:00:00Z").unwrap().with_timezone(&Utc),
+                chrono::DateTime::parse_from_rfc3339("2027-07-09T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
             ),
             ..Default::default()
         };
@@ -495,7 +547,10 @@ mod tests {
 
     #[test]
     fn describe_offline_grace_shows_days_remaining() {
-        let text = describe(LicenseStatus::ActiveOfflineGrace { days_remaining: 3 }, None);
+        let text = describe(
+            LicenseStatus::ActiveOfflineGrace { days_remaining: 3 },
+            None,
+        );
         assert!(text.contains('3'), "expected days remaining in: {text}");
     }
 
@@ -514,7 +569,10 @@ mod tests {
         ).unwrap();
 
         let status = check_status(&conn, &OfflineClient);
-        assert!(!status.is_licensed(), "corrupted timestamp must never resolve to a licensed status");
+        assert!(
+            !status.is_licensed(),
+            "corrupted timestamp must never resolve to a licensed status"
+        );
     }
 
     #[test]
@@ -524,19 +582,30 @@ mod tests {
         // migration bug). get_or_create_device_info must transparently
         // recreate it rather than check_status erroring out.
         let conn = open_migrated();
-        storage::save_local_license(&conn, &storage::LocalLicenseRecord {
-            license_id: Some("lic_1".to_string()),
-            status: "active".to_string(),
-            last_validated_at: Some(Utc::now()),
-            grace_period_days: 7,
-            highest_seen_clock: Some(Utc::now()),
-            ..Default::default()
-        }).unwrap();
-        assert_eq!(storage::load_device_info(&conn).unwrap(), None, "precondition: no device_info row yet");
+        storage::save_local_license(
+            &conn,
+            &storage::LocalLicenseRecord {
+                license_id: Some("lic_1".to_string()),
+                status: "active".to_string(),
+                last_validated_at: Some(Utc::now()),
+                grace_period_days: 7,
+                highest_seen_clock: Some(Utc::now()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            storage::load_device_info(&conn).unwrap(),
+            None,
+            "precondition: no device_info row yet"
+        );
 
         let status = check_status(&conn, &OfflineClient);
         assert!(matches!(status, LicenseStatus::ActiveOfflineGrace { .. }));
-        assert!(storage::load_device_info(&conn).unwrap().is_some(), "device_info must have been created on demand");
+        assert!(
+            storage::load_device_info(&conn).unwrap().is_some(),
+            "device_info must have been created on demand"
+        );
     }
 
     #[test]
@@ -545,14 +614,18 @@ mod tests {
         // never regenerate the device identity — the server would see a
         // stream of "new" devices for what is really one installation.
         let conn = open_migrated();
-        storage::save_local_license(&conn, &storage::LocalLicenseRecord {
-            license_id: Some("lic_1".to_string()),
-            status: "active".to_string(),
-            last_validated_at: Some(Utc::now()),
-            grace_period_days: 7,
-            highest_seen_clock: Some(Utc::now()),
-            ..Default::default()
-        }).unwrap();
+        storage::save_local_license(
+            &conn,
+            &storage::LocalLicenseRecord {
+                license_id: Some("lic_1".to_string()),
+                status: "active".to_string(),
+                last_validated_at: Some(Utc::now()),
+                grace_period_days: 7,
+                highest_seen_clock: Some(Utc::now()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         check_status(&conn, &OfflineClient);
         let device_after_first = storage::load_device_info(&conn).unwrap().unwrap();
@@ -562,10 +635,15 @@ mod tests {
 
         assert_eq!(device_after_first.device_id, device_after_third.device_id);
 
-        let log_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM license_validation_log", [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(log_count, 3, "each check_status call must append its own audit-log row");
+        let log_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM license_validation_log", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            log_count, 3,
+            "each check_status call must append its own audit-log row"
+        );
     }
 
     #[test]
@@ -581,7 +659,8 @@ mod tests {
         let result = activate(&conn, &OfflineClient, "SOME-KEY-0000");
         assert_eq!(result.unwrap_err(), ApiError::NoServerConfigured);
         assert_eq!(
-            storage::load_local_license(&conn).unwrap(), None,
+            storage::load_local_license(&conn).unwrap(),
+            None,
             "a failed activation must not create a local_license row"
         );
     }

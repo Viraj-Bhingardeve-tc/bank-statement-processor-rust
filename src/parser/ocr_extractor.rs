@@ -14,21 +14,30 @@ pub fn extract_image_via_tesseract(img_path: &Path) -> Option<String> {
     let output = Command::new("tesseract")
         .arg(img_path)
         .arg("stdout")
-        .arg("--dpi").arg("300")
-        .arg("-l").arg("eng")
+        .arg("--dpi")
+        .arg("300")
+        .arg("-l")
+        .arg("eng")
         .output()
         .ok()?;
 
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         if !text.trim().is_empty() {
-            log::info!("[OCR] image: extracted {} chars from {:?}", text.len(), img_path);
+            log::info!(
+                "[OCR] image: extracted {} chars from {:?}",
+                text.len(),
+                img_path
+            );
             return Some(text);
         }
     }
 
-    log::warn!("[OCR] image: tesseract returned no text for {:?}: {}",
-        img_path, String::from_utf8_lossy(&output.stderr));
+    log::warn!(
+        "[OCR] image: tesseract returned no text for {:?}: {}",
+        img_path,
+        String::from_utf8_lossy(&output.stderr)
+    );
     None
 }
 
@@ -44,20 +53,29 @@ pub fn extract_via_tesseract(pdf_path: &Path) -> Option<String> {
     let output = Command::new("tesseract")
         .arg(pdf_path)
         .arg("stdout")
-        .arg("--dpi").arg("300")
-        .arg("-l").arg("eng")
+        .arg("--dpi")
+        .arg("300")
+        .arg("-l")
+        .arg("eng")
         .output()
         .ok()?;
 
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         if !text.trim().is_empty() {
-            log::info!("[OCR] tesseract extracted {} chars from {:?}", text.len(), pdf_path);
+            log::info!(
+                "[OCR] tesseract extracted {} chars from {:?}",
+                text.len(),
+                pdf_path
+            );
             return Some(text);
         }
     }
 
-    log::warn!("[OCR] tesseract returned no text for {:?}: {}",
-        pdf_path, String::from_utf8_lossy(&output.stderr));
+    log::warn!(
+        "[OCR] tesseract returned no text for {:?}: {}",
+        pdf_path,
+        String::from_utf8_lossy(&output.stderr)
+    );
     None
 }

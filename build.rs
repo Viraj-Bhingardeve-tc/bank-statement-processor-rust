@@ -97,7 +97,11 @@ fn copy_sqlcipher_runtime_dlls() {
                 continue;
             }
             std::fs::copy(&src, &dest).unwrap_or_else(|e| {
-                panic!("failed to copy {} to {}: {e}", src.display(), dest.display())
+                panic!(
+                    "failed to copy {} to {}: {e}",
+                    src.display(),
+                    dest.display()
+                )
             });
         }
     }

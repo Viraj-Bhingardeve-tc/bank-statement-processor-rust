@@ -591,8 +591,10 @@ mod tests {
 
     #[test]
     fn apply_legacy_config_leaves_fields_untouched_when_legacy_omits_them() {
-        let mut cfg = Settings::default();
-        cfg.recon_days = 99;
+        let mut cfg = Settings {
+            recon_days: 99,
+            ..Default::default()
+        };
         let legacy = LegacyConfig::default();
         apply_legacy_config(&mut cfg, &legacy);
         assert_eq!(

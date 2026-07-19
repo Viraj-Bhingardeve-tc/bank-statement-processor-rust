@@ -1,19 +1,21 @@
 // lib.rs — Public library surface for the Bank Statement Processor.
-mod credential_store;
-pub mod text_safety;
-pub mod parser;
-pub mod analytics;
-pub mod classifier;
-pub mod export;
-pub mod db;
-pub mod narration_cleaner;
-pub mod tally_group_engine;
-pub mod gst_engine;
-pub mod settings;
-pub mod reconciliation;
-pub mod auth;
-pub mod ui;
+
 #[cfg(feature = "ai")]
 pub mod ai_classifier;
-pub mod migration;
+
+pub mod analytics;
+pub mod auth;
+pub mod classifier;
+mod credential_store;
+pub mod db;
+pub mod export;
+pub mod gst_engine;
 pub mod license;
+pub mod migration;
+pub mod narration_cleaner;
+pub mod parser;
+pub mod reconciliation;
+pub mod settings;
+pub mod tally_group_engine;
+pub mod text_safety;
+pub mod ui;

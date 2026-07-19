@@ -17,20 +17,18 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::parser::{
-    ParseResult, Transaction,
     bank_detection::{detect, DetectOptions},
     date_parser::normalize_transaction_date,
     excel_parser::{compute_prev_balances, prepend_opening_balance_row},
-    ocr_correction,
+    ocr_correction, ParseResult, Transaction,
 };
 
 // ── Regexes ───────────────────────────────────────────────────────────────────
 
 // Date at start of line: DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY (or 2-digit year).
 // Mirrors JS: /^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\b/
-static DATE_START_RE: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"^(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})\b").unwrap()
-);
+static DATE_START_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})\b").unwrap());
 
 // Indian currency amount: comma-formatted or plain ≥5 digits, required decimal
 // for 1–4 digit integers.
@@ -43,21 +41,16 @@ static DATE_START_RE: Lazy<Regex> = Lazy::new(||
 // 5+ digit integers still match without a decimal so plain amounts like "50000"
 // (without ".00") are captured.  Values < 1 and 4-digit year literals (1900–2100)
 // are filtered in the loop below.
-static AMT_RE: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"\b(\d{1,4}(?:,\d{2,3})*\.\d{1,2}|\d{5,}(?:\.\d{1,2})?)\b").unwrap()
-);
+static AMT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\b(\d{1,4}(?:,\d{2,3})*\.\d{1,2}|\d{5,}(?:\.\d{1,2})?)\b").unwrap());
 
 // Dr / Cr markers to strip from narration text.
 // Mirrors JS: /\b(DR|CR|Dr|Cr)\b\.?/g
-static DRCR_RE: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"(?i)\b(?:DR|CR)\b\.?").unwrap()
-);
+static DRCR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(?:DR|CR)\b\.?").unwrap());
 
 // Stray punctuation (keep word chars, whitespace, / - . @ &).
 // JS `\w` = [A-Za-z0-9_]; Rust default `\w` is Unicode-aware, so we use explicit set.
-static STRAY_PUNCT_RE: Lazy<Regex> = Lazy::new(||
-    Regex::new(r"[^A-Za-z0-9_\s/\-.@&]").unwrap()
-);
+static STRAY_PUNCT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^A-Za-z0-9_\s/\-.@&]").unwrap());
 
 // ── Amount extraction ─────────────────────────────────────────────────────────
 
@@ -78,13 +71,21 @@ struct AmountMatch {
 fn extract_amounts(s: &str) -> Vec<AmountMatch> {
     let mut out = Vec::new();
     for cap in AMT_RE.captures_iter(s) {
-        let m   = cap.get(1).unwrap();
+        let m = cap.get(1).unwrap();
         let raw = m.as_str().to_string();
         let v: f64 = raw.replace(',', "").parse().unwrap_or(0.0);
         // Skip zeros, sub-1 fractions, and 4-digit year literals
-        if v < 1.0 { continue; }
-        if v >= 1900.0 && v <= 2100.0 && raw.len() == 4 { continue; }
-        out.push(AmountMatch { val: v, raw, idx: m.start() });
+        if v < 1.0 {
+            continue;
+        }
+        if (1900.0..=2100.0).contains(&v) && raw.len() == 4 {
+            continue;
+        }
+        out.push(AmountMatch {
+            val: v,
+            raw,
+            idx: m.start(),
+        });
     }
     out
 }
@@ -100,7 +101,6 @@ fn extract_amounts(s: &str) -> Vec<AmountMatch> {
 /// Returns a `ParseResult` with `source_name = "{file_name} [OCR]"`.
 /// Closing balance is always `None` (OCR text rarely contains it explicitly).
 pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
-
     // 1. Apply OCR correction (char repair l→1, O→0, S→5, … + fuzzy banking-
     //    term correction against BANK_TERMS) — port of `OCRCorrection.correctText()`,
     //    matching the old app's default 2-pass call (parser.js:2016).
@@ -124,13 +124,13 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
     let first_txn_idx = lines.iter().position(|l| DATE_START_RE.is_match(l));
     let header_text: String = match first_txn_idx {
         Some(0) | None => String::new(),
-        Some(n)        => lines[..n].join("\n"),
+        Some(n) => lines[..n].join("\n"),
     };
 
     // 4. Main extraction loop.
-    let mut txns:        Vec<Transaction> = Vec::new();
-    let mut prev_balance: Option<f64>     = None;
-    let mut txn_counter                   = 0usize;
+    let mut txns: Vec<Transaction> = Vec::new();
+    let mut prev_balance: Option<f64> = None;
+    let mut txn_counter = 0usize;
 
     for line in &lines {
         if let Some(cap) = DATE_START_RE.captures(line) {
@@ -144,10 +144,12 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
             };
 
             let amts = extract_amounts(&rest_clean);
-            if amts.is_empty() { continue; }
+            if amts.is_empty() {
+                continue;
+            }
 
             // Last amount = balance; all others = transaction amounts
-            let balance  = (amts.last().unwrap().val * 100.0).round() / 100.0;
+            let balance = (amts.last().unwrap().val * 100.0).round() / 100.0;
             let txn_amts = &amts[..amts.len() - 1];
 
             // Build narration: remove all amount strings (reverse order to preserve indices)
@@ -164,17 +166,21 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
             narration = STRAY_PUNCT_RE.replace_all(&narration, " ").to_string();
             // Collapse whitespace
             narration = narration.split_whitespace().collect::<Vec<_>>().join(" ");
-            if narration.is_empty() { narration = "(OCR)".to_string(); }
+            if narration.is_empty() {
+                narration = "(OCR)".to_string();
+            }
 
             // Determine debit / credit
             let dr_marker = {
                 let up = rest_clean.to_uppercase();
                 // word-boundary check: is "DR" a standalone token?
-                up.split_whitespace().any(|w| w.trim_end_matches('.') == "DR")
+                up.split_whitespace()
+                    .any(|w| w.trim_end_matches('.') == "DR")
             };
             let cr_marker = {
                 let up = rest_clean.to_uppercase();
-                up.split_whitespace().any(|w| w.trim_end_matches('.') == "CR")
+                up.split_whitespace()
+                    .any(|w| w.trim_end_matches('.') == "CR")
             };
 
             let (debit, credit) = if txn_amts.len() == 1 {
@@ -186,25 +192,36 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
                 } else if let Some(prev) = prev_balance {
                     let diff = balance - prev;
                     if (diff - amt).abs() < amt * 0.02 {
-                        (None, Some(amt))         // balance went UP → credit
+                        (None, Some(amt)) // balance went UP → credit
                     } else if (diff + amt).abs() < amt * 0.02 {
-                        (Some(amt), None)          // balance went DOWN → debit
+                        (Some(amt), None) // balance went DOWN → debit
                     } else {
-                        (None, Some(amt))          // best guess: credit
+                        (None, Some(amt)) // best guess: credit
                     }
                 } else {
-                    (None, Some(amt))              // first txn → credit
+                    (None, Some(amt)) // first txn → credit
                 }
             } else if txn_amts.len() >= 2 {
                 let a = txn_amts[0].val;
                 let b = txn_amts.last().unwrap().val;
                 if let Some(prev) = prev_balance {
                     let diff = balance - prev;
-                    let debit  = if diff < 0.0 { Some(if a > 0.0 { a } else { b }) } else { None };
-                    let credit = if diff > 0.0 { Some(if b > 0.0 { b } else { a }) } else { None };
+                    let debit = if diff < 0.0 {
+                        Some(if a > 0.0 { a } else { b })
+                    } else {
+                        None
+                    };
+                    let credit = if diff > 0.0 {
+                        Some(if b > 0.0 { b } else { a })
+                    } else {
+                        None
+                    };
                     (debit, credit)
                 } else {
-                    (if a > 0.0 { Some(a) } else { None }, if b > 0.0 { Some(b) } else { None })
+                    (
+                        if a > 0.0 { Some(a) } else { None },
+                        if b > 0.0 { Some(b) } else { None },
+                    )
                 }
             } else {
                 (None, None)
@@ -215,14 +232,17 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
 
             txn_counter += 1;
             let mut t = Transaction::new(format!("t_ocr_{}", txn_counter));
-            t.date      = nd.display;
-            t.date_ts   = nd.ts;
+            t.date = nd.display;
+            t.date_ts = nd.ts;
             t.narration = narration;
-            t.debit     = debit .filter(|&v| v > 0.0).map(|v| (v * 100.0).round() / 100.0);
-            t.credit    = credit.filter(|&v| v > 0.0).map(|v| (v * 100.0).round() / 100.0);
-            t.balance   = Some(balance);
+            t.debit = debit
+                .filter(|&v| v > 0.0)
+                .map(|v| (v * 100.0).round() / 100.0);
+            t.credit = credit
+                .filter(|&v| v > 0.0)
+                .map(|v| (v * 100.0).round() / 100.0);
+            t.balance = Some(balance);
             txns.push(t);
-
         } else {
             // Continuation line: no date → append to last txn narration
             if let Some(last) = txns.last_mut() {
@@ -242,30 +262,34 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
     // Bank detection from full text + header text.
     let narrations: Vec<&str> = txns.iter().map(|t| t.narration.as_str()).collect();
     let bank_meta = detect(DetectOptions {
-        text:        &corrected,
+        text: &corrected,
         header_text: &header_text,
-        filename:    file_name,
-        narrations:  &narrations,
+        filename: file_name,
+        narrations: &narrations,
     });
-    let bank_name  = bank_meta.bank_name.clone();
+    let bank_name = bank_meta.bank_name.clone();
     let account_no = bank_meta.account_no.clone();
     for t in &mut txns {
-        if t.bank_name.is_empty()  { t.bank_name  = bank_name.clone(); }
-        if t.account_no.is_empty() { t.account_no = account_no.clone(); }
+        if t.bank_name.is_empty() {
+            t.bank_name = bank_name.clone();
+        }
+        if t.account_no.is_empty() {
+            t.account_no = account_no.clone();
+        }
     }
 
     prepend_opening_balance_row(&mut txns, op_balance, &bank_name, &account_no);
 
     ParseResult {
-        transactions:       txns,
-        opening_balance:    op_balance,
-        closing_balance:    None,  // OCR text rarely contains explicit closing balance
+        transactions: txns,
+        opening_balance: op_balance,
+        closing_balance: None, // OCR text rarely contains explicit closing balance
         bank_name,
         account_no,
-        source_name:        format!("{} [OCR]", file_name),
-        col_map:            Default::default(),
-        header_row_idx:     0,
-        noise_row_count:    0,
+        source_name: format!("{} [OCR]", file_name),
+        col_map: Default::default(),
+        header_row_idx: 0,
+        noise_row_count: 0,
         rejected_row_count: 0,
     }
 }
@@ -294,10 +318,32 @@ pub fn preprocess_multiline(text: &str) -> String {
 
     // Header / noise words that appear as standalone lines in some PDFs
     let header_words: &[&str] = &[
-        "date","type","particulars","debit","credit","balance","channel",
-        "cheque","reference","txn","value","valuedate","description","chq",
-        "ref","s.no","sr.no","sl.no","serial","withdrawal","deposit",
-        "dr","cr","amount","narration","details",
+        "date",
+        "type",
+        "particulars",
+        "debit",
+        "credit",
+        "balance",
+        "channel",
+        "cheque",
+        "reference",
+        "txn",
+        "value",
+        "valuedate",
+        "description",
+        "chq",
+        "ref",
+        "s.no",
+        "sr.no",
+        "sl.no",
+        "serial",
+        "withdrawal",
+        "deposit",
+        "dr",
+        "cr",
+        "amount",
+        "narration",
+        "details",
     ];
 
     let is_header_line = |line: &str| -> bool {
@@ -305,34 +351,49 @@ pub fn preprocess_multiline(text: &str) -> String {
         header_words.iter().any(|h| l.trim() == *h)
     };
 
-    /// True when the line is a pure reference number: >= 6 digits, no decimal.
+    // True when the line is a pure reference number: >= 6 digits, no decimal.
     let is_pure_integer = |line: &str| -> bool {
         let s = line.replace(',', "");
         let s = s.trim();
         s.len() >= 6 && s.chars().all(|c| c.is_ascii_digit())
     };
 
-    /// True when the line is an amount line: after stripping "Rs"/"Rs." prefix,
-    /// > 80 % of non-whitespace characters are digit/separator.
+    // True when the line is an amount line: after stripping "Rs"/"Rs." prefix,
+    // > 80 % of non-whitespace characters are digit/separator.
     let is_amount_line = |line: &str| -> bool {
         let s = line.trim();
-        let s = if s.to_lowercase().starts_with("rs.") { &s[3..] }
-                else if s.to_lowercase().starts_with("rs") { &s[2..] }
-                else { s };
+        let s = if s.to_lowercase().starts_with("rs.") {
+            &s[3..]
+        } else if s.to_lowercase().starts_with("rs") {
+            &s[2..]
+        } else {
+            s
+        };
         let s = s.trim();
-        if s.is_empty() { return false; }
+        if s.is_empty() {
+            return false;
+        }
         let total: usize = s.chars().filter(|c| !c.is_whitespace()).count();
-        if total == 0 { return false; }
-        let num: usize = s.chars().filter(|c| c.is_ascii_digit() || *c == ',' || *c == '.').count();
+        if total == 0 {
+            return false;
+        }
+        let num: usize = s
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
+            .count();
         (num as f64 / total as f64) > 0.80
     };
 
-    /// Parse the amount from an amount line (strip "Rs" prefix, commas).
+    // Parse the amount from an amount line (strip "Rs" prefix, commas).
     let parse_amt_line = |line: &str| -> Option<f64> {
         let s = line.trim();
-        let s = if s.to_lowercase().starts_with("rs.") { &s[3..] }
-                else if s.to_lowercase().starts_with("rs") { &s[2..] }
-                else { s };
+        let s = if s.to_lowercase().starts_with("rs.") {
+            &s[3..]
+        } else if s.to_lowercase().starts_with("rs") {
+            &s[2..]
+        } else {
+            s
+        };
         let s = s.trim().replace(',', "");
         s.parse::<f64>().ok().filter(|&v| v > 0.0 && v < 2e9)
     };
@@ -345,13 +406,19 @@ pub fn preprocess_multiline(text: &str) -> String {
 
     let mut out: Vec<String> = Vec::new();
     let mut cur_date: Option<String> = None;
-    let mut cur_narr: Vec<String>    = Vec::new();
-    let mut cur_amts: Vec<f64>       = Vec::new();
+    let mut cur_narr: Vec<String> = Vec::new();
+    let mut cur_amts: Vec<f64> = Vec::new();
 
     let flush = |date: &str, narrs: &[String], amts: &[f64], out: &mut Vec<String>| {
-        if amts.len() < 2 { return; } // need txn amount + balance minimum
+        if amts.len() < 2 {
+            return;
+        } // need txn amount + balance minimum
         let narr = narrs.join(" ");
-        let narr = if narr.trim().is_empty() { "TRANSACTION".to_string() } else { narr.trim().to_string() };
+        let narr = if narr.trim().is_empty() {
+            "TRANSACTION".to_string()
+        } else {
+            narr.trim().to_string()
+        };
         // Format amounts as plain decimals so parse_ocr_text can re-parse them
         let amts_str: Vec<String> = amts.iter().map(|a| format!("{:.2}", a)).collect();
         out.push(format!("{} {} {}", date, narr, amts_str.join(" ")));
@@ -370,8 +437,12 @@ pub fn preprocess_multiline(text: &str) -> String {
     };
 
     for &line in &lines {
-        if is_noise_line(line) { continue; }
-        if is_header_line(line) { continue; }
+        if is_noise_line(line) {
+            continue;
+        }
+        if is_header_line(line) {
+            continue;
+        }
 
         // Try to parse line as a date
         let nd = normalize_transaction_date(line);
@@ -468,7 +539,11 @@ Account No: 50100123456789
     #[test]
     fn parse_basic_returns_transactions() {
         let result = parse_ocr_text(BASIC_OCR, "hdfc_ocr.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         assert!(!real.is_empty(), "should extract at least one transaction");
     }
 
@@ -481,14 +556,22 @@ Account No: 50100123456789
     #[test]
     fn parse_has_opening_balance_row() {
         let result = parse_ocr_text(BASIC_OCR, "hdfc.pdf");
-        assert!(result.transactions.first().map_or(false, |t| t.is_opening_balance),
-            "first row should be synthetic opening balance");
+        assert!(
+            result
+                .transactions
+                .first()
+                .is_some_and(|t| t.is_opening_balance),
+            "first row should be synthetic opening balance"
+        );
     }
 
     #[test]
     fn parse_closing_balance_is_none() {
         let result = parse_ocr_text(BASIC_OCR, "hdfc.pdf");
-        assert!(result.closing_balance.is_none(), "OCR closing balance always None");
+        assert!(
+            result.closing_balance.is_none(),
+            "OCR closing balance always None"
+        );
     }
 
     // ── Direction inference ───────────────────────────────────────────────────
@@ -497,9 +580,17 @@ Account No: 50100123456789
     fn dr_marker_sets_debit() {
         let text = "15/01/2024 PAYMENT DR 10000.00 90000.00\n";
         let result = parse_ocr_text(text, "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         if !real.is_empty() {
-            assert!(real[0].debit.is_some(), "DR marker → debit; got credit={:?}", real[0].credit);
+            assert!(
+                real[0].debit.is_some(),
+                "DR marker → debit; got credit={:?}",
+                real[0].credit
+            );
         }
     }
 
@@ -507,9 +598,17 @@ Account No: 50100123456789
     fn cr_marker_sets_credit() {
         let text = "15/01/2024 NEFT CR 25000.00 1,25,000.00\n";
         let result = parse_ocr_text(text, "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         if !real.is_empty() {
-            assert!(real[0].credit.is_some(), "CR marker → credit; got debit={:?}", real[0].debit);
+            assert!(
+                real[0].credit.is_some(),
+                "CR marker → credit; got debit={:?}",
+                real[0].debit
+            );
         }
     }
 
@@ -521,11 +620,17 @@ Account No: 50100123456789
 16/01/2024 ATM WDL 10000.00 1,15,000.00
 ";
         let result = parse_ocr_text(text, "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
-        assert!(real.len() >= 1);
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert!(!real.is_empty());
         // First transaction: no prev_balance → defaults to credit
-        assert!(real[0].credit.is_some() || real[0].debit.is_some(),
-            "must have either debit or credit");
+        assert!(
+            real[0].credit.is_some() || real[0].debit.is_some(),
+            "must have either debit or credit"
+        );
     }
 
     // ── Continuation line appending ───────────────────────────────────────────
@@ -538,11 +643,18 @@ SHARMA MUMBAI BRANCH
 16/01/2024 ATM WDL 10000.00 1,15,000.00
 ";
         let result = parse_ocr_text(text, "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
-        if real.len() >= 1 {
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        if !real.is_empty() {
             // The continuation line "SHARMA MUMBAI BRANCH" should be in the first txn narration
-            assert!(real[0].narration.contains("SHARMA") || real[0].narration.len() > 15,
-                "continuation should be appended: {:?}", real[0].narration);
+            assert!(
+                real[0].narration.contains("SHARMA") || real[0].narration.len() > 15,
+                "continuation should be appended: {:?}",
+                real[0].narration
+            );
         }
     }
 
@@ -555,8 +667,12 @@ SHARMA MUMBAI BRANCH
 16/01/2024 ATM WDL 10000.00 1,40,000.00
 ";
         let result = parse_ocr_text(text, "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
-        assert!(real.len() >= 1, "should have transactions");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert!(!real.is_empty(), "should have transactions");
     }
 
     // ── Empty / edge cases ────────────────────────────────────────────────────
@@ -569,8 +685,15 @@ SHARMA MUMBAI BRANCH
 
     #[test]
     fn no_dates_returns_empty_result() {
-        let result = parse_ocr_text("HDFC Bank Account Statement Jan 2024\nNo transactions found.", "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let result = parse_ocr_text(
+            "HDFC Bank Account Statement Jan 2024\nNo transactions found.",
+            "x.pdf",
+        );
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         assert!(real.is_empty(), "no date lines → no real transactions");
     }
 
@@ -578,12 +701,18 @@ SHARMA MUMBAI BRANCH
     fn amounts_rounded_to_2dp() {
         let text = "15/01/2024 SALARY 50000.5 1,50,000.5\n";
         let result = parse_ocr_text(text, "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         if let Some(t) = real.first() {
             let bal = t.balance.unwrap();
             // Balance 150000.5 rounded to 2dp → 150000.5
-            assert!((bal - (bal * 100.0).round() / 100.0).abs() < 0.001,
-                "balance should be rounded to 2dp");
+            assert!(
+                (bal - (bal * 100.0).round() / 100.0).abs() < 0.001,
+                "balance should be rounded to 2dp"
+            );
         }
     }
 
@@ -614,10 +743,17 @@ Account No: 50100123456789
 ";
         // prev_balance = None → first txn, debit = a=10000, credit = b=5000
         let result = parse_ocr_text(text, "x.pdf");
-        let real: Vec<_> = result.transactions.iter().filter(|t| !t.is_opening_balance).collect();
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         // Verify parsing doesn't crash and actually produces a transaction
         // (the previous `real.len() >= 0` here was vacuously always-true —
         // a usize can never be negative — and didn't check anything).
-        assert!(!real.is_empty(), "expected at least one transaction to be parsed");
+        assert!(
+            !real.is_empty(),
+            "expected at least one transaction to be parsed"
+        );
     }
 }

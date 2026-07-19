@@ -28,12 +28,21 @@ pub struct RawPdfItem {
 
 impl RawPdfItem {
     pub fn new(text: impl Into<String>, x: f64, y: f64, w: f64) -> Self {
-        RawPdfItem { text: text.into(), x, y, w }
+        RawPdfItem {
+            text: text.into(),
+            x,
+            y,
+            w,
+        }
     }
 
     /// Convert to a `PdfItem` (drops Y).
     fn into_pdf_item(self) -> PdfItem {
-        PdfItem { x: self.x, text: self.text, w: self.w }
+        PdfItem {
+            x: self.x,
+            text: self.text,
+            w: self.w,
+        }
     }
 }
 
@@ -158,13 +167,13 @@ mod tests {
         // Items given out of X order; after clustering they should be sorted by X
         let items = vec![
             raw(300.0, 50.0, "Balance"),
-            raw(10.0,  50.0, "Date"),
+            raw(10.0, 50.0, "Date"),
             raw(150.0, 50.0, "Narration"),
         ];
         let rows = cluster_into_rows(items, 5.0);
-        assert_eq!(rows[0][0].text, "Date",      "leftmost item first");
+        assert_eq!(rows[0][0].text, "Date", "leftmost item first");
         assert_eq!(rows[0][1].text, "Narration");
-        assert_eq!(rows[0][2].text, "Balance",   "rightmost item last");
+        assert_eq!(rows[0][2].text, "Balance", "rightmost item last");
     }
 
     #[test]
@@ -189,15 +198,15 @@ mod tests {
         // Simulate a 3-row PDF section: header + 2 transactions
         let items = vec![
             // Row 0 (Y≈10): header items
-            raw(10.0,  10.0, "Date"),
+            raw(10.0, 10.0, "Date"),
             raw(100.0, 10.0, "Narration"),
-            raw(300.0, 12.0, "Balance"),   // slight Y variation, still same row
+            raw(300.0, 12.0, "Balance"), // slight Y variation, still same row
             // Row 1 (Y≈50): first transaction
-            raw(10.0,  50.0, "01/01/2024"),
+            raw(10.0, 50.0, "01/01/2024"),
             raw(100.0, 51.0, "SALARY CREDIT"),
             raw(300.0, 50.0, "85000.00"),
             // Row 2 (Y≈90): second transaction
-            raw(10.0,  90.0, "02/01/2024"),
+            raw(10.0, 90.0, "02/01/2024"),
             raw(100.0, 90.0, "ATM WDL"),
             raw(300.0, 91.0, "75000.00"),
         ];

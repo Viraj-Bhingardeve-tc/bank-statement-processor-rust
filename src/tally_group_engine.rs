@@ -23,129 +23,643 @@ use std::collections::HashMap;
 // ── Tally group constants (21 groups, matching JS TALLY_GROUPS exactly) ──────
 
 // Liabilities
-pub const GROUP_CAPITAL_ACCOUNT:   &str = "Capital Account";
-pub const GROUP_RESERVES:          &str = "Reserves & Surplus";
-pub const GROUP_LOANS:             &str = "Loans (Liability)";
-pub const GROUP_BANK_OD:           &str = "Bank OD A/c";
-pub const GROUP_SUNDRY_CREDITORS:  &str = "Sundry Creditors";
-pub const GROUP_DUTIES_TAXES:      &str = "Duties & Taxes";
-pub const GROUP_PROVISIONS:        &str = "Provisions";
+pub const GROUP_CAPITAL_ACCOUNT: &str = "Capital Account";
+pub const GROUP_RESERVES: &str = "Reserves & Surplus";
+pub const GROUP_LOANS: &str = "Loans (Liability)";
+pub const GROUP_BANK_OD: &str = "Bank OD A/c";
+pub const GROUP_SUNDRY_CREDITORS: &str = "Sundry Creditors";
+pub const GROUP_DUTIES_TAXES: &str = "Duties & Taxes";
+pub const GROUP_PROVISIONS: &str = "Provisions";
 // Income
-pub const GROUP_SALES_ACCOUNTS:    &str = "Sales Accounts";
-pub const GROUP_DIRECT_INCOME:     &str = "Direct Income";
-pub const GROUP_INDIRECT_INCOME:   &str = "Indirect Income";
+pub const GROUP_SALES_ACCOUNTS: &str = "Sales Accounts";
+pub const GROUP_DIRECT_INCOME: &str = "Direct Income";
+pub const GROUP_INDIRECT_INCOME: &str = "Indirect Income";
 // Expenses
 pub const GROUP_PURCHASE_ACCOUNTS: &str = "Purchase Accounts";
-pub const GROUP_DIRECT_EXPENSES:   &str = "Direct Expenses";
+pub const GROUP_DIRECT_EXPENSES: &str = "Direct Expenses";
 pub const GROUP_INDIRECT_EXPENSES: &str = "Indirect Expenses";
 // Assets
-pub const GROUP_FIXED_ASSETS:      &str = "Fixed Assets";
-pub const GROUP_INVESTMENTS:       &str = "Investments";
-pub const GROUP_LOANS_ADVANCES:    &str = "Loans & Advances (Asset)";
-pub const GROUP_SUNDRY_DEBTORS:    &str = "Sundry Debtors";
-pub const GROUP_STOCK_IN_TRADE:    &str = "Stock-in-Trade";
-pub const GROUP_CASH_IN_HAND:      &str = "Cash-in-Hand";
-pub const GROUP_BANK_ACCOUNTS:     &str = "Bank Accounts";
-pub const GROUP_DEPOSITS:          &str = "Deposits (Asset)";
+pub const GROUP_FIXED_ASSETS: &str = "Fixed Assets";
+pub const GROUP_INVESTMENTS: &str = "Investments";
+pub const GROUP_LOANS_ADVANCES: &str = "Loans & Advances (Asset)";
+pub const GROUP_SUNDRY_DEBTORS: &str = "Sundry Debtors";
+pub const GROUP_STOCK_IN_TRADE: &str = "Stock-in-Trade";
+pub const GROUP_CASH_IN_HAND: &str = "Cash-in-Hand";
+pub const GROUP_BANK_ACCOUNTS: &str = "Bank Accounts";
+pub const GROUP_DEPOSITS: &str = "Deposits (Asset)";
 
 // ── Keyword → group mapping ───────────────────────────────────────────────────
 // Each entry mirrors one `{ kw: [...], group, weight }` block from
 // tally-group-engine.js:46-197, in the same order.
 
 struct KwGroup {
-    kws:    &'static [&'static str],
-    group:  &'static str,
+    kws: &'static [&'static str],
+    group: &'static str,
     weight: i32,
 }
 
-static KEYWORD_MAP: Lazy<Vec<KwGroup>> = Lazy::new(|| vec![
-    // ── Direct Income / Sales ──────────────────────────────────────────────
-    KwGroup { kws: &["sales","sale","revenue","turnover","gross receipt"], group: GROUP_SALES_ACCOUNTS, weight: 10 },
-    KwGroup { kws: &["service income","service revenue","consulting income","fees income","income from service"], group: GROUP_DIRECT_INCOME, weight: 10 },
-    KwGroup { kws: &["commission income","brokerage income","agency income","referral income"], group: GROUP_INDIRECT_INCOME, weight: 10 },
-    KwGroup { kws: &["interest income","interest received","bank interest","fd interest","interest on loan"], group: GROUP_INDIRECT_INCOME, weight: 10 },
-    KwGroup { kws: &["rental income","rent income","lease income","sublease income"], group: GROUP_INDIRECT_INCOME, weight: 10 },
-    KwGroup { kws: &["dividend income","dividend received"], group: GROUP_INDIRECT_INCOME, weight: 10 },
-    KwGroup { kws: &["misc income","miscellaneous income","other income","sundry income"], group: GROUP_INDIRECT_INCOME, weight: 8 },
-    KwGroup { kws: &["grant income","subsidy income","export incentive"], group: GROUP_INDIRECT_INCOME, weight: 8 },
-
-    // ── Purchase Accounts ──────────────────────────────────────────────────
-    KwGroup { kws: &["purchase","purchases","raw material","stock purchase","goods purchase","import"], group: GROUP_PURCHASE_ACCOUNTS, weight: 10 },
-
-    // ── Indirect Expenses ──────────────────────────────────────────────────
-    KwGroup { kws: &["salary","salaries","wage","wages","payroll","stipend","remuneration"], group: GROUP_INDIRECT_EXPENSES, weight: 10 },
-    KwGroup { kws: &["rent","office rent","shop rent","godown rent","rental expense","lease expense"], group: GROUP_INDIRECT_EXPENSES, weight: 10 },
-    KwGroup { kws: &["telephone","mobile","phone bill","landline","sim"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["internet","broadband","data plan","wifi","leased line","connectivity"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["electricity","power bill","utility bill","msedcl","bescom","tneb"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["bank charge","bank fee","bank commission","processing fee","annual fee","service charge","maintenance charge","sms charge","ecs charge"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["professional fee","consultancy","audit fee","legal fee","advocate fee","ca fee","cs fee","notary","registration fee"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["insurance","premium","mediclaim","policy","life insurance","vehicle insurance"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["travel","travelling","tour","conveyance","cab","taxi","ola","uber","irctc","airline","train ticket","flight"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["advertisement","advertising","marketing","promotion","digital ad","facebook ad","google ad","hoarding","banner"], group: GROUP_INDIRECT_EXPENSES, weight: 9 },
-    KwGroup { kws: &["printing","stationery","office supply","paper","ink","toner"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["repair","maintenance","amc","annual maintenance","service contract","housekeeping","pest control"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["fuel","petrol","diesel","cng","hp fuel","bpcl","hpcl"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["food","meal","canteen","lunch","dinner","tea","refreshment","snack"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["medical","medicine","pharmacy","hospital","doctor","clinic","health"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["grocery","vegetable","kirana","supermarket","bigbasket","blinkit"], group: GROUP_INDIRECT_EXPENSES, weight: 7 },
-    KwGroup { kws: &["software","subscription","saas","app","license","domain","hosting","aws","azure","google cloud","github","notion"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["vehicle","car expense","two wheeler","bike service","vehicle maintenance"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["courier","freight","logistics","shipping","delivery charge","cargo"], group: GROUP_INDIRECT_EXPENSES, weight: 8 },
-    KwGroup { kws: &["staff welfare","employee welfare","birthday","outing","team lunch"], group: GROUP_INDIRECT_EXPENSES, weight: 7 },
-    KwGroup { kws: &["security","guard","watchman","cctv","security service"], group: GROUP_INDIRECT_EXPENSES, weight: 7 },
-    KwGroup { kws: &["cleaning","sweeping","housekeeping","janitorial"], group: GROUP_INDIRECT_EXPENSES, weight: 7 },
-    KwGroup { kws: &["miscellaneous","misc expense","sundry expense","petty","petty cash"], group: GROUP_INDIRECT_EXPENSES, weight: 6 },
-    KwGroup { kws: &["office expense","office cost","admin expense","administrative"], group: GROUP_INDIRECT_EXPENSES, weight: 7 },
-
-    // ── Direct Expenses ────────────────────────────────────────────────────
-    KwGroup { kws: &["production","manufacturing","factory","job work","conversion","packing material"], group: GROUP_DIRECT_EXPENSES, weight: 10 },
-    KwGroup { kws: &["labour","direct labour","contract labour","labour charge"], group: GROUP_DIRECT_EXPENSES, weight: 9 },
-
-    // ── Duties & Taxes (Liability) ─────────────────────────────────────────
-    KwGroup { kws: &["gst payable","cgst payable","sgst payable","igst payable","gst liability"], group: GROUP_DUTIES_TAXES, weight: 10 },
-    KwGroup { kws: &["tds payable","tds deducted","tax deducted","income tax payable","advance tax"], group: GROUP_DUTIES_TAXES, weight: 10 },
-    KwGroup { kws: &["professional tax","pt payable","esic","provident fund","pf payable","epf"], group: GROUP_DUTIES_TAXES, weight: 9 },
-    KwGroup { kws: &["customs duty","import duty","excise","cess"], group: GROUP_DUTIES_TAXES, weight: 9 },
-
-    // ── Sundry Creditors (Liability) ───────────────────────────────────────
-    KwGroup { kws: &["creditor","supplier","vendor payable","accounts payable","trade payable"], group: GROUP_SUNDRY_CREDITORS, weight: 10 },
-
-    // ── Sundry Debtors (Asset) ─────────────────────────────────────────────
-    KwGroup { kws: &["debtor","customer receivable","accounts receivable","trade receivable"], group: GROUP_SUNDRY_DEBTORS, weight: 10 },
-
-    // ── Cash (Asset) ───────────────────────────────────────────────────────
-    KwGroup { kws: &["cash","petty cash","cash in hand"], group: GROUP_CASH_IN_HAND, weight: 10 },
-
-    // ── Bank Accounts (Asset) ──────────────────────────────────────────────
-    KwGroup { kws: &["bank account","current account","savings account","hdfc","icici","sbi","axis"], group: GROUP_BANK_ACCOUNTS, weight: 8 },
-
-    // ── Fixed Assets ───────────────────────────────────────────────────────
-    KwGroup { kws: &["computer","laptop","desktop","server","printer","scanner","hardware"], group: GROUP_FIXED_ASSETS, weight: 9 },
-    KwGroup { kws: &["furniture","office furniture","chair","table","cabinet","rack"], group: GROUP_FIXED_ASSETS, weight: 9 },
-    KwGroup { kws: &["machinery","equipment","plant","motor","generator"], group: GROUP_FIXED_ASSETS, weight: 9 },
-    KwGroup { kws: &["vehicle","car","bike","truck","van","bus","four wheeler"], group: GROUP_FIXED_ASSETS, weight: 9 },
-    KwGroup { kws: &["building","land","property","office building","warehouse"], group: GROUP_FIXED_ASSETS, weight: 9 },
-    KwGroup { kws: &["intangible","patent","trademark","copyright","goodwill"], group: GROUP_FIXED_ASSETS, weight: 8 },
-
-    // ── Investments (Asset) ────────────────────────────────────────────────
-    KwGroup { kws: &["investment","mutual fund","share","equity","bonds","debenture","nsc","ppf","fd"], group: GROUP_INVESTMENTS, weight: 9 },
-
-    // ── Loans & Advances (Asset) ───────────────────────────────────────────
-    KwGroup { kws: &["advance","loan given","loan to staff","advance to employee","security deposit","refundable deposit"], group: GROUP_LOANS_ADVANCES, weight: 9 },
-
-    // ── Deposits (Asset) ───────────────────────────────────────────────────
-    KwGroup { kws: &["deposit","security deposit","earnest money","margin money"], group: GROUP_DEPOSITS, weight: 8 },
-
-    // ── Loans Liability ────────────────────────────────────────────────────
-    KwGroup { kws: &["loan","term loan","working capital loan","overdraft","od limit","cc limit","borrowing","credit facility","emi","mortgage"], group: GROUP_LOANS, weight: 9 },
-
-    // ── Capital Account ────────────────────────────────────────────────────
-    KwGroup { kws: &["capital","owner capital","proprietor capital","partner capital","share capital"], group: GROUP_CAPITAL_ACCOUNT, weight: 10 },
-
-    // ── Reserves & Surplus ─────────────────────────────────────────────────
-    KwGroup { kws: &["reserve","surplus","retained earning","profit reserve","general reserve"], group: GROUP_RESERVES, weight: 10 },
-]);
+static KEYWORD_MAP: Lazy<Vec<KwGroup>> = Lazy::new(|| {
+    vec![
+        // ── Direct Income / Sales ──────────────────────────────────────────────
+        KwGroup {
+            kws: &["sales", "sale", "revenue", "turnover", "gross receipt"],
+            group: GROUP_SALES_ACCOUNTS,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "service income",
+                "service revenue",
+                "consulting income",
+                "fees income",
+                "income from service",
+            ],
+            group: GROUP_DIRECT_INCOME,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "commission income",
+                "brokerage income",
+                "agency income",
+                "referral income",
+            ],
+            group: GROUP_INDIRECT_INCOME,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "interest income",
+                "interest received",
+                "bank interest",
+                "fd interest",
+                "interest on loan",
+            ],
+            group: GROUP_INDIRECT_INCOME,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "rental income",
+                "rent income",
+                "lease income",
+                "sublease income",
+            ],
+            group: GROUP_INDIRECT_INCOME,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &["dividend income", "dividend received"],
+            group: GROUP_INDIRECT_INCOME,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "misc income",
+                "miscellaneous income",
+                "other income",
+                "sundry income",
+            ],
+            group: GROUP_INDIRECT_INCOME,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &["grant income", "subsidy income", "export incentive"],
+            group: GROUP_INDIRECT_INCOME,
+            weight: 8,
+        },
+        // ── Purchase Accounts ──────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "purchase",
+                "purchases",
+                "raw material",
+                "stock purchase",
+                "goods purchase",
+                "import",
+            ],
+            group: GROUP_PURCHASE_ACCOUNTS,
+            weight: 10,
+        },
+        // ── Indirect Expenses ──────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "salary",
+                "salaries",
+                "wage",
+                "wages",
+                "payroll",
+                "stipend",
+                "remuneration",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "rent",
+                "office rent",
+                "shop rent",
+                "godown rent",
+                "rental expense",
+                "lease expense",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &["telephone", "mobile", "phone bill", "landline", "sim"],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "internet",
+                "broadband",
+                "data plan",
+                "wifi",
+                "leased line",
+                "connectivity",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "electricity",
+                "power bill",
+                "utility bill",
+                "msedcl",
+                "bescom",
+                "tneb",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "bank charge",
+                "bank fee",
+                "bank commission",
+                "processing fee",
+                "annual fee",
+                "service charge",
+                "maintenance charge",
+                "sms charge",
+                "ecs charge",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "professional fee",
+                "consultancy",
+                "audit fee",
+                "legal fee",
+                "advocate fee",
+                "ca fee",
+                "cs fee",
+                "notary",
+                "registration fee",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "insurance",
+                "premium",
+                "mediclaim",
+                "policy",
+                "life insurance",
+                "vehicle insurance",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "travel",
+                "travelling",
+                "tour",
+                "conveyance",
+                "cab",
+                "taxi",
+                "ola",
+                "uber",
+                "irctc",
+                "airline",
+                "train ticket",
+                "flight",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "advertisement",
+                "advertising",
+                "marketing",
+                "promotion",
+                "digital ad",
+                "facebook ad",
+                "google ad",
+                "hoarding",
+                "banner",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "printing",
+                "stationery",
+                "office supply",
+                "paper",
+                "ink",
+                "toner",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &[
+                "repair",
+                "maintenance",
+                "amc",
+                "annual maintenance",
+                "service contract",
+                "housekeeping",
+                "pest control",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &["fuel", "petrol", "diesel", "cng", "hp fuel", "bpcl", "hpcl"],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &[
+                "food",
+                "meal",
+                "canteen",
+                "lunch",
+                "dinner",
+                "tea",
+                "refreshment",
+                "snack",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &[
+                "medical", "medicine", "pharmacy", "hospital", "doctor", "clinic", "health",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &[
+                "grocery",
+                "vegetable",
+                "kirana",
+                "supermarket",
+                "bigbasket",
+                "blinkit",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 7,
+        },
+        KwGroup {
+            kws: &[
+                "software",
+                "subscription",
+                "saas",
+                "app",
+                "license",
+                "domain",
+                "hosting",
+                "aws",
+                "azure",
+                "google cloud",
+                "github",
+                "notion",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &[
+                "vehicle",
+                "car expense",
+                "two wheeler",
+                "bike service",
+                "vehicle maintenance",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &[
+                "courier",
+                "freight",
+                "logistics",
+                "shipping",
+                "delivery charge",
+                "cargo",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 8,
+        },
+        KwGroup {
+            kws: &[
+                "staff welfare",
+                "employee welfare",
+                "birthday",
+                "outing",
+                "team lunch",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 7,
+        },
+        KwGroup {
+            kws: &["security", "guard", "watchman", "cctv", "security service"],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 7,
+        },
+        KwGroup {
+            kws: &["cleaning", "sweeping", "housekeeping", "janitorial"],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 7,
+        },
+        KwGroup {
+            kws: &[
+                "miscellaneous",
+                "misc expense",
+                "sundry expense",
+                "petty",
+                "petty cash",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 6,
+        },
+        KwGroup {
+            kws: &[
+                "office expense",
+                "office cost",
+                "admin expense",
+                "administrative",
+            ],
+            group: GROUP_INDIRECT_EXPENSES,
+            weight: 7,
+        },
+        // ── Direct Expenses ────────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "production",
+                "manufacturing",
+                "factory",
+                "job work",
+                "conversion",
+                "packing material",
+            ],
+            group: GROUP_DIRECT_EXPENSES,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "labour",
+                "direct labour",
+                "contract labour",
+                "labour charge",
+            ],
+            group: GROUP_DIRECT_EXPENSES,
+            weight: 9,
+        },
+        // ── Duties & Taxes (Liability) ─────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "gst payable",
+                "cgst payable",
+                "sgst payable",
+                "igst payable",
+                "gst liability",
+            ],
+            group: GROUP_DUTIES_TAXES,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "tds payable",
+                "tds deducted",
+                "tax deducted",
+                "income tax payable",
+                "advance tax",
+            ],
+            group: GROUP_DUTIES_TAXES,
+            weight: 10,
+        },
+        KwGroup {
+            kws: &[
+                "professional tax",
+                "pt payable",
+                "esic",
+                "provident fund",
+                "pf payable",
+                "epf",
+            ],
+            group: GROUP_DUTIES_TAXES,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &["customs duty", "import duty", "excise", "cess"],
+            group: GROUP_DUTIES_TAXES,
+            weight: 9,
+        },
+        // ── Sundry Creditors (Liability) ───────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "creditor",
+                "supplier",
+                "vendor payable",
+                "accounts payable",
+                "trade payable",
+            ],
+            group: GROUP_SUNDRY_CREDITORS,
+            weight: 10,
+        },
+        // ── Sundry Debtors (Asset) ─────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "debtor",
+                "customer receivable",
+                "accounts receivable",
+                "trade receivable",
+            ],
+            group: GROUP_SUNDRY_DEBTORS,
+            weight: 10,
+        },
+        // ── Cash (Asset) ───────────────────────────────────────────────────────
+        KwGroup {
+            kws: &["cash", "petty cash", "cash in hand"],
+            group: GROUP_CASH_IN_HAND,
+            weight: 10,
+        },
+        // ── Bank Accounts (Asset) ──────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "bank account",
+                "current account",
+                "savings account",
+                "hdfc",
+                "icici",
+                "sbi",
+                "axis",
+            ],
+            group: GROUP_BANK_ACCOUNTS,
+            weight: 8,
+        },
+        // ── Fixed Assets ───────────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "computer", "laptop", "desktop", "server", "printer", "scanner", "hardware",
+            ],
+            group: GROUP_FIXED_ASSETS,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "furniture",
+                "office furniture",
+                "chair",
+                "table",
+                "cabinet",
+                "rack",
+            ],
+            group: GROUP_FIXED_ASSETS,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &["machinery", "equipment", "plant", "motor", "generator"],
+            group: GROUP_FIXED_ASSETS,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "vehicle",
+                "car",
+                "bike",
+                "truck",
+                "van",
+                "bus",
+                "four wheeler",
+            ],
+            group: GROUP_FIXED_ASSETS,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &[
+                "building",
+                "land",
+                "property",
+                "office building",
+                "warehouse",
+            ],
+            group: GROUP_FIXED_ASSETS,
+            weight: 9,
+        },
+        KwGroup {
+            kws: &["intangible", "patent", "trademark", "copyright", "goodwill"],
+            group: GROUP_FIXED_ASSETS,
+            weight: 8,
+        },
+        // ── Investments (Asset) ────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "investment",
+                "mutual fund",
+                "share",
+                "equity",
+                "bonds",
+                "debenture",
+                "nsc",
+                "ppf",
+                "fd",
+            ],
+            group: GROUP_INVESTMENTS,
+            weight: 9,
+        },
+        // ── Loans & Advances (Asset) ───────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "advance",
+                "loan given",
+                "loan to staff",
+                "advance to employee",
+                "security deposit",
+                "refundable deposit",
+            ],
+            group: GROUP_LOANS_ADVANCES,
+            weight: 9,
+        },
+        // ── Deposits (Asset) ───────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "deposit",
+                "security deposit",
+                "earnest money",
+                "margin money",
+            ],
+            group: GROUP_DEPOSITS,
+            weight: 8,
+        },
+        // ── Loans Liability ────────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "loan",
+                "term loan",
+                "working capital loan",
+                "overdraft",
+                "od limit",
+                "cc limit",
+                "borrowing",
+                "credit facility",
+                "emi",
+                "mortgage",
+            ],
+            group: GROUP_LOANS,
+            weight: 9,
+        },
+        // ── Capital Account ────────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "capital",
+                "owner capital",
+                "proprietor capital",
+                "partner capital",
+                "share capital",
+            ],
+            group: GROUP_CAPITAL_ACCOUNT,
+            weight: 10,
+        },
+        // ── Reserves & Surplus ─────────────────────────────────────────────────
+        KwGroup {
+            kws: &[
+                "reserve",
+                "surplus",
+                "retained earning",
+                "profit reserve",
+                "general reserve",
+            ],
+            group: GROUP_RESERVES,
+            weight: 10,
+        },
+    ]
+});
 
 /// Minimum confidence ratio to accept a keyword-scored group, matching JS
 /// `BSPConfig.tallyGroup.minConfidence` default (config.js:47).

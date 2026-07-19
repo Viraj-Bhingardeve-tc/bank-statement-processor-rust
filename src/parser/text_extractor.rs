@@ -46,7 +46,7 @@ pub fn extract_pages(path: &Path) -> Result<Vec<Vec<PdfItem>>> {
 
     let mut all_raw: Vec<RawPdfItem> = Vec::new();
 
-    for (page_num, _object_id) in &pages {
+    for page_num in pages.keys() {
         // extract_text expects 1-based page numbers — use the BTreeMap key directly.
         let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
 
@@ -55,7 +55,9 @@ pub fn extract_pages(path: &Path) -> Result<Vec<Vec<PdfItem>>> {
 
         for (line_idx, line) in page_text.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
 
             // One item per line, at X = 0 — full line text preserved.
             // This enables both FW-format and OCR-text parsing downstream.
@@ -81,7 +83,7 @@ pub fn extract_pages(path: &Path) -> Result<Vec<Vec<PdfItem>>> {
 /// Also uses correct 1-based page numbers from `doc.get_pages()`.
 pub fn extract_full_text(path: &Path) -> String {
     let doc = match lopdf::Document::load(path) {
-        Ok(d)  => d,
+        Ok(d) => d,
         Err(e) => {
             log::warn!("[TextExtractor] load failed: {}", e);
             return String::new();
@@ -91,9 +93,9 @@ pub fn extract_full_text(path: &Path) -> String {
     let pages = doc.get_pages();
     let mut parts = Vec::with_capacity(pages.len());
 
-    for (page_num, _) in &pages {
+    for page_num in pages.keys() {
         match doc.extract_text(&[*page_num]) {
-            Ok(t)  => parts.push(t),
+            Ok(t) => parts.push(t),
             Err(e) => log::debug!("[TextExtractor] page {} extract error: {}", page_num, e),
         }
     }
@@ -122,26 +124,35 @@ pub fn extract_pages_with_password(path: &Path, password: &[u8]) -> Result<Vec<V
 
     let mut all_raw: Vec<RawPdfItem> = Vec::new();
 
-    for (page_num, _object_id) in &pages {
+    for page_num in pages.keys() {
         let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
         let y_offset = (*page_num as f64 - 1.0) * 10_000.0;
         for (line_idx, line) in page_text.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             let y = y_offset + (line_idx as f64 * 15.0);
             all_raw.push(RawPdfItem::new(line, 0.0, y, (line.len() as f64) * 6.0));
         }
     }
 
-    log::debug!("[TextExtractor] (pwd) {} pages → {} raw lines", pages.len(), all_raw.len());
+    log::debug!(
+        "[TextExtractor] (pwd) {} pages → {} raw lines",
+        pages.len(),
+        all_raw.len()
+    );
 
     Ok(cluster_into_rows(all_raw, 5.0))
 }
 
 pub fn extract_full_text_with_password(path: &Path, password: &[u8]) -> String {
     let mut doc = match lopdf::Document::load(path) {
-        Ok(d)  => d,
-        Err(e) => { log::warn!("[TextExtractor] load failed: {}", e); return String::new(); }
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("[TextExtractor] load failed: {}", e);
+            return String::new();
+        }
     };
     if doc.is_encrypted() {
         if let Err(e) = doc.decrypt(password) {
@@ -153,9 +164,9 @@ pub fn extract_full_text_with_password(path: &Path, password: &[u8]) -> String {
     let pages = doc.get_pages();
     let mut parts = Vec::with_capacity(pages.len());
 
-    for (page_num, _) in &pages {
+    for page_num in pages.keys() {
         match doc.extract_text(&[*page_num]) {
-            Ok(t)  => parts.push(t),
+            Ok(t) => parts.push(t),
             Err(e) => log::debug!("[TextExtractor] (pwd) page {} error: {}", page_num, e),
         }
     }
@@ -175,7 +186,12 @@ mod tests {
 
     #[test]
     fn single_line_becomes_one_row_one_item() {
-        let items = vec![RawPdfItem::new("03/04/2024 SALARY 50000.00 95000.00", 0.0, 0.0, 200.0)];
+        let items = vec![RawPdfItem::new(
+            "03/04/2024 SALARY 50000.00 95000.00",
+            0.0,
+            0.0,
+            200.0,
+        )];
         let rows = cluster_into_rows(items, 5.0);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].len(), 1);
@@ -185,7 +201,7 @@ mod tests {
     #[test]
     fn multiple_lines_each_become_own_row() {
         let items: Vec<RawPdfItem> = (0..5)
-            .map(|i| RawPdfItem::new(&format!("line {}", i), 0.0, (i as f64) * 15.0, 60.0))
+            .map(|i| RawPdfItem::new(format!("line {}", i), 0.0, (i as f64) * 15.0, 60.0))
             .collect();
         let rows = cluster_into_rows(items, 5.0);
         assert_eq!(rows.len(), 5, "each line (Y spaced by 15) → separate row");
@@ -204,12 +220,15 @@ mod tests {
         let rows: Vec<Vec<crate::parser::column_detector::PdfItem>> = (0..10)
             .map(|i| {
                 vec![crate::parser::column_detector::PdfItem {
-                    x:    0.0,
+                    x: 0.0,
                     text: format!("{:02}/01/2024 PAYMENT 5000.00 95000.00", i + 1),
-                    w:    300.0,
+                    w: 300.0,
                 }]
             })
             .collect();
-        assert!(is_fw_format(&rows), "all-X=0 rows should be detected as FW format");
+        assert!(
+            is_fw_format(&rows),
+            "all-X=0 rows should be detected as FW format"
+        );
     }
 }

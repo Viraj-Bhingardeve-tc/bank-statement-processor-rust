@@ -1,8 +1,8 @@
 // settings.rs — Application settings persistence layer.
 
+use crate::db;
 use anyhow::Result;
 use rusqlite::Connection;
-use crate::db;
 
 // The AI provider API key is sensitive (it authenticates the user's own
 // OpenAI/Claude/Gemini account) and is deliberately NOT stored in the
@@ -32,14 +32,22 @@ fn load_ai_key() -> String {
 /// delete the plaintext row so it no longer sits on disk in cleartext.
 /// Safe to call on every load — it's a no-op once the legacy row is gone.
 fn migrate_legacy_plaintext_ai_key(conn: &Connection) -> String {
-    let legacy = db::get_setting(conn, LEGACY_DB_KEY_AI_KEY).ok().flatten().unwrap_or_default();
+    let legacy = db::get_setting(conn, LEGACY_DB_KEY_AI_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     if legacy.is_empty() {
         return load_ai_key();
     }
-    log::info!("[Settings] migrating AI API key out of plaintext storage into the OS credential store");
+    log::info!(
+        "[Settings] migrating AI API key out of plaintext storage into the OS credential store"
+    );
     save_ai_key(&legacy);
     if let Err(e) = db::delete_setting(conn, LEGACY_DB_KEY_AI_KEY) {
-        log::error!("[Settings] failed to remove legacy plaintext AI key row: {}", e);
+        log::error!(
+            "[Settings] failed to remove legacy plaintext AI key row: {}",
+            e
+        );
     }
     load_ai_key()
 }
@@ -62,102 +70,174 @@ fn save_ai_key(key: &str) {
         store.set_password(KEYRING_SERVICE, KEYRING_USERNAME, key)
     };
     if let Err(e) = result {
-        log::error!("[Settings] failed to persist AI API key to OS credential store: {}", e);
+        log::error!(
+            "[Settings] failed to persist AI API key to OS credential store: {}",
+            e
+        );
     }
 }
 
-pub const KEY_AI_PROVIDER:           &str = "ai_provider";
-pub const KEY_AI_ENABLED:            &str = "ai_enabled";
-pub const KEY_LAST_CLIENT:           &str = "last_client_id";
-pub const KEY_NARR_ENABLED:          &str = "narr_enabled";
-pub const KEY_NARR_TITLE_CASE:       &str = "narr_title_case";
-pub const KEY_NARR_PRESERVE:         &str = "narr_preserve";
-pub const KEY_GST_ENABLED:           &str = "gst_enabled";
-pub const KEY_GST_AUTO_LEDGERS:      &str = "gst_auto_ledgers";
-pub const KEY_RECON_DAYS:            &str = "recon_days";
-pub const KEY_RECON_PCT:             &str = "recon_pct";
-pub const KEY_LOG_LEVEL:             &str = "log_level";
-pub const KEY_DEFAULT_STATE_IDX:     &str = "default_state_idx";
+pub const KEY_AI_PROVIDER: &str = "ai_provider";
+pub const KEY_AI_ENABLED: &str = "ai_enabled";
+pub const KEY_LAST_CLIENT: &str = "last_client_id";
+pub const KEY_NARR_ENABLED: &str = "narr_enabled";
+pub const KEY_NARR_TITLE_CASE: &str = "narr_title_case";
+pub const KEY_NARR_PRESERVE: &str = "narr_preserve";
+pub const KEY_GST_ENABLED: &str = "gst_enabled";
+pub const KEY_GST_AUTO_LEDGERS: &str = "gst_auto_ledgers";
+pub const KEY_RECON_DAYS: &str = "recon_days";
+pub const KEY_RECON_PCT: &str = "recon_pct";
+pub const KEY_LOG_LEVEL: &str = "log_level";
+pub const KEY_DEFAULT_STATE_IDX: &str = "default_state_idx";
 
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub ai_provider:        String,   // "openai" | "claude" | "gemini"
-    pub ai_api_key:         String,
-    pub ai_enabled:         bool,
-    pub last_client_id:     Option<i64>,
+    pub ai_provider: String, // "openai" | "claude" | "gemini"
+    pub ai_api_key: String,
+    pub ai_enabled: bool,
+    pub last_client_id: Option<i64>,
     // Narration cleaner
-    pub narr_enabled:       bool,
-    pub narr_title_case:    bool,
-    pub narr_preserve:      bool,
+    pub narr_enabled: bool,
+    pub narr_title_case: bool,
+    pub narr_preserve: bool,
     // GST engine
-    pub gst_enabled:        bool,
-    pub gst_auto_ledgers:   bool,
+    pub gst_enabled: bool,
+    pub gst_auto_ledgers: bool,
     // Reconciliation
-    pub recon_days:         i32,    // ±N days for date fuzzy matching
-    pub recon_pct:          f64,    // % tolerance for amount matching
+    pub recon_days: i32, // ±N days for date fuzzy matching
+    pub recon_pct: f64,  // % tolerance for amount matching
     // Logging
-    pub log_level:          String, // "INFO" | "DEBUG" | "WARN" | "ERROR"
+    pub log_level: String, // "INFO" | "DEBUG" | "WARN" | "ERROR"
     // GST engine — default state used to pre-fill the Export Wizard's state
     // selector (index into the same 9-entry state list the wizard itself uses).
-    pub default_state_idx:  i32,
+    pub default_state_idx: i32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            ai_provider:        "openai".to_string(),
-            ai_api_key:         String::new(),
-            ai_enabled:         false,
-            last_client_id:     None,
-            narr_enabled:       true,
-            narr_title_case:    true,
-            narr_preserve:      false,
-            gst_enabled:        true,
-            gst_auto_ledgers:   true,
-            recon_days:         3,
-            recon_pct:          0.5,
-            log_level:          "INFO".to_string(),
-            default_state_idx:  0,
+            ai_provider: "openai".to_string(),
+            ai_api_key: String::new(),
+            ai_enabled: false,
+            last_client_id: None,
+            narr_enabled: true,
+            narr_title_case: true,
+            narr_preserve: false,
+            gst_enabled: true,
+            gst_auto_ledgers: true,
+            recon_days: 3,
+            recon_pct: 0.5,
+            log_level: "INFO".to_string(),
+            default_state_idx: 0,
         }
     }
 }
 
-fn b(s: &str) -> bool { s == "1" || s == "true" }
+fn b(s: &str) -> bool {
+    s == "1" || s == "true"
+}
 
 impl Settings {
     pub fn load(conn: &Connection) -> Self {
         let get = |k: &str| db::get_setting(conn, k).ok().flatten().unwrap_or_default();
-        let provider    = get(KEY_AI_PROVIDER);
+        let provider = get(KEY_AI_PROVIDER);
         Settings {
-            ai_provider:        if provider.is_empty() { "openai".to_string() } else { provider },
-            ai_api_key:         migrate_legacy_plaintext_ai_key(conn),
-            ai_enabled:         b(&get(KEY_AI_ENABLED)),
-            last_client_id:     get(KEY_LAST_CLIENT).parse::<i64>().ok(),
-            narr_enabled:       { let v = get(KEY_NARR_ENABLED);    if v.is_empty() { true  } else { b(&v) } },
-            narr_title_case:    { let v = get(KEY_NARR_TITLE_CASE); if v.is_empty() { true  } else { b(&v) } },
-            narr_preserve:      b(&get(KEY_NARR_PRESERVE)),
-            gst_enabled:        { let v = get(KEY_GST_ENABLED);      if v.is_empty() { true  } else { b(&v) } },
-            gst_auto_ledgers:   { let v = get(KEY_GST_AUTO_LEDGERS); if v.is_empty() { true  } else { b(&v) } },
-            recon_days:         get(KEY_RECON_DAYS).parse::<i32>().unwrap_or(3),
-            recon_pct:          get(KEY_RECON_PCT).parse::<f64>().unwrap_or(0.5),
-            log_level:          { let v = get(KEY_LOG_LEVEL); if v.is_empty() { "INFO".to_string() } else { v } },
-            default_state_idx:  get(KEY_DEFAULT_STATE_IDX).parse::<i32>().unwrap_or(0),
+            ai_provider: if provider.is_empty() {
+                "openai".to_string()
+            } else {
+                provider
+            },
+            ai_api_key: migrate_legacy_plaintext_ai_key(conn),
+            ai_enabled: b(&get(KEY_AI_ENABLED)),
+            last_client_id: get(KEY_LAST_CLIENT).parse::<i64>().ok(),
+            narr_enabled: {
+                let v = get(KEY_NARR_ENABLED);
+                if v.is_empty() {
+                    true
+                } else {
+                    b(&v)
+                }
+            },
+            narr_title_case: {
+                let v = get(KEY_NARR_TITLE_CASE);
+                if v.is_empty() {
+                    true
+                } else {
+                    b(&v)
+                }
+            },
+            narr_preserve: b(&get(KEY_NARR_PRESERVE)),
+            gst_enabled: {
+                let v = get(KEY_GST_ENABLED);
+                if v.is_empty() {
+                    true
+                } else {
+                    b(&v)
+                }
+            },
+            gst_auto_ledgers: {
+                let v = get(KEY_GST_AUTO_LEDGERS);
+                if v.is_empty() {
+                    true
+                } else {
+                    b(&v)
+                }
+            },
+            recon_days: get(KEY_RECON_DAYS).parse::<i32>().unwrap_or(3),
+            recon_pct: get(KEY_RECON_PCT).parse::<f64>().unwrap_or(0.5),
+            log_level: {
+                let v = get(KEY_LOG_LEVEL);
+                if v.is_empty() {
+                    "INFO".to_string()
+                } else {
+                    v
+                }
+            },
+            default_state_idx: get(KEY_DEFAULT_STATE_IDX).parse::<i32>().unwrap_or(0),
         }
     }
 
     pub fn save(&self, conn: &Connection) -> Result<()> {
-        db::set_setting(conn, KEY_AI_PROVIDER,      &self.ai_provider)?;
+        db::set_setting(conn, KEY_AI_PROVIDER, &self.ai_provider)?;
         save_ai_key(&self.ai_api_key);
-        db::set_setting(conn, KEY_AI_ENABLED,       if self.ai_enabled { "1" } else { "0" })?;
-        db::set_setting(conn, KEY_NARR_ENABLED,     if self.narr_enabled { "1" } else { "0" })?;
-        db::set_setting(conn, KEY_NARR_TITLE_CASE,  if self.narr_title_case { "1" } else { "0" })?;
-        db::set_setting(conn, KEY_NARR_PRESERVE,    if self.narr_preserve { "1" } else { "0" })?;
-        db::set_setting(conn, KEY_GST_ENABLED,      if self.gst_enabled { "1" } else { "0" })?;
-        db::set_setting(conn, KEY_GST_AUTO_LEDGERS, if self.gst_auto_ledgers { "1" } else { "0" })?;
-        db::set_setting(conn, KEY_RECON_DAYS,       &self.recon_days.to_string())?;
-        db::set_setting(conn, KEY_RECON_PCT,        &self.recon_pct.to_string())?;
-        db::set_setting(conn, KEY_LOG_LEVEL,        &self.log_level)?;
-        db::set_setting(conn, KEY_DEFAULT_STATE_IDX, &self.default_state_idx.to_string())?;
+        db::set_setting(
+            conn,
+            KEY_AI_ENABLED,
+            if self.ai_enabled { "1" } else { "0" },
+        )?;
+        db::set_setting(
+            conn,
+            KEY_NARR_ENABLED,
+            if self.narr_enabled { "1" } else { "0" },
+        )?;
+        db::set_setting(
+            conn,
+            KEY_NARR_TITLE_CASE,
+            if self.narr_title_case { "1" } else { "0" },
+        )?;
+        db::set_setting(
+            conn,
+            KEY_NARR_PRESERVE,
+            if self.narr_preserve { "1" } else { "0" },
+        )?;
+        db::set_setting(
+            conn,
+            KEY_GST_ENABLED,
+            if self.gst_enabled { "1" } else { "0" },
+        )?;
+        db::set_setting(
+            conn,
+            KEY_GST_AUTO_LEDGERS,
+            if self.gst_auto_ledgers { "1" } else { "0" },
+        )?;
+        db::set_setting(conn, KEY_RECON_DAYS, &self.recon_days.to_string())?;
+        db::set_setting(conn, KEY_RECON_PCT, &self.recon_pct.to_string())?;
+        db::set_setting(conn, KEY_LOG_LEVEL, &self.log_level)?;
+        db::set_setting(
+            conn,
+            KEY_DEFAULT_STATE_IDX,
+            &self.default_state_idx.to_string(),
+        )?;
         if let Some(id) = self.last_client_id {
             db::set_setting(conn, KEY_LAST_CLIENT, &id.to_string())?;
         }
@@ -205,7 +285,11 @@ mod tests {
         save_ai_key("sk-temp");
         assert_eq!(load_ai_key(), "sk-temp");
         save_ai_key("");
-        assert_eq!(load_ai_key(), "", "saving an empty key must clear the stored secret");
+        assert_eq!(
+            load_ai_key(),
+            "",
+            "saving an empty key must clear the stored secret"
+        );
         clear_test_entry();
     }
 
@@ -219,9 +303,16 @@ mod tests {
         let migrated = migrate_legacy_plaintext_ai_key(&conn);
 
         assert_eq!(migrated, "sk-legacy-plaintext");
-        assert_eq!(load_ai_key(), "sk-legacy-plaintext", "key must now live in the keyring");
+        assert_eq!(
+            load_ai_key(),
+            "sk-legacy-plaintext",
+            "key must now live in the keyring"
+        );
         let leftover = db::get_setting(&conn, LEGACY_DB_KEY_AI_KEY).unwrap();
-        assert!(leftover.is_none(), "plaintext row must be deleted after migration");
+        assert!(
+            leftover.is_none(),
+            "plaintext row must be deleted after migration"
+        );
         clear_test_entry();
     }
 
@@ -256,25 +347,27 @@ mod tests {
         // the same cross-test keyring race the AI-key tests above guard against.
         let _guard = lock();
         let conn = db::open(":memory:").expect("open in-memory db");
-        let mut cfg = Settings::default();
-        cfg.narr_enabled      = false;
-        cfg.narr_title_case   = false;
-        cfg.narr_preserve     = true;
-        cfg.gst_enabled       = false;
-        cfg.gst_auto_ledgers  = false;
-        cfg.recon_days        = 7;
-        cfg.recon_pct         = 1.5;
-        cfg.log_level         = "DEBUG".to_string();
-        cfg.default_state_idx = 3;
+        let cfg = Settings {
+            narr_enabled: false,
+            narr_title_case: false,
+            narr_preserve: true,
+            gst_enabled: false,
+            gst_auto_ledgers: false,
+            recon_days: 7,
+            recon_pct: 1.5,
+            log_level: "DEBUG".to_string(),
+            default_state_idx: 3,
+            ..Default::default()
+        };
 
         cfg.save(&conn).expect("save");
         let reloaded = Settings::load(&conn);
 
-        assert_eq!(reloaded.narr_enabled, false);
-        assert_eq!(reloaded.narr_title_case, false);
-        assert_eq!(reloaded.narr_preserve, true);
-        assert_eq!(reloaded.gst_enabled, false);
-        assert_eq!(reloaded.gst_auto_ledgers, false);
+        assert!(!reloaded.narr_enabled);
+        assert!(!reloaded.narr_title_case);
+        assert!(reloaded.narr_preserve);
+        assert!(!reloaded.gst_enabled);
+        assert!(!reloaded.gst_auto_ledgers);
         assert_eq!(reloaded.recon_days, 7);
         assert_eq!(reloaded.recon_pct, 1.5);
         assert_eq!(reloaded.log_level, "DEBUG");

@@ -120,9 +120,18 @@ pub struct SubscriptionSummary {
 /// rather than constructing a fresh client (and connection pool) per call.
 pub trait LicenseApiClient: Send + Sync {
     fn login(&self, req: &LoginRequest) -> Result<LoginResponse, ApiError>;
-    fn activate_license(&self, req: &ActivateLicenseRequest) -> Result<ActivateLicenseResponse, ApiError>;
-    fn validate_license(&self, req: &ValidateLicenseRequest) -> Result<ValidateLicenseResponse, ApiError>;
-    fn refresh_license(&self, req: &ValidateLicenseRequest) -> Result<ValidateLicenseResponse, ApiError>;
+    fn activate_license(
+        &self,
+        req: &ActivateLicenseRequest,
+    ) -> Result<ActivateLicenseResponse, ApiError>;
+    fn validate_license(
+        &self,
+        req: &ValidateLicenseRequest,
+    ) -> Result<ValidateLicenseResponse, ApiError>;
+    fn refresh_license(
+        &self,
+        req: &ValidateLicenseRequest,
+    ) -> Result<ValidateLicenseResponse, ApiError>;
     fn logout(&self) -> Result<(), ApiError>;
     fn get_subscription(&self) -> Result<SubscriptionSummary, ApiError>;
     fn heartbeat(&self, req: &HeartbeatRequest) -> Result<HeartbeatResponse, ApiError>;
@@ -136,13 +145,22 @@ impl LicenseApiClient for OfflineClient {
     fn login(&self, _req: &LoginRequest) -> Result<LoginResponse, ApiError> {
         Err(ApiError::NoServerConfigured)
     }
-    fn activate_license(&self, _req: &ActivateLicenseRequest) -> Result<ActivateLicenseResponse, ApiError> {
+    fn activate_license(
+        &self,
+        _req: &ActivateLicenseRequest,
+    ) -> Result<ActivateLicenseResponse, ApiError> {
         Err(ApiError::NoServerConfigured)
     }
-    fn validate_license(&self, _req: &ValidateLicenseRequest) -> Result<ValidateLicenseResponse, ApiError> {
+    fn validate_license(
+        &self,
+        _req: &ValidateLicenseRequest,
+    ) -> Result<ValidateLicenseResponse, ApiError> {
         Err(ApiError::NoServerConfigured)
     }
-    fn refresh_license(&self, _req: &ValidateLicenseRequest) -> Result<ValidateLicenseResponse, ApiError> {
+    fn refresh_license(
+        &self,
+        _req: &ValidateLicenseRequest,
+    ) -> Result<ValidateLicenseResponse, ApiError> {
         Err(ApiError::NoServerConfigured)
     }
     fn logout(&self) -> Result<(), ApiError> {
@@ -332,21 +350,33 @@ mod tests {
     fn offline_client_never_attempts_network_io_and_fails_every_call() {
         let client = OfflineClient;
         assert_eq!(
-            client.login(&LoginRequest { email: "a@b.com".to_string(), password: "x".to_string() }).unwrap_err(),
+            client
+                .login(&LoginRequest {
+                    email: "a@b.com".to_string(),
+                    password: "x".to_string()
+                })
+                .unwrap_err(),
             ApiError::NoServerConfigured
         );
         assert_eq!(
-            client.validate_license(&ValidateLicenseRequest {
-                license_id: "lic_1".to_string(),
-                device_id: "dev_1".to_string(),
-                machine_fingerprint: "fp".to_string(),
-                client_clock: "2026-07-09T00:00:00Z".to_string(),
-            }).unwrap_err(),
+            client
+                .validate_license(&ValidateLicenseRequest {
+                    license_id: "lic_1".to_string(),
+                    device_id: "dev_1".to_string(),
+                    machine_fingerprint: "fp".to_string(),
+                    client_clock: "2026-07-09T00:00:00Z".to_string(),
+                })
+                .unwrap_err(),
             ApiError::NoServerConfigured
         );
         assert_eq!(client.logout().unwrap_err(), ApiError::NoServerConfigured);
         assert_eq!(
-            client.heartbeat(&HeartbeatRequest { license_id: "lic_1".to_string(), device_id: "dev_1".to_string() }).unwrap_err(),
+            client
+                .heartbeat(&HeartbeatRequest {
+                    license_id: "lic_1".to_string(),
+                    device_id: "dev_1".to_string()
+                })
+                .unwrap_err(),
             ApiError::NoServerConfigured
         );
     }

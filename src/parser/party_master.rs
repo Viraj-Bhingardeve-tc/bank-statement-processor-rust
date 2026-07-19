@@ -19,9 +19,23 @@ use crate::narration_cleaner::normalize_ledger_name;
 fn is_category_head(s: &str) -> bool {
     let lower = s.to_lowercase();
     [
-        "expense", "income", "payable", "receivable", "charges", "fee",
-        "salary", "rent", "interest", "purchase", "tax", "cash", "contra",
-        "provision", "allowance", "sundry debtors", "sundry creditors",
+        "expense",
+        "income",
+        "payable",
+        "receivable",
+        "charges",
+        "fee",
+        "salary",
+        "rent",
+        "interest",
+        "purchase",
+        "tax",
+        "cash",
+        "contra",
+        "provision",
+        "allowance",
+        "sundry debtors",
+        "sundry creditors",
     ]
     .iter()
     .any(|kw| lower.contains(kw))
@@ -47,22 +61,30 @@ fn signature(normalized: &str) -> String {
 ///   Pass 2 — Apply canonical name to `t.vendor` and `t.account_head` for every txn.
 ///
 /// Returns the number of transactions whose `vendor` field was changed.
-pub fn normalize_vendors(txns: &mut Vec<Transaction>) -> usize {
+pub fn normalize_vendors(txns: &mut [Transaction]) -> usize {
     // Pass 1: build signature → canonical map.
     let mut sig_map: HashMap<String, String> = HashMap::new();
     let mut raw_set: HashSet<String> = HashSet::new();
 
     for t in txns.iter() {
-        if t.is_opening_balance { continue; }
+        if t.is_opening_balance {
+            continue;
+        }
         let v = t.vendor.trim().to_string();
-        if !v.is_empty() { raw_set.insert(v); }
+        if !v.is_empty() {
+            raw_set.insert(v);
+        }
 
         let h = t.account_head.trim().to_string();
-        if h.len() >= 2 && !is_category_head(&h) { raw_set.insert(h); }
+        if h.len() >= 2 && !is_category_head(&h) {
+            raw_set.insert(h);
+        }
     }
 
     for raw in &raw_set {
-        if raw.len() < 2 { continue; }
+        if raw.len() < 2 {
+            continue;
+        }
         let canonical = normalize_ledger_name(raw);
         let sig = signature(&canonical);
         sig_map.entry(sig).or_insert_with(|| canonical);
@@ -71,7 +93,9 @@ pub fn normalize_vendors(txns: &mut Vec<Transaction>) -> usize {
     // Pass 2: apply canonical names.
     let mut changed = 0usize;
     for t in txns.iter_mut() {
-        if t.is_opening_balance { continue; }
+        if t.is_opening_balance {
+            continue;
+        }
 
         let v = t.vendor.trim().to_string();
         if !v.is_empty() {
@@ -113,18 +137,33 @@ mod tests {
     fn normalize_collapses_reversed_names() {
         // "GAURAV VIDWANS" and "VIDWANS GAURAV" → both → "Vidwans Gaurav" (V > G).
         let mut txns = vec![
-            Transaction { vendor: "GAURAV VIDWANS".to_string(), ..Transaction::new("t1") },
-            Transaction { vendor: "VIDWANS GAURAV".to_string(), ..Transaction::new("t2") },
+            Transaction {
+                vendor: "GAURAV VIDWANS".to_string(),
+                ..Transaction::new("t1")
+            },
+            Transaction {
+                vendor: "VIDWANS GAURAV".to_string(),
+                ..Transaction::new("t2")
+            },
         ];
         normalize_vendors(&mut txns);
-        assert_eq!(txns[0].vendor, txns[1].vendor, "both variants should resolve to the same canonical");
+        assert_eq!(
+            txns[0].vendor, txns[1].vendor,
+            "both variants should resolve to the same canonical"
+        );
     }
 
     #[test]
     fn normalize_vendor_dict_applied() {
         let mut txns = vec![
-            Transaction { vendor: "AMAZON PAY".to_string(), ..Transaction::new("t1") },
-            Transaction { vendor: "AMAZON INDIA".to_string(), ..Transaction::new("t2") },
+            Transaction {
+                vendor: "AMAZON PAY".to_string(),
+                ..Transaction::new("t1")
+            },
+            Transaction {
+                vendor: "AMAZON INDIA".to_string(),
+                ..Transaction::new("t2")
+            },
         ];
         normalize_vendors(&mut txns);
         // Both resolve to "Amazon" via VENDOR_DICT.
@@ -134,13 +173,11 @@ mod tests {
 
     #[test]
     fn normalize_opening_balance_skipped() {
-        let mut txns = vec![
-            Transaction {
-                is_opening_balance: true,
-                vendor: "OPENING BALANCE".to_string(),
-                ..Transaction::new("ob")
-            },
-        ];
+        let mut txns = vec![Transaction {
+            is_opening_balance: true,
+            vendor: "OPENING BALANCE".to_string(),
+            ..Transaction::new("ob")
+        }];
         normalize_vendors(&mut txns);
         assert_eq!(txns[0].vendor, "OPENING BALANCE", "OB rows untouched");
     }
@@ -149,12 +186,12 @@ mod tests {
     fn normalize_category_head_skipped() {
         let mut txns = vec![
             Transaction {
-                vendor:       "IRCTC".to_string(),
+                vendor: "IRCTC".to_string(),
                 account_head: "Travel Expense".to_string(),
                 ..Transaction::new("t1")
             },
             Transaction {
-                vendor:       "IRCTC".to_string(),
+                vendor: "IRCTC".to_string(),
                 account_head: "Travel Expense".to_string(),
                 ..Transaction::new("t2")
             },
@@ -168,8 +205,14 @@ mod tests {
     fn normalize_long_name_truncation() {
         // 3-token personal name → capped to 2 by Rule B.
         let mut txns = vec![
-            Transaction { vendor: "RAMESH KUMAR SHARMA".to_string(), ..Transaction::new("t1") },
-            Transaction { vendor: "RAMESH KUMAR SHARMA".to_string(), ..Transaction::new("t2") },
+            Transaction {
+                vendor: "RAMESH KUMAR SHARMA".to_string(),
+                ..Transaction::new("t1")
+            },
+            Transaction {
+                vendor: "RAMESH KUMAR SHARMA".to_string(),
+                ..Transaction::new("t2")
+            },
         ];
         normalize_vendors(&mut txns);
         // After Rule B (no biz word), 2 tokens; Rule C: SHARMA > RAMESH → "Sharma Ramesh"
