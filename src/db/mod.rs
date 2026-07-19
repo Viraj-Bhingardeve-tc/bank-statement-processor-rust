@@ -1962,6 +1962,27 @@ mod tests {
     }
 
     #[test]
+    fn save_import_rejects_unknown_client_id() {
+        // FOREIGN KEY enforcement requires the real open() path (PRAGMA
+        // foreign_keys = ON is set per-connection, not via raw schema SQL).
+        //
+        // Regression guard for the C-1 fix in main.rs::apply_parse_result:
+        // that call site now matches on this Result instead of discarding
+        // it via `.ok()`, so save_import must keep returning a real Err
+        // (not panic, not silently succeed) when client_id doesn't exist.
+        let conn = open(":memory:").expect("open");
+        let result = save_import(&conn, 999_999, "statement.pdf", "SBI", "", 5);
+        assert!(
+            result.is_err(),
+            "save_import for a non-existent client_id must fail"
+        );
+        assert!(
+            get_imports(&conn, 999_999).unwrap().is_empty(),
+            "a failed save_import must not leave a partial import_history row behind"
+        );
+    }
+
+    #[test]
     fn add_dedupe_hashes_happy_path_still_works_under_transaction_wrapping() {
         let conn = open(":memory:").expect("open");
         let client_id = add_client(&conn, "Acme Co", "Acme Ledger").expect("add_client");

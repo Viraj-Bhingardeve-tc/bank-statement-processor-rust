@@ -1270,15 +1270,24 @@ fn apply_parse_result(
         if let Some(cid) = client_id {
             let db = db_ref.lock().unwrap();
             if let Some(conn) = db.as_ref() {
-                let imp_id = db::save_import(
+                let imp_id = match db::save_import(
                     conn,
                     cid,
                     file_name,
                     &result.bank_name,
                     &result.account_no,
                     real.len(),
-                )
-                .ok();
+                ) {
+                    Ok(iid) => Some(iid),
+                    Err(e) => {
+                        log::error!("[LoadFile] failed to record import history: {}", e);
+                        h.set_toast_msg(SharedString::from(
+                            format!("Save failed — transactions were NOT saved: {}", e).as_str(),
+                        ));
+                        h.set_toast_kind(2);
+                        None
+                    }
+                };
                 if let Some(iid) = imp_id {
                     match db::upsert_transactions(conn, cid, Some(iid), &result.transactions) {
                         Ok(n) => log::info!("[LoadFile] persisted {} txns import_id={}", n, iid),
