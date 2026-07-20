@@ -6,7 +6,9 @@
 //! `HttpLicenseClient` sending values it generated itself.
 
 use crate::domain::Device;
-use crate::service::{AuthError, LicenseOperationError, PaymentOperationError};
+use crate::service::{
+    AdminOperationError, AuthError, LicenseOperationError, PaymentOperationError,
+};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -82,6 +84,14 @@ pub enum ApiError {
     /// `502 PROVIDER_ERROR` code, surfaced honestly rather than a fake
     /// success (same "no server configured" precedent from Phase 3).
     ProviderError(String),
+    /// Module 3: `POST /admin/device/:id/{deactivate,activate}` against a
+    /// `device_id` no `devices` row exists for — `LicenseNotFound` above
+    /// (reused as-is for the equivalent admin license lookup) has no
+    /// device-shaped counterpart to reuse.
+    DeviceNotFound,
+    /// Module 3: `POST /admin/license/:id/restore` on a license whose
+    /// current status isn't `revoked` — additive `409 LICENSE_NOT_REVOKED`.
+    LicenseNotRevoked,
     Server(String),
 }
 
@@ -100,6 +110,8 @@ impl fmt::Display for ApiError {
             ApiError::RateLimited => write!(f, "too many requests"),
             ApiError::InvalidPlanType => write!(f, "invalid plan_type"),
             ApiError::ProviderError(msg) => write!(f, "payment provider error: {msg}"),
+            ApiError::DeviceNotFound => write!(f, "device not found"),
+            ApiError::LicenseNotRevoked => write!(f, "license is not revoked"),
             ApiError::Server(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -127,6 +139,20 @@ impl From<AuthError> for ApiError {
             AuthError::Unauthorized => ApiError::Unauthorized,
             AuthError::Forbidden => ApiError::Forbidden,
             AuthError::Repository(err) => ApiError::Server(err.to_string()),
+        }
+    }
+}
+
+impl From<AdminOperationError> for ApiError {
+    fn from(e: AdminOperationError) -> Self {
+        match e {
+            // Reused as-is — same 404 condition `LicenseOperationError::
+            // LicenseNotFound` already represents, just reached from an
+            // admin lookup instead of `/activate-license`.
+            AdminOperationError::LicenseNotFound => ApiError::LicenseNotFound,
+            AdminOperationError::LicenseNotRevoked => ApiError::LicenseNotRevoked,
+            AdminOperationError::DeviceNotFound => ApiError::DeviceNotFound,
+            AdminOperationError::Repository(err) => ApiError::Server(err.to_string()),
         }
     }
 }
@@ -165,6 +191,8 @@ impl IntoResponse for ApiError {
                 ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED", None),
                 ApiError::InvalidPlanType => (StatusCode::BAD_REQUEST, "INVALID_PLAN_TYPE", None),
                 ApiError::ProviderError(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR", None),
+                ApiError::DeviceNotFound => (StatusCode::NOT_FOUND, "DEVICE_NOT_FOUND", None),
+                ApiError::LicenseNotRevoked => (StatusCode::CONFLICT, "LICENSE_NOT_REVOKED", None),
                 ApiError::Server(_) => (StatusCode::INTERNAL_SERVER_ERROR, "SERVER_ERROR", None),
             };
         let message = self.to_string();

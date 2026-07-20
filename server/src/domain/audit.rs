@@ -1,11 +1,15 @@
 //! Audit-log domain models — `login_history`/`license_validation_logs`
-//! (`LICENSE_DATABASE_SCHEMA.md` §1, migrations `0005`/`0006`). Write-only
-//! for now: `service::license_service`/`service::auth_service` produce
-//! these, `repository::audit::AuditRepository` persists them. Nothing
-//! reads them back yet (no admin API exists), so there's no corresponding
-//! "stored row" domain type — only the `New*` shape each insert needs.
+//! (`LICENSE_DATABASE_SCHEMA.md` §1, migrations `0005`/`0006`). Write path:
+//! `service::license_service`/`service::auth_service` produce these,
+//! `repository::audit::AuditRepository` (insert-only) persists them. The
+//! read path (Module 3: Admin API) lives in `repository::admin`/
+//! `domain::admin` instead of here — see `repository::admin`'s own doc
+//! comment for why that's a separate module rather than new methods on
+//! `AuditRepository`.
 
 use chrono::{DateTime, Utc};
+use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
 /// One `login_history` row. `user_id` is a real, already-resolved account
@@ -53,6 +57,32 @@ impl ValidationLogResult {
     }
 }
 
+impl fmt::Display for ValidationLogResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Module 3: parses a stored `license_validation_logs.result` value back
+/// into this enum — needed once `repository::admin` started reading this
+/// table back (`GET /admin/audit/license-validations`), which nothing did
+/// before. Same taxonomy `as_str` writes, same `FromStr`-on-the-domain-type
+/// convention `LicenseRecordStatus`/`PlanType`/`UserRole` already use.
+impl FromStr for ValidationLogResult {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "valid" => Ok(ValidationLogResult::Valid),
+            "expired" => Ok(ValidationLogResult::Expired),
+            "suspended" => Ok(ValidationLogResult::Suspended),
+            "revoked" => Ok(ValidationLogResult::Revoked),
+            "device_mismatch" => Ok(ValidationLogResult::DeviceMismatch),
+            other => Err(format!("unrecognized validation log result {other:?}")),
+        }
+    }
+}
+
 /// One `license_validation_logs` row. Like [`NewLoginHistoryEntry`], has no
 /// `ip_address` field for the same `sqlx`/`ipnetwork` reason. `client_clock`
 /// is part of the original schema design (for future clock-rollback
@@ -68,4 +98,30 @@ pub struct NewLicenseValidationLogEntry {
     pub device_id: Uuid,
     pub result: ValidationLogResult,
     pub client_clock: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_log_result_round_trips_through_its_string_form() {
+        for result in [
+            ValidationLogResult::Valid,
+            ValidationLogResult::Expired,
+            ValidationLogResult::Suspended,
+            ValidationLogResult::Revoked,
+            ValidationLogResult::DeviceMismatch,
+        ] {
+            assert_eq!(
+                ValidationLogResult::from_str(result.as_str()).unwrap(),
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn validation_log_result_rejects_an_unrecognized_string() {
+        assert!(ValidationLogResult::from_str("bogus").is_err());
+    }
 }

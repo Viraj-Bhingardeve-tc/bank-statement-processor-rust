@@ -69,6 +69,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(routes::license::router(state.clone()))
         .merge(routes::auth::router(state.clone()))
         .merge(routes::payment::router(state.clone()))
+        .merge(routes::admin_api::router(state.clone()))
         .layer(
             // Order matters: `SetRequestIdLayer` must run before
             // `TraceLayer` so its span-builder can read the id that was

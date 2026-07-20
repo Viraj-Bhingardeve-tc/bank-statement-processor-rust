@@ -12,12 +12,14 @@
 //! `PaymentService::reconcile_once` — the scheduled reconciliation pass
 //! (`PHASE4_DESIGN.md` §12), driven by `reconciliation::spawn`.
 
+pub mod admin_service;
 pub mod audit_service;
 pub mod auth_service;
 pub mod error;
 pub mod license_service;
 pub mod payment_service;
 
+pub use admin_service::{AdminOperationError, AdminService};
 pub use audit_service::AuditService;
 pub use auth_service::{AuthError, AuthService, LoginOutcome};
 pub use license_service::{

@@ -69,7 +69,11 @@ fn parse_device_id(raw: &str) -> Result<Uuid, ApiError> {
 /// DTOs match `API_SPECIFICATION.md` exactly, which never assumes a
 /// specific ID representation) but this server's internal identity is a
 /// plain `BIGSERIAL` — parsed once, here, at the HTTP boundary.
-fn parse_license_id(raw: &str) -> Result<i64, ApiError> {
+///
+/// `pub(crate)` so `routes::admin_api` can reuse it for the same field
+/// arriving as a URL path segment instead of a JSON body field, rather
+/// than duplicating this exact parse-and-error-message.
+pub(crate) fn parse_license_id(raw: &str) -> Result<i64, ApiError> {
     raw.parse::<i64>()
         .map_err(|_| ApiError::InvalidRequest("license_id must be a valid integer".to_string()))
 }

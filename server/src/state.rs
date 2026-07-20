@@ -12,6 +12,7 @@
 use crate::config::AppConfig;
 use crate::rate_limit::RateLimiters;
 use crate::razorpay::HttpRazorpayClient;
+use crate::repository::admin::PgAdminRepository;
 use crate::repository::audit::PgAuditRepository;
 use crate::repository::device::PgDeviceRepository;
 use crate::repository::license::PgLicenseRepository;
@@ -20,7 +21,7 @@ use crate::repository::payment_webhook_event::PgPaymentWebhookEventRepository;
 use crate::repository::session::PgSessionRepository;
 use crate::repository::subscription::PgSubscriptionRepository;
 use crate::repository::user::PgUserRepository;
-use crate::service::{AuditService, AuthService, LicenseService, PaymentService};
+use crate::service::{AdminService, AuditService, AuthService, LicenseService, PaymentService};
 use metrics_exporter_prometheus::PrometheusHandle;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -40,6 +41,9 @@ pub struct AppState {
     /// directly today; kept on `AppState` anyway for the same reason every
     /// other service is, per this struct's own doc comment.
     pub audit_service: Arc<AuditService>,
+    /// The Admin API's service (Module 3) — `routes::admin_api`'s handlers
+    /// are the only callers.
+    pub admin_service: Arc<AdminService>,
     /// The process-wide Prometheus recorder handle (`observability::handle`)
     /// — only `routes::metrics`'s `GET /metrics` handler actually calls
     /// `.render()` on it; every other metric call site instruments through
@@ -83,6 +87,11 @@ impl AppState {
             razorpay_client,
             config.reconciliation.max_age_hours,
         ));
+        let admin_service = Arc::new(AdminService::new(
+            Arc::new(PgAdminRepository::new(db_pool.clone())),
+            Arc::new(PgLicenseRepository::new(db_pool.clone())),
+            Arc::new(PgDeviceRepository::new(db_pool.clone())),
+        ));
 
         AppState {
             config: Arc::new(config),
@@ -91,6 +100,7 @@ impl AppState {
             auth_service,
             payment_service,
             audit_service,
+            admin_service,
             metrics_handle: crate::observability::handle(),
             rate_limiters: RateLimiters::new(),
         }

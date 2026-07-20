@@ -11,7 +11,12 @@
 //! `audit` (migrations `0005`/`0006`) adds `login_history`/
 //! `license_validation_logs` — insert-only, see that module's own doc
 //! comment.
+//!
+//! `admin` (Module 3) adds the Admin API's paginated list queries plus a
+//! handful of admin-only mutations — see that module's own doc comment for
+//! why those live here rather than as new methods on `audit`/`device`.
 
+pub mod admin;
 pub mod audit;
 pub mod device;
 pub mod error;

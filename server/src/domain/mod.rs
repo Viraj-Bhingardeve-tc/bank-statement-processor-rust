@@ -9,6 +9,7 @@
 //! never needs to change just because a query's shape changes, and this
 //! module has zero database dependency of its own.
 
+pub mod admin;
 pub mod audit;
 pub mod device;
 pub mod license;
@@ -18,6 +19,11 @@ pub mod session;
 pub mod subscription;
 pub mod user;
 
+pub use admin::{
+    AdminDeviceSummary, AdminLicenseSummary, AdminUserSummary, DeviceListFilter, LicenseListFilter,
+    LicenseValidationEntry, LicenseValidationFilter, LoginHistoryEntry, LoginHistoryFilter, Page,
+    Pagination, SortOrder, UserListFilter,
+};
 pub use audit::{NewLicenseValidationLogEntry, NewLoginHistoryEntry, ValidationLogResult};
 pub use device::Device;
 pub use license::{License, LicenseRecordStatus, NewLicense};
