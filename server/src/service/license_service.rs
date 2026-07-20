@@ -10,11 +10,14 @@
 //! HTTP framework type appears anywhere in this file (`PHASE4_DESIGN.md`
 //! §1.2's "Services... independent of HTTP framework types").
 
-use crate::domain::{Device, License, LicenseRecordStatus, PlanType, Subscription};
+use crate::domain::{
+    Device, License, LicenseRecordStatus, PlanType, Subscription, ValidationLogResult,
+};
 use crate::repository::device::{DeviceActivationOutcome, DeviceRepository};
 use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
 use crate::repository::subscription::SubscriptionRepository;
+use crate::service::AuditService;
 use chrono::{DateTime, Utc};
 use std::fmt;
 use std::sync::Arc;
@@ -24,6 +27,27 @@ pub struct LicenseService {
     license_repository: Arc<dyn LicenseRepository>,
     device_repository: Arc<dyn DeviceRepository>,
     subscription_repository: Arc<dyn SubscriptionRepository>,
+    /// Audit-log writes (`license_validation_logs`, migration `0006`) — see
+    /// `activate`/`validate`/`heartbeat`'s own doc comments for exactly
+    /// which outcomes call this. Fire-and-forget
+    /// (`AuditService::record_validation` only hands a future to
+    /// `tokio::spawn`), so holding this never changes any of these
+    /// methods' own async/error-propagation shape.
+    audit_service: Arc<AuditService>,
+}
+
+/// Maps a resolved [`LicenseRecordStatus`] onto the narrower
+/// [`ValidationLogResult`] `license_validation_logs.result` accepts — the
+/// two enums agree on every case (`Active`→`Valid`, `Expired`→`Expired`,
+/// `Suspended`→`Suspended`, `Revoked`→`Revoked`), so this is a pure
+/// relabeling, not a decision.
+fn as_validation_log_result(status: LicenseRecordStatus) -> ValidationLogResult {
+    match status {
+        LicenseRecordStatus::Active => ValidationLogResult::Valid,
+        LicenseRecordStatus::Expired => ValidationLogResult::Expired,
+        LicenseRecordStatus::Suspended => ValidationLogResult::Suspended,
+        LicenseRecordStatus::Revoked => ValidationLogResult::Revoked,
+    }
 }
 
 /// The license's status as it should be *reported*, correcting for a
@@ -59,11 +83,13 @@ impl LicenseService {
         license_repository: Arc<dyn LicenseRepository>,
         device_repository: Arc<dyn DeviceRepository>,
         subscription_repository: Arc<dyn SubscriptionRepository>,
+        audit_service: Arc<AuditService>,
     ) -> Self {
         LicenseService {
             license_repository,
             device_repository,
             subscription_repository,
+            audit_service,
         }
     }
 
@@ -91,6 +117,15 @@ impl LicenseService {
     /// `DeviceRepository::activate_device` now performs that whole
     /// decide-then-mutate step atomically in one transaction; see its own
     /// doc comment for how.
+    ///
+    /// **Audit logging (Module 1):** appends one fire-and-forget
+    /// `license_validation_logs` write (`AuditService::record_validation`,
+    /// migration `0006`) for the outcomes that fit that table's `result`
+    /// taxonomy — a revoked/expired rejection, or a full success. Rejected
+    /// before a license was even found (`LicenseNotFound`) and
+    /// `DeviceLimitReached` (a capacity error, not a license-state result)
+    /// are intentionally not logged here — see migration `0006`'s doc
+    /// comment.
     pub async fn activate(
         &self,
         license_key: &str,
@@ -105,8 +140,22 @@ impl LicenseService {
             .ok_or(LicenseOperationError::LicenseNotFound)?;
 
         match effective_status(&license) {
-            LicenseRecordStatus::Revoked => return Err(LicenseOperationError::LicenseRevoked),
-            LicenseRecordStatus::Expired => return Err(LicenseOperationError::LicenseExpired),
+            LicenseRecordStatus::Revoked => {
+                self.audit_service.record_validation(
+                    license.id,
+                    device_id,
+                    ValidationLogResult::Revoked,
+                );
+                return Err(LicenseOperationError::LicenseRevoked);
+            }
+            LicenseRecordStatus::Expired => {
+                self.audit_service.record_validation(
+                    license.id,
+                    device_id,
+                    ValidationLogResult::Expired,
+                );
+                return Err(LicenseOperationError::LicenseExpired);
+            }
             // A suspended license may still be activated — validate-license
             // is what surfaces "suspended" to the caller as a non-error
             // status, per API_SPECIFICATION.md's error table only listing
@@ -142,6 +191,9 @@ impl LicenseService {
                 )))
             })?;
 
+        self.audit_service
+            .record_validation(license.id, device_id, ValidationLogResult::Valid);
+
         Ok(ActivationOutcome {
             customer_id: subscription.user_id,
             plan_type: subscription.plan_type,
@@ -155,6 +207,15 @@ impl LicenseService {
     /// call — `LICENSE_SECURITY_REVIEW.md` §5 is explicit that this stays a
     /// logged signal, not an automatic block, until a deliberate server-
     /// side policy exists to act on the pattern across devices.
+    ///
+    /// **Audit logging (Module 1):** appends one fire-and-forget
+    /// `license_validation_logs` write — `device_mismatch` if the
+    /// fingerprint doesn't match (regardless of license status, matching
+    /// `LICENSE_SECURITY_REVIEW.md` §5's framing of a mismatch as its own
+    /// signal), otherwise the license's own status. `DeviceNotActivated`
+    /// (the error path, via `find_active_device`) is not logged — it has
+    /// no case in `license_validation_logs.result`'s taxonomy — see
+    /// migration `0006`'s doc comment.
     pub async fn validate(
         &self,
         license_id: i64,
@@ -164,11 +225,24 @@ impl LicenseService {
         let (license, device) = self.find_active_device(license_id, device_id).await?;
         self.device_repository.touch_last_seen(device.id).await?;
 
+        let status = effective_status(&license);
+        let fingerprint_matched = device.machine_fingerprint == machine_fingerprint;
+
+        self.audit_service.record_validation(
+            license.id,
+            device_id,
+            if fingerprint_matched {
+                as_validation_log_result(status)
+            } else {
+                ValidationLogResult::DeviceMismatch
+            },
+        );
+
         Ok(ValidationOutcome {
-            status: effective_status(&license),
+            status,
             expires_at: license.expires_at,
             grace_period_days: license.grace_period_days,
-            fingerprint_matched: device.machine_fingerprint == machine_fingerprint,
+            fingerprint_matched,
         })
     }
 
@@ -182,6 +256,10 @@ impl LicenseService {
     /// its own to compute, hence the narrower [`HeartbeatOutcome`].
     ///
     /// [`find_active_device`]: Self::find_active_device
+    ///
+    /// **Audit logging (Module 1):** same `license_validation_logs` write
+    /// as `validate`, minus the `device_mismatch` case — heartbeat has no
+    /// fingerprint of its own to check.
     pub async fn heartbeat(
         &self,
         license_id: i64,
@@ -190,9 +268,14 @@ impl LicenseService {
         let (license, device) = self.find_active_device(license_id, device_id).await?;
         self.device_repository.touch_last_seen(device.id).await?;
 
-        Ok(HeartbeatOutcome {
-            status: effective_status(&license),
-        })
+        let status = effective_status(&license);
+        self.audit_service.record_validation(
+            license.id,
+            device_id,
+            as_validation_log_result(status),
+        );
+
+        Ok(HeartbeatOutcome { status })
     }
 
     /// Shared lookup behind `validate` and `heartbeat`: resolves
@@ -713,6 +796,9 @@ mod tests {
             Arc::new(MockLicenseRepository::with(licenses)),
             Arc::new(MockDeviceRepository::with(devices)),
             Arc::new(MockSubscriptionRepository::with(subscriptions)),
+            Arc::new(AuditService::new(Arc::new(
+                crate::repository::audit::NoopAuditRepository,
+            ))),
         )
     }
 

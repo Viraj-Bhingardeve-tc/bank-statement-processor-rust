@@ -21,6 +21,7 @@ use crate::repository::error::RepositoryError;
 use crate::repository::session::SessionRepository;
 use crate::repository::user::UserRepository;
 use crate::service::error::ServiceError;
+use crate::service::AuditService;
 use chrono::{DateTime, Duration, Utc};
 use std::fmt;
 use std::sync::Arc;
@@ -34,16 +35,24 @@ const SESSION_LIFETIME_DAYS: i64 = 30;
 pub struct AuthService {
     user_repository: Arc<dyn UserRepository>,
     session_repository: Arc<dyn SessionRepository>,
+    /// Audit-log writes (`login_history`, migration `0005`) — see
+    /// `login`'s own doc comment for exactly which branches call this and
+    /// why. `AuditService`'s own methods are fire-and-forget, so holding
+    /// this never changes this service's own async/error-propagation
+    /// shape.
+    audit_service: Arc<AuditService>,
 }
 
 impl AuthService {
     pub fn new(
         user_repository: Arc<dyn UserRepository>,
         session_repository: Arc<dyn SessionRepository>,
+        audit_service: Arc<AuditService>,
     ) -> Self {
         AuthService {
             user_repository,
             session_repository,
+            audit_service,
         }
     }
 
@@ -73,6 +82,19 @@ impl AuthService {
     /// verification's boolean result is never trusted — success still
     /// requires an actual `User` row, so no input can authenticate as a
     /// nonexistent account.
+    ///
+    /// **Audit logging (Module 1):** a successful login and a wrong-
+    /// password attempt against a *known* email both append one
+    /// fire-and-forget `login_history` write (`AuditService::record_login`,
+    /// migration `0005`); an attempt against an *unknown* email does not,
+    /// because `login_history.user_id` is `NOT NULL REFERENCES users(id)`
+    /// — there is no real row to attribute it to. `AuditService::
+    /// record_login` only ever hands a future to `tokio::spawn` and
+    /// returns immediately (no `.await` here), so this doesn't reopen the
+    /// timing side-channel the dummy-hash comparison above exists to
+    /// close: the two branches that call it do the same constant-time
+    /// "queue a task" work, never a variable-latency database round trip,
+    /// on this method's own execution path.
     pub async fn login(&self, email: &str, password: &str) -> Result<LoginOutcome, AuthError> {
         let user = self.user_repository.find_by_email(email).await?;
 
@@ -84,7 +106,11 @@ impl AuthService {
         // regardless of what `matches` says.
         let user = match (user, matches) {
             (Some(user), true) => user,
-            _ => return Err(AuthError::InvalidCredentials),
+            (Some(user), false) => {
+                self.audit_service.record_login(user.id, None, false);
+                return Err(AuthError::InvalidCredentials);
+            }
+            (None, _) => return Err(AuthError::InvalidCredentials),
         };
 
         let token = generate_session_token();
@@ -97,6 +123,8 @@ impl AuthService {
                 expires_at,
             })
             .await?;
+
+        self.audit_service.record_login(user.id, None, true);
 
         Ok(LoginOutcome {
             session_token: token,
@@ -304,6 +332,9 @@ mod tests {
         AuthService::new(
             Arc::new(MockUserRepository::with(users)),
             Arc::new(MockSessionRepository::with(sessions)),
+            Arc::new(AuditService::new(Arc::new(
+                crate::repository::audit::NoopAuditRepository,
+            ))),
         )
     }
 

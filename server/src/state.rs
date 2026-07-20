@@ -12,6 +12,7 @@
 use crate::config::AppConfig;
 use crate::rate_limit::RateLimiters;
 use crate::razorpay::HttpRazorpayClient;
+use crate::repository::audit::PgAuditRepository;
 use crate::repository::device::PgDeviceRepository;
 use crate::repository::license::PgLicenseRepository;
 use crate::repository::payment::PgPaymentRepository;
@@ -19,7 +20,7 @@ use crate::repository::payment_webhook_event::PgPaymentWebhookEventRepository;
 use crate::repository::session::PgSessionRepository;
 use crate::repository::subscription::PgSubscriptionRepository;
 use crate::repository::user::PgUserRepository;
-use crate::service::{AuthService, LicenseService, PaymentService};
+use crate::service::{AuditService, AuthService, LicenseService, PaymentService};
 use metrics_exporter_prometheus::PrometheusHandle;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -33,6 +34,12 @@ pub struct AppState {
     pub license_service: Arc<LicenseService>,
     pub auth_service: Arc<AuthService>,
     pub payment_service: Arc<PaymentService>,
+    /// Audit-log writes (`login_history`/`license_validation_logs`) —
+    /// `license_service`/`auth_service` each hold their own `Arc` to this
+    /// (injected at construction below), so no handler needs this field
+    /// directly today; kept on `AppState` anyway for the same reason every
+    /// other service is, per this struct's own doc comment.
+    pub audit_service: Arc<AuditService>,
     /// The process-wide Prometheus recorder handle (`observability::handle`)
     /// — only `routes::metrics`'s `GET /metrics` handler actually calls
     /// `.render()` on it; every other metric call site instruments through
@@ -47,14 +54,19 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig, db_pool: PgPool) -> Self {
+        let audit_service = Arc::new(AuditService::new(Arc::new(PgAuditRepository::new(
+            db_pool.clone(),
+        ))));
         let license_service = Arc::new(LicenseService::new(
             Arc::new(PgLicenseRepository::new(db_pool.clone())),
             Arc::new(PgDeviceRepository::new(db_pool.clone())),
             Arc::new(PgSubscriptionRepository::new(db_pool.clone())),
+            audit_service.clone(),
         ));
         let auth_service = Arc::new(AuthService::new(
             Arc::new(PgUserRepository::new(db_pool.clone())),
             Arc::new(PgSessionRepository::new(db_pool.clone())),
+            audit_service.clone(),
         ));
         let razorpay_client = Arc::new(HttpRazorpayClient::new(
             config.payment.razorpay_key_id.clone(),
@@ -78,6 +90,7 @@ impl AppState {
             license_service,
             auth_service,
             payment_service,
+            audit_service,
             metrics_handle: crate::observability::handle(),
             rate_limiters: RateLimiters::new(),
         }

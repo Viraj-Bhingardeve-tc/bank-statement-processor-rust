@@ -6,10 +6,13 @@
 //! Phase 4F adds `payment` and `payment_webhook_event`, backed by
 //! migration `0002_create_payment_schema.sql` — completing the full
 //! non-payment-and-payment domain from `LICENSE_DATABASE_SCHEMA.md` §1 and
-//! `PHASE4_DESIGN.md` §7. `login_history`/`license_validation_logs`
-//! (audit-only tables) remain out of scope, not needed by any endpoint
-//! implemented so far.
+//! `PHASE4_DESIGN.md` §7.
+//!
+//! `audit` (migrations `0005`/`0006`) adds `login_history`/
+//! `license_validation_logs` — insert-only, see that module's own doc
+//! comment.
 
+pub mod audit;
 pub mod device;
 pub mod error;
 pub mod health;
