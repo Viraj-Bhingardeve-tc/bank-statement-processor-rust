@@ -63,7 +63,9 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new().merge(login_route).merge(protected)
 }
 
-fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+/// `pub(crate)` so `routes::admin::require_admin` can reuse the exact same
+/// bearer-token parsing instead of duplicating it.
+pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
     let value = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

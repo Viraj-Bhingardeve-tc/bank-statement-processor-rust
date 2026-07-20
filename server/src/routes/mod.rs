@@ -1,5 +1,6 @@
 //! Route modules — one per endpoint group.
 
+pub mod admin;
 pub mod auth;
 pub mod error;
 pub mod health;

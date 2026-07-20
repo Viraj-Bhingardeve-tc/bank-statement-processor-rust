@@ -62,6 +62,11 @@ pub enum ApiError {
     /// Missing, malformed, expired, or revoked bearer token — matches
     /// `API_SPECIFICATION.md`'s `401 UNAUTHORIZED`.
     Unauthorized,
+    /// Module 2: a genuinely valid session whose account isn't an `Admin`
+    /// — `routes::admin::require_admin`'s rejection, distinct from
+    /// `Unauthorized` (see `AuthService::require_admin`'s doc comment).
+    /// Additive `403 FORBIDDEN`, no existing endpoint returns it.
+    Forbidden,
     /// Too many requests from this caller (`rate_limit::login_rate_limit`
     /// keyed by client IP on `/login`, `rate_limit::device_rate_limit`
     /// keyed by `device_id` on `/validate-license`) — matches
@@ -91,6 +96,7 @@ impl fmt::Display for ApiError {
             ApiError::DeviceLimitReached(_) => write!(f, "device limit reached for this license"),
             ApiError::InvalidCredentials => write!(f, "invalid credentials"),
             ApiError::Unauthorized => write!(f, "unauthorized"),
+            ApiError::Forbidden => write!(f, "forbidden"),
             ApiError::RateLimited => write!(f, "too many requests"),
             ApiError::InvalidPlanType => write!(f, "invalid plan_type"),
             ApiError::ProviderError(msg) => write!(f, "payment provider error: {msg}"),
@@ -119,6 +125,7 @@ impl From<AuthError> for ApiError {
         match e {
             AuthError::InvalidCredentials => ApiError::InvalidCredentials,
             AuthError::Unauthorized => ApiError::Unauthorized,
+            AuthError::Forbidden => ApiError::Forbidden,
             AuthError::Repository(err) => ApiError::Server(err.to_string()),
         }
     }
@@ -154,6 +161,7 @@ impl IntoResponse for ApiError {
                     (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", None)
                 }
                 ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", None),
+                ApiError::Forbidden => (StatusCode::FORBIDDEN, "FORBIDDEN", None),
                 ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED", None),
                 ApiError::InvalidPlanType => (StatusCode::BAD_REQUEST, "INVALID_PLAN_TYPE", None),
                 ApiError::ProviderError(_) => (StatusCode::BAD_GATEWAY, "PROVIDER_ERROR", None),

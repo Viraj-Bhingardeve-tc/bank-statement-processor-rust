@@ -1,0 +1,17 @@
+-- Admin authentication, part 1 (Module 2). Adds a `role` column to `users`
+-- so a subset of accounts can be marked as administrators, without adding a
+-- new table and without touching how a customer account authenticates —
+-- `service::auth_service::AuthService::login` reads/writes nothing on this
+-- column at all.
+--
+-- `NOT NULL DEFAULT 'customer'` makes this backward compatible on both
+-- directions that matter: every pre-existing row is backfilled 'customer'
+-- as part of this migration, and `UserRepository::insert`'s column list
+-- doesn't name `role`, so every future signup still gets 'customer' from
+-- this same default, unless a later, separate step explicitly promotes the
+-- row. There is no `INSERT`/`UPDATE` path anywhere in this codebase that
+-- can create or turn a row into 'admin' yet — that is deliberately left to
+-- a manual, out-of-band `UPDATE users SET role = 'admin' WHERE ...`, the
+-- same way this schema had no self-service path to create a `users` row at
+-- all before this phase.
+ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'admin'));

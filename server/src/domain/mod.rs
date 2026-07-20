@@ -25,4 +25,4 @@ pub use payment::{NewPayment, Payment, PaymentStatus};
 pub use payment_webhook_event::{NewPaymentWebhookEvent, PaymentWebhookEvent};
 pub use session::{NewSession, Session};
 pub use subscription::{NewSubscription, PlanType, Subscription, SubscriptionStatus};
-pub use user::{NewUser, User};
+pub use user::{NewUser, User, UserRole};

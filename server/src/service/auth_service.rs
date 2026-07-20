@@ -16,7 +16,7 @@
 
 use crate::auth::password::{verify_password, DUMMY_PASSWORD_HASH};
 use crate::auth::token::{generate_session_token, hash_token};
-use crate::domain::{NewSession, Session, User};
+use crate::domain::{NewSession, Session, User, UserRole};
 use crate::repository::error::RepositoryError;
 use crate::repository::session::SessionRepository;
 use crate::repository::user::UserRepository;
@@ -153,6 +153,31 @@ impl AuthService {
         Ok(session)
     }
 
+    /// Module 2: resolves a bearer token to its `Session` exactly like
+    /// `validate_session`, but additionally requires the session's account
+    /// to hold the `Admin` role — used by `routes::admin::require_admin`,
+    /// the guard behind every admin-only route this and later modules add.
+    /// A customer session (the overwhelmingly common case) is rejected
+    /// with `Forbidden`, not `Unauthorized`: the token itself is genuinely
+    /// valid, it's just insufficient — the same distinction
+    /// `ApiError::Forbidden` maps onto `403`, versus `401` for `Forbidden`'s
+    /// sibling. This never touches `login`/`validate_session`'s own
+    /// behavior; it only composes them with one extra check.
+    pub async fn require_admin(&self, token: &str) -> Result<Session, AuthError> {
+        let session = self.validate_session(token).await?;
+        let user = self
+            .user_repository
+            .find_by_id(session.user_id)
+            .await?
+            .ok_or(AuthError::Unauthorized)?;
+
+        if user.role != UserRole::Admin {
+            return Err(AuthError::Forbidden);
+        }
+
+        Ok(session)
+    }
+
     /// `POST /logout`. Takes the already-authenticated session's id — the
     /// middleware has already resolved and validated the bearer token by
     /// the time a handler can call this, so there's no reason to re-parse
@@ -187,6 +212,10 @@ pub struct LoginOutcome {
 pub enum AuthError {
     InvalidCredentials,
     Unauthorized,
+    /// Module 2: a genuinely valid session whose account isn't an `Admin`
+    /// — see `require_admin`'s doc comment for why this is distinct from
+    /// `Unauthorized`.
+    Forbidden,
     Repository(RepositoryError),
 }
 
@@ -195,6 +224,7 @@ impl fmt::Display for AuthError {
         match self {
             AuthError::InvalidCredentials => write!(f, "invalid credentials"),
             AuthError::Unauthorized => write!(f, "unauthorized"),
+            AuthError::Forbidden => write!(f, "forbidden"),
             AuthError::Repository(e) => write!(f, "{e}"),
         }
     }
@@ -248,6 +278,16 @@ mod tests {
                 .unwrap()
                 .iter()
                 .find(|u| u.email == email)
+                .cloned())
+        }
+
+        async fn find_by_id(&self, id: i64) -> Result<Option<User>, RepositoryError> {
+            Ok(self
+                .users
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|u| u.id == id)
                 .cloned())
         }
 
@@ -317,12 +357,20 @@ mod tests {
     }
 
     fn sample_user(email: &str, password: &str) -> User {
+        sample_user_with_role(email, password, UserRole::Customer)
+    }
+
+    /// Module 2: same shape as `sample_user`, with an explicit role — used
+    /// by the `require_admin` tests below, which need to construct both a
+    /// `Customer` and an `Admin` account.
+    fn sample_user_with_role(email: &str, password: &str, role: UserRole) -> User {
         User {
             id: 1,
             email: email.to_string(),
             password_hash: hash_password(password).unwrap(),
             full_name: None,
             company_name: None,
+            role,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -488,6 +536,66 @@ mod tests {
         let service = service_with(vec![], vec![revoked]);
 
         let err = service.validate_session("some-token").await.unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized));
+    }
+
+    // ── Module 2: admin authentication ──────────────────────────────────
+
+    #[tokio::test]
+    async fn require_admin_succeeds_for_a_session_belonging_to_an_admin_account() {
+        let service = service_with(
+            vec![sample_user_with_role(
+                "admin@example.com",
+                "pw",
+                UserRole::Admin,
+            )],
+            vec![],
+        );
+        let outcome = service.login("admin@example.com", "pw").await.unwrap();
+
+        let session = service.require_admin(&outcome.session_token).await.unwrap();
+        assert_eq!(session.user_id, 1);
+    }
+
+    #[tokio::test]
+    async fn require_admin_is_forbidden_for_a_session_belonging_to_a_plain_customer_account() {
+        let service = service_with(vec![sample_user("customer@example.com", "pw")], vec![]);
+        let outcome = service.login("customer@example.com", "pw").await.unwrap();
+
+        let err = service
+            .require_admin(&outcome.session_token)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn require_admin_is_unauthorized_for_an_unknown_token() {
+        let service = service_with(vec![], vec![]);
+
+        let err = service.require_admin("not-a-real-token").await.unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn require_admin_does_not_grant_access_after_the_admin_session_is_logged_out() {
+        let service = service_with(
+            vec![sample_user_with_role(
+                "admin@example.com",
+                "pw",
+                UserRole::Admin,
+            )],
+            vec![],
+        );
+        let outcome = service.login("admin@example.com", "pw").await.unwrap();
+        let session = service.require_admin(&outcome.session_token).await.unwrap();
+
+        service.logout(session.id).await.unwrap();
+
+        let err = service
+            .require_admin(&outcome.session_token)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AuthError::Unauthorized));
     }
 
