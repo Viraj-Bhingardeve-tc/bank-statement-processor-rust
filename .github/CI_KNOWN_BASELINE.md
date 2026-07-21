@@ -6,6 +6,14 @@ request, with no scope reduction and no weakened lint level — `cargo fmt
 --all -- --check` and `cargo clippy --workspace --all-targets --all-features
 -- -D warnings` are both enforced exactly as written, workspace-wide.
 
+A fourth job, `db-tests` (Production Hardening, Finding H7), also runs on
+every push/PR: it starts a real `postgres:16` GitHub Actions service and
+runs `license-server`'s previously-`#[ignore]`d, Postgres-backed integration
+suite against it (`server/README.md`'s "CI: how the Postgres-backed suite
+runs automatically" section has the full breakdown). Before this job
+existed, that suite never ran automatically at all — only a developer
+running `-- --ignored` locally ever exercised it.
+
 ## Known, accepted failures on the current baseline
 
 As of this workflow's introduction, the **desktop crate** (`bank-statement-processor`,

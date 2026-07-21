@@ -107,3 +107,64 @@ jobs:
       # would only run the desktop crate's tests and silently skip the
       # server and protocol crates entirely.
       - run: cargo test --workspace --all-features
+
+  # Production Hardening, Finding H7: the `test` job above only runs
+  # license-server's default (non-#[ignore]d) tests — every test needing a
+  # real Postgres is `#[ignore]`d (server/README.md's "Tests" section) and
+  # was, before this job, never executed automatically at all. This job
+  # starts a real Postgres as a GitHub Actions service (not Docker
+  # Compose — this repo's docker-compose.yml is a production-deployment
+  # topology with Postgres unpublished to the host, not a CI fixture), waits
+  # for it to report healthy, then runs that full ignored suite against it.
+  db-tests:
+    name: db-tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # The GitHub Actions Postgres service creates this database
+          # automatically on container startup — no separate "create the
+          # test database" step needed.
+          POSTGRES_DB: license_server_test
+        ports:
+          - 5432:5432
+        # GitHub Actions blocks the job's own steps from starting until
+        # this reports healthy, polling `pg_isready` itself — this is what
+        # satisfies "wait until healthy", no hand-rolled wait loop needed.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Postgres's `postgres` superuser, not the restricted
+      # `license_server_app` role migration 0003 creates — this suite
+      # (`tests/least_privilege_role.rs` in particular) needs an
+      # admin-level account to apply migrations and grant/inspect that
+      # restricted role's privileges. No hardcoded credentials appear in
+      # any Rust source — this is the only place the connection string is
+      # assembled, as a workflow-level environment variable.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/license_server_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: db-tests
+
+      # `-p license-server`: this crate's own tests are the only ones
+      # gated behind a real Postgres — the desktop crate's `#[ignore]`d
+      # tests (tests/import_pipeline.rs) document unrelated, pre-existing
+      # PDF-extraction bugs and must not be swept up by a bare
+      # `--workspace -- --ignored`. Scoping to `-p license-server` also
+      # means this job never needs the desktop crate's Slint/GTK system
+      # dependencies (see the clippy/test jobs above) — sqlx here links
+      # against rustls, not OpenSSL, so this job needs nothing beyond the
+      # stable toolchain.
+      - name: Run Postgres-backed integration tests
+        run: bash server/scripts/run-db-tests.sh

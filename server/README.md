@@ -411,7 +411,8 @@ cargo test -p license-server
 
 Some integration tests require a real Postgres and are marked `#[ignore]` by default
 (`PHASE4_DESIGN.md` §9) — run them explicitly with `cargo test -p license-server -- --ignored`
-against a real database.
+against a real database. `cargo test --workspace` (the whole-repo command every developer already
+runs) never touches these — they only run when `--ignored` is passed explicitly.
 
 `tests/least_privilege_role.rs` (Phase 4J.8) specifically verifies the least-privilege role
 migration against a *real* Postgres, connected as an admin account — it asserts
@@ -420,3 +421,59 @@ migration against a *real* Postgres, connected as an admin account — it assert
 faked with a mock connection (permission enforcement happens inside Postgres itself), so — per
 this phase's own instructions — there is deliberately no non-`#[ignore]`d automated coverage for
 it; that is a documented limitation of this test suite, not an oversight.
+
+### CI: how the Postgres-backed suite runs automatically (Production Hardening, Finding H7)
+
+Before this finding was closed, every test above requiring a real Postgres was `#[ignore]`d and
+**never ran in CI at all** — only a developer who happened to run `-- --ignored` against their own
+local database ever exercised transactions, migrations, the least-privilege role, or the webhook/
+reconciliation flows. `.github/workflows/ci.yml`'s `db-tests` job now runs this suite on every push
+to `main` and every pull request:
+
+1. Starts `postgres:16` as a GitHub Actions **service container** (not Docker Compose — this
+   repo's `docker-compose.yml` is a production-deployment topology where Postgres is never
+   published to the host, not a CI fixture) and waits for its own `pg_isready` health check to
+   report healthy before any job step runs.
+2. The service's `POSTGRES_DB` environment variable makes it create the test database itself on
+   container startup — no separate "create the database" step.
+3. `server/scripts/run-db-tests.sh` runs `tests/db_migrations.rs` first (a dedicated, minimal
+   `#[ignore]`d test that does nothing but apply every migration in `server/migrations/` — see
+   that file's own doc comment) as an explicit, separately-logged fail-fast checkpoint, then runs
+   the rest of the ignored suite (`auth_flow`, `license_flow`, `payment_flow`,
+   `reconciliation_flow`, `least_privilege_role`, `ready`, `admin_api_flow`, `db_migrations` again
+   as a harmless idempotent re-run) via `cargo test -p license-server --all-targets -- --ignored`.
+4. Any failure in either step fails the `db-tests` job (and therefore the whole workflow run) —
+   nothing about this job swallows or soft-fails an error.
+
+`-p license-server` scopes this to the licensing/payment server crate only — the desktop crate's
+own `#[ignore]`d tests (`tests/import_pipeline.rs`, repository root) document unrelated,
+pre-existing PDF-extraction bugs, not Postgres dependencies, and must never be swept up by this
+job.
+
+**Environment variables used** (workflow-level only, never hardcoded in Rust source):
+
+| Variable | Set by | Value in CI |
+|---|---|---|
+| `DATABASE_URL` | `db-tests` job's `env:` | `postgres://postgres:postgres@localhost:5432/license_server_test` — the Postgres *admin* account, since `tests/least_privilege_role.rs` needs to create/alter the restricted `license_server_app` role and `tests/db_migrations.rs`/every other flow test needs to apply migrations. |
+
+**Reproducing locally** — the exact same script CI runs:
+
+```sh
+docker run -d --name license-server-test-db \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=license_server_test -p 5432:5432 postgres:16
+
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/license_server_test \
+  server/scripts/run-db-tests.sh
+
+docker stop license-server-test-db && docker rm license-server-test-db
+```
+
+Or, to run one specific suite by hand exactly as before (still fully supported —
+this finding did not change any test's `#[ignore]` attribute or add any new requirement on top of
+`DATABASE_URL`):
+
+```sh
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/license_server_test \
+  cargo test -p license-server --test auth_flow -- --ignored
+```
