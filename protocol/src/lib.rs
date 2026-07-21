@@ -140,13 +140,24 @@ pub struct LicenseSummary {
 /// this crate was first built against (`API_SPECIFICATION.md` mentions
 /// device deactivation only as an admin-surface action, not a customer-
 /// facing endpoint). Added in Phase 4D so a customer/support flow can free
-/// up a device slot without an admin dashboard existing yet. Same
-/// `license_id`/`device_id` shape as `ValidateLicenseRequest`, minus the
-/// fields (`machine_fingerprint`, `client_clock`) deactivation doesn't need.
+/// up a device slot without an admin dashboard existing yet.
+///
+/// **Production Hardening, Finding C1:** `machine_fingerprint` was added
+/// (this struct originally omitted it, unlike `ValidateLicenseRequest`) so
+/// the server can verify the caller actually controls the activated
+/// device before freeing its slot, not just that it knows a valid
+/// `(license_id, device_id)` pair. Safe to add as a required field: no
+/// `LicenseApiClient` method calls this endpoint at all today (the desktop
+/// app has no `deactivate_license` trait method), so there is no live
+/// caller this could break, unlike `ValidateLicenseRequest`/
+/// `HeartbeatRequest`, which are on the wire to the one real client that
+/// exists (`src/license/client.rs::HttpLicenseClient`) and couldn't gain a
+/// new required field without breaking it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeactivateLicenseRequest {
     pub license_id: String,
     pub device_id: String,
+    pub machine_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -321,6 +332,7 @@ mod tests {
         round_trips(DeactivateLicenseRequest {
             license_id: "lic_456".to_string(),
             device_id: "a1b2c3d4-uuid".to_string(),
+            machine_fingerprint: "sha256-hex".to_string(),
         });
         round_trips(DeactivateLicenseResponse {
             status: "deactivated".to_string(),

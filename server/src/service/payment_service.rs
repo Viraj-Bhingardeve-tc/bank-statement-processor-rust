@@ -61,14 +61,29 @@
 //! into the same `claim_and_apply` idempotency guarantee every other
 //! mutation already relies on. Never deletes a payment, subscription, or
 //! license row; only transitions their status.
+//!
+//! **Production Hardening, Finding C2:** `resolve_activation` now compares
+//! a webhook's actual captured `amount`/`currency`
+//! (`payload.payment.entity.{amount,currency}`) against `payments.
+//! amount_minor`/`currency` — the values this server itself stored at
+//! checkout time — before granting entitlement, refusing to activate on a
+//! mismatch. Lenient on absence (a payload missing either field verifies
+//! nothing and still activates, same as every pre-existing test payload
+//! already does); reuses the same `Ok(WebhookMutation::None)` "log and
+//! acknowledge, mutate nothing" shape every other unsafe-to-proceed case in
+//! `resolve_activation` already returns — no new response shape, no change
+//! to `claim_and_apply`'s idempotency guarantee. `resolve_refund`/
+//! `resolve_dispute_created`/`resolve_dispute_closed` never call
+//! `resolve_activation` at all, so the refund/dispute flow is untouched.
 
 use crate::domain::{
     LicenseRecordStatus, NewPayment, NewPaymentWebhookEvent, NewSubscription, Payment,
     PaymentStatus, PlanType, SubscriptionStatus,
 };
 use crate::razorpay::{
-    extract_dispute_status, extract_entity_id, extract_entity_ref, CreateCheckoutRequest,
-    RazorpayClient, RazorpayPayment, RazorpayWebhookPayload,
+    extract_dispute_status, extract_entity_amount_minor, extract_entity_currency,
+    extract_entity_id, extract_entity_ref, CreateCheckoutRequest, RazorpayClient, RazorpayPayment,
+    RazorpayWebhookPayload,
 };
 use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
@@ -238,8 +253,15 @@ impl PaymentService {
             return Ok(WebhookMutation::None);
         };
         let gateway_payment_id = extract_entity_id(&payload.payload, "payment");
-        self.resolve_activation(&provider_ref, gateway_payment_id)
-            .await
+        let captured_amount_minor = extract_entity_amount_minor(&payload.payload, "payment");
+        let captured_currency = extract_entity_currency(&payload.payload, "payment");
+        self.resolve_activation(
+            &provider_ref,
+            gateway_payment_id,
+            captured_amount_minor,
+            captured_currency,
+        )
+        .await
     }
 
     /// `payment_link.paid` — Razorpay's dedicated event for a completed
@@ -269,8 +291,15 @@ impl PaymentService {
             return Ok(WebhookMutation::None);
         };
         let gateway_payment_id = extract_entity_id(&payload.payload, "payment");
-        self.resolve_activation(&provider_ref, gateway_payment_id)
-            .await
+        let captured_amount_minor = extract_entity_amount_minor(&payload.payload, "payment");
+        let captured_currency = extract_entity_currency(&payload.payload, "payment");
+        self.resolve_activation(
+            &provider_ref,
+            gateway_payment_id,
+            captured_amount_minor,
+            captured_currency,
+        )
+        .await
     }
 
     async fn resolve_payment_failed(
@@ -322,8 +351,15 @@ impl PaymentService {
             return Ok(WebhookMutation::None);
         };
         let gateway_payment_id = extract_entity_id(&payload.payload, "payment");
-        self.resolve_activation(&provider_ref, gateway_payment_id)
-            .await
+        let captured_amount_minor = extract_entity_amount_minor(&payload.payload, "payment");
+        let captured_currency = extract_entity_currency(&payload.payload, "payment");
+        self.resolve_activation(
+            &provider_ref,
+            gateway_payment_id,
+            captured_amount_minor,
+            captured_currency,
+        )
+        .await
     }
 
     /// `subscription.cancelled`/`.halted`.
@@ -406,6 +442,8 @@ impl PaymentService {
         &self,
         provider_ref: &str,
         gateway_payment_id: Option<String>,
+        captured_amount_minor: Option<i64>,
+        captured_currency: Option<String>,
     ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(payment) = self
             .payment_repository
@@ -415,6 +453,46 @@ impl PaymentService {
             tracing::warn!(provider_ref = %provider_ref, "webhook references an unknown payment; ignoring (no local record)");
             return Ok(WebhookMutation::None);
         };
+
+        // Production Hardening, Finding C2: verify the webhook's actual
+        // captured amount/currency against `payments.amount_minor`/
+        // `currency` — the values this server itself stored at checkout
+        // time — before granting entitlement. Without this, a manipulated
+        // or partial-capture webhook payload (or a compromised/
+        // misconfigured Razorpay account) could still activate full
+        // entitlement regardless of what was actually captured. Lenient on
+        // *absence* (a missing/non-integer `amount` or missing `currency`
+        // field, same treatment `extract_entity_id`'s own absence already
+        // gets elsewhere in this file) — there is nothing to verify
+        // against in that case, so it isn't itself treated as a mismatch;
+        // only an actual present-and-different value blocks activation.
+        // Reuses the exact same "log and acknowledge without mutating"
+        // shape (`Ok(WebhookMutation::None)`) every other "can't safely
+        // proceed" case in this method already returns — no new API
+        // contract, no new response shape, the webhook is still claimed
+        // (never retried by Razorpay) but nothing activates.
+        if let Some(amount) = captured_amount_minor {
+            if amount != payment.amount_minor {
+                tracing::warn!(
+                    provider_ref = %provider_ref,
+                    stored_amount_minor = payment.amount_minor,
+                    captured_amount_minor = amount,
+                    "webhook captured amount does not match the stored checkout amount; refusing to activate"
+                );
+                return Ok(WebhookMutation::None);
+            }
+        }
+        if let Some(currency) = captured_currency.as_deref() {
+            if currency != payment.currency {
+                tracing::warn!(
+                    provider_ref = %provider_ref,
+                    stored_currency = %payment.currency,
+                    captured_currency = %currency,
+                    "webhook captured currency does not match the stored checkout currency; refusing to activate"
+                );
+                return Ok(WebhookMutation::None);
+            }
+        }
 
         // Phase 4L.3 (production validation, CRITICAL): `payment.captured`/
         // `payment_link.paid`/`subscription.activated`/`.charged` can all
@@ -1673,6 +1751,297 @@ mod tests {
         let license = licenses.find_latest_by_subscription(10).await.unwrap();
         assert!(license.is_some());
         assert_eq!(license.unwrap().status, LicenseRecordStatus::Active);
+    }
+
+    // ── Production Hardening, Finding C2: captured amount/currency ───────
+    //
+    // `sample_payment` stores `amount_minor: 499_900, currency: "INR"` —
+    // every test below matches or deliberately diverges from exactly that.
+
+    #[tokio::test]
+    async fn payment_captured_activates_when_the_captured_amount_and_currency_match() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({
+                "payment": {
+                    "entity": {
+                        "id": "pay_xyz",
+                        "order_id": "order_abc",
+                        "amount": 499_900,
+                        "currency": "INR"
+                    }
+                }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+        let license = licenses.find_latest_by_subscription(10).await.unwrap();
+        assert_eq!(license.unwrap().status, LicenseRecordStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn payment_captured_with_no_amount_or_currency_in_the_payload_still_activates() {
+        // Lenient on absence, same treatment `extract_entity_id`'s own
+        // missing case already gets — nothing to verify against isn't
+        // itself a mismatch. Also proves every pre-C2 test payload (none
+        // of which carry `amount`/`currency`) keeps working unchanged.
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({ "payment": { "entity": { "id": "pay_xyz", "order_id": "order_abc" } } }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+        let license = licenses.find_latest_by_subscription(10).await.unwrap();
+        assert_eq!(license.unwrap().status, LicenseRecordStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn payment_captured_does_not_activate_on_an_amount_mismatch() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({
+                "payment": {
+                    "entity": {
+                        "id": "pay_xyz",
+                        "order_id": "order_abc",
+                        "amount": 1,
+                        "currency": "INR"
+                    }
+                }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(
+            subscription.status,
+            SubscriptionStatus::PendingPayment,
+            "a captured-amount mismatch must never activate the subscription"
+        );
+        assert!(
+            licenses
+                .find_latest_by_subscription(10)
+                .await
+                .unwrap()
+                .is_none(),
+            "a captured-amount mismatch must never issue a license"
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_captured_does_not_activate_on_a_currency_mismatch() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({
+                "payment": {
+                    "entity": {
+                        "id": "pay_xyz",
+                        "order_id": "order_abc",
+                        "amount": 499_900,
+                        "currency": "USD"
+                    }
+                }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(
+            subscription.status,
+            SubscriptionStatus::PendingPayment,
+            "a captured-currency mismatch must never activate the subscription"
+        );
+        assert!(
+            licenses
+                .find_latest_by_subscription(10)
+                .await
+                .unwrap()
+                .is_none(),
+            "a captured-currency mismatch must never issue a license"
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_captured_does_not_activate_when_both_amount_and_currency_mismatch() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({
+                "payment": {
+                    "entity": {
+                        "id": "pay_xyz",
+                        "order_id": "order_abc",
+                        "amount": 1,
+                        "currency": "USD"
+                    }
+                }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::PendingPayment);
+        assert!(licenses
+            .find_latest_by_subscription(10)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_mismatched_amount_webhook_replay_never_activates_either_time() {
+        // Preserves idempotency: `claim_and_apply` still claims the event
+        // (so a genuine redelivery is recognized and never double-
+        // processed) even though the mutation it applied was `None` — the
+        // exact same mechanism every other "can't safely proceed" webhook
+        // case already relies on, not something new C2 had to add.
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({
+                "payment": {
+                    "entity": {
+                        "id": "pay_xyz",
+                        "order_id": "order_abc",
+                        "amount": 1,
+                        "currency": "INR"
+                    }
+                }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload.clone())
+            .await
+            .unwrap();
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::PendingPayment);
+        assert!(licenses
+            .find_latest_by_subscription(10)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn payment_link_paid_does_not_activate_on_an_amount_mismatch() {
+        // Proves the check applies uniformly across all three activation
+        // paths sharing `resolve_activation`, not only `payment.captured`.
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "plink_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment_link.paid".to_string(),
+            payload: json!({
+                "payment_link": { "entity": { "id": "plink_abc" } },
+                "payment": {
+                    "entity": {
+                        "id": "pay_xyz",
+                        "amount": 1,
+                        "currency": "INR"
+                    }
+                }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::PendingPayment);
+        assert!(licenses
+            .find_latest_by_subscription(10)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn subscription_charged_does_not_activate_on_a_currency_mismatch() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment = sample_payment(1, 10, "sub_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) =
+            service_with(vec![payment], vec![subscription], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "subscription.charged".to_string(),
+            payload: json!({
+                "subscription": { "entity": { "id": "sub_abc" } },
+                "payment": {
+                    "entity": {
+                        "id": "pay_xyz",
+                        "amount": 499_900,
+                        "currency": "USD"
+                    }
+                }
+            }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::PendingPayment);
+        assert!(licenses
+            .find_latest_by_subscription(10)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

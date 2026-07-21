@@ -12,6 +12,8 @@ use crate::rate_limit::device_rate_limit;
 use crate::routes::error::ApiError;
 use crate::state::AppState;
 use axum::extract::State;
+use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderMap;
 use axum::middleware;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -78,6 +80,39 @@ pub(crate) fn parse_license_id(raw: &str) -> Result<i64, ApiError> {
         .map_err(|_| ApiError::InvalidRequest("license_id must be a valid integer".to_string()))
 }
 
+/// Production Hardening, Finding C1: resolves an *optional*
+/// `Authorization: Bearer <token>` header to the session's `user_id`, for
+/// the ownership cross-check `LicenseService::{validate,heartbeat,
+/// deactivate}` each perform when it's `Some`.
+///
+/// Absence is not an error — every one of these endpoints must keep
+/// working exactly as before for a caller that sends none, since the
+/// desktop's `HttpLicenseClient` (`src/license/client.rs`, this crate's
+/// only real production caller today) has no login flow and never sends
+/// one; a mandatory session here would break live license enforcement for
+/// every real customer. A header that IS present but doesn't resolve to a
+/// valid session (unknown/expired/revoked token, or simply malformed) is
+/// different: silently downgrading that to "no session" would mask a
+/// caller who explicitly asserted a broken identity as if they'd asserted
+/// none at all, so a well-formed-but-invalid `Bearer` token still rejects
+/// with the same `401` `require_session` (`routes::auth`) already gives —
+/// only a header that isn't `Bearer`-shaped at all (or absent) is treated
+/// as "no session, proceed anonymously."
+async fn optional_owner_user_id(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<i64>, ApiError> {
+    let Some(value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+        return Ok(None);
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return Ok(None);
+    };
+
+    let session = state.auth_service.validate_session(token).await?;
+    Ok(Some(session.user_id))
+}
+
 async fn activate(
     State(state): State<AppState>,
     Json(req): Json<ActivateLicenseRequest>,
@@ -106,14 +141,21 @@ async fn activate(
 
 async fn validate(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ValidateLicenseRequest>,
 ) -> Result<Json<ValidateLicenseResponse>, ApiError> {
     let license_id = parse_license_id(&req.license_id)?;
     let device_id = parse_device_id(&req.device_id)?;
+    let requesting_user_id = optional_owner_user_id(&state, &headers).await?;
 
     let outcome = state
         .license_service
-        .validate(license_id, device_id, &req.machine_fingerprint)
+        .validate(
+            license_id,
+            device_id,
+            &req.machine_fingerprint,
+            requesting_user_id,
+        )
         .await?;
 
     Ok(Json(ValidateLicenseResponse {
@@ -127,14 +169,16 @@ async fn validate(
 
 async fn heartbeat(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
     let license_id = parse_license_id(&req.license_id)?;
     let device_id = parse_device_id(&req.device_id)?;
+    let requesting_user_id = optional_owner_user_id(&state, &headers).await?;
 
     let outcome = state
         .license_service
-        .heartbeat(license_id, device_id)
+        .heartbeat(license_id, device_id, requesting_user_id)
         .await?;
 
     Ok(Json(HeartbeatResponse {
@@ -144,14 +188,21 @@ async fn heartbeat(
 
 async fn deactivate(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<DeactivateLicenseRequest>,
 ) -> Result<Json<DeactivateLicenseResponse>, ApiError> {
     let license_id = parse_license_id(&req.license_id)?;
     let device_id = parse_device_id(&req.device_id)?;
+    let requesting_user_id = optional_owner_user_id(&state, &headers).await?;
 
     let outcome = state
         .license_service
-        .deactivate(license_id, device_id)
+        .deactivate(
+            license_id,
+            device_id,
+            &req.machine_fingerprint,
+            requesting_user_id,
+        )
         .await?;
 
     Ok(Json(DeactivateLicenseResponse {

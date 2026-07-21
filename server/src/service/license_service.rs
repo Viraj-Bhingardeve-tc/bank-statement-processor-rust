@@ -202,47 +202,78 @@ impl LicenseService {
     }
 
     /// `POST /validate-license`. Called on every online app launch
-    /// (`LICENSE_SYSTEM_DESIGN.md` §4). A fingerprint mismatch is reported
-    /// back (`fingerprint_matched: false`) but never itself rejects the
-    /// call — `LICENSE_SECURITY_REVIEW.md` §5 is explicit that this stays a
-    /// logged signal, not an automatic block, until a deliberate server-
-    /// side policy exists to act on the pattern across devices.
+    /// (`LICENSE_SYSTEM_DESIGN.md` §4).
+    ///
+    /// **Production Hardening, Finding C1(backward-compatible):**
+    /// `requesting_user_id` is `Some` only when the caller presented a
+    /// *valid* session (`routes::license`'s handlers resolve this from an
+    /// optional `Authorization: Bearer` header before calling in) — the
+    /// desktop's `HttpLicenseClient` has no login flow and sends none
+    /// today, so this is `None` for every real call in production right
+    /// now, and this method's behavior for that caller is unchanged except
+    /// for the fingerprint check below. When a session *is* presented,
+    /// [`find_active_device`] additionally verifies it actually owns the
+    /// subscription behind `license_id`, rejecting otherwise.
+    ///
+    /// A fingerprint mismatch used to be reported back
+    /// (`fingerprint_matched: false`) without rejecting the call
+    /// (`LICENSE_SECURITY_REVIEW.md` §5's original "logged signal, not an
+    /// automatic block" framing). It now rejects outright
+    /// (`DeviceMismatch`) — the strictest anonymous-path enforcement
+    /// available without a wire-contract change, and consistent with how
+    /// every *other* invalid-device/license condition here already
+    /// behaves. `fingerprint_matched` stays on [`ValidationOutcome`]/the
+    /// wire response for shape stability; it is simply always `true` now
+    /// that a mismatch is a distinct rejected outcome instead.
     ///
     /// **Audit logging (Module 1):** appends one fire-and-forget
-    /// `license_validation_logs` write — `device_mismatch` if the
-    /// fingerprint doesn't match (regardless of license status, matching
-    /// `LICENSE_SECURITY_REVIEW.md` §5's framing of a mismatch as its own
-    /// signal), otherwise the license's own status. `DeviceNotActivated`
-    /// (the error path, via `find_active_device`) is not logged — it has
+    /// `license_validation_logs` write — `device_mismatch` on a rejected
+    /// fingerprint mismatch, otherwise the license's own status.
+    /// `DeviceNotActivated` (the error path, via `find_active_device`,
+    /// which also now covers an ownership mismatch) is not logged — it has
     /// no case in `license_validation_logs.result`'s taxonomy — see
     /// migration `0006`'s doc comment.
+    ///
+    /// [`find_active_device`]: Self::find_active_device
     pub async fn validate(
         &self,
         license_id: i64,
         device_id: Uuid,
         machine_fingerprint: &str,
+        requesting_user_id: Option<i64>,
     ) -> Result<ValidationOutcome, LicenseOperationError> {
-        let (license, device) = self.find_active_device(license_id, device_id).await?;
+        let (license, device) = self
+            .find_active_device(license_id, device_id, requesting_user_id)
+            .await?;
         self.device_repository.touch_last_seen(device.id).await?;
 
         let status = effective_status(&license);
-        let fingerprint_matched = device.machine_fingerprint == machine_fingerprint;
+
+        if device.machine_fingerprint != machine_fingerprint {
+            self.audit_service.record_validation(
+                license.id,
+                device_id,
+                ValidationLogResult::DeviceMismatch,
+            );
+            tracing::warn!(
+                license_id = license.id,
+                device_id = %device_id,
+                "machine fingerprint mismatch on validate-license; rejecting"
+            );
+            return Err(LicenseOperationError::DeviceMismatch);
+        }
 
         self.audit_service.record_validation(
             license.id,
             device_id,
-            if fingerprint_matched {
-                as_validation_log_result(status)
-            } else {
-                ValidationLogResult::DeviceMismatch
-            },
+            as_validation_log_result(status),
         );
 
         Ok(ValidationOutcome {
             status,
             expires_at: license.expires_at,
             grace_period_days: license.grace_period_days,
-            fingerprint_matched,
+            fingerprint_matched: true,
         })
     }
 
@@ -255,6 +286,14 @@ impl LicenseService {
     /// the next full validation; it has no fingerprint/expiry payload of
     /// its own to compute, hence the narrower [`HeartbeatOutcome`].
     ///
+    /// **Production Hardening, Finding C1 (backward-compatible):** same
+    /// optional-session ownership check as `validate` — see its doc
+    /// comment. `HeartbeatRequest` carries no `machine_fingerprint` on the
+    /// wire, so unlike `validate` there is nothing further to check when
+    /// no session is presented; the existing device-activation check
+    /// (via `find_active_device`) is already this method's strictest
+    /// available anonymous-path enforcement.
+    ///
     /// [`find_active_device`]: Self::find_active_device
     ///
     /// **Audit logging (Module 1):** same `license_validation_logs` write
@@ -264,8 +303,11 @@ impl LicenseService {
         &self,
         license_id: i64,
         device_id: Uuid,
+        requesting_user_id: Option<i64>,
     ) -> Result<HeartbeatOutcome, LicenseOperationError> {
-        let (license, device) = self.find_active_device(license_id, device_id).await?;
+        let (license, device) = self
+            .find_active_device(license_id, device_id, requesting_user_id)
+            .await?;
         self.device_repository.touch_last_seen(device.id).await?;
 
         let status = effective_status(&license);
@@ -286,16 +328,37 @@ impl LicenseService {
     /// against this license") — `/heartbeat`'s own spec says to treat a
     /// failure the same way, so there's no separate error case to
     /// distinguish here either.
+    ///
+    /// **Production Hardening, Finding C1:** when `requesting_user_id` is
+    /// `Some` (a valid session was presented — see `validate`'s doc
+    /// comment), also rejects if that session doesn't own the subscription
+    /// behind this license, mapped onto the *same* `DeviceNotActivated`
+    /// rather than a distinguishable error — an authenticated-but-wrong-
+    /// owner caller must not be able to tell "not yours" apart from
+    /// "this device_id was never activated here" any more than an
+    /// anonymous caller guessing wrong already can.
     async fn find_active_device(
         &self,
         license_id: i64,
         device_id: Uuid,
+        requesting_user_id: Option<i64>,
     ) -> Result<(License, Device), LicenseOperationError> {
         let license = self
             .license_repository
             .find_by_id(license_id)
             .await?
             .ok_or(LicenseOperationError::DeviceNotActivated)?;
+
+        if !self
+            .owns_subscription(license.subscription_id, requesting_user_id)
+            .await?
+        {
+            tracing::warn!(
+                license_id = license.id,
+                "session presented does not own this license; rejecting as device not activated"
+            );
+            return Err(LicenseOperationError::DeviceNotActivated);
+        }
 
         let device = self
             .device_repository
@@ -307,15 +370,56 @@ impl LicenseService {
         Ok((license, device))
     }
 
+    /// Whether `requesting_user_id` (if any) owns the subscription behind
+    /// `subscription_id` — `true` when no session was presented at all
+    /// (today's only real caller, per `validate`'s doc comment) or when it
+    /// matches; `false` on a genuine mismatch. Shared by `find_active_device`
+    /// and `deactivate`, each of which maps a `false` onto whichever
+    /// "not found"-shaped error they already return for a nonexistent
+    /// license/device, rather than a new, distinguishable error — Finding
+    /// C1's masking requirement applies identically to both.
+    async fn owns_subscription(
+        &self,
+        subscription_id: i64,
+        requesting_user_id: Option<i64>,
+    ) -> Result<bool, LicenseOperationError> {
+        let Some(user_id) = requesting_user_id else {
+            return Ok(true);
+        };
+
+        let owner = self
+            .subscription_repository
+            .find_by_id(subscription_id)
+            .await?
+            .map(|s| s.user_id);
+
+        Ok(owner == Some(user_id))
+    }
+
     /// `POST /deactivate-license`. Frees a device slot — the customer-
     /// facing counterpart to the admin-surface `POST /devices/{id}/deactivate`
     /// `API_SPECIFICATION.md` mentions but doesn't specify (out of scope
     /// for that document's list of 7). Soft-delete only, never a row
     /// removal, same as every other status transition in this schema.
+    ///
+    /// **Production Hardening, Finding C1 (backward-compatible):** same
+    /// optional-session ownership check as `validate`/`heartbeat` (see
+    /// `find_active_device`'s doc comment; a mismatch here maps to
+    /// `LicenseNotFound`, matching this method's own existing "missing
+    /// license" case rather than `find_active_device`'s `DeviceNotActivated`
+    /// masking, since that's the error this method already uses for that
+    /// case). `machine_fingerprint` is now a required parameter and is
+    /// checked strictly, rejecting on any mismatch — safe to make
+    /// mandatory precisely because nothing calls this endpoint from the
+    /// desktop client today (no `deactivate_license` method exists on
+    /// `LicenseApiClient`), unlike `validate`/`heartbeat`, where a wire
+    /// change would break the live client.
     pub async fn deactivate(
         &self,
         license_id: i64,
         device_id: Uuid,
+        machine_fingerprint: &str,
+        requesting_user_id: Option<i64>,
     ) -> Result<DeactivationOutcome, LicenseOperationError> {
         let license = self
             .license_repository
@@ -323,12 +427,32 @@ impl LicenseService {
             .await?
             .ok_or(LicenseOperationError::LicenseNotFound)?;
 
+        if !self
+            .owns_subscription(license.subscription_id, requesting_user_id)
+            .await?
+        {
+            tracing::warn!(
+                license_id = license.id,
+                "session presented does not own this license; rejecting as not found"
+            );
+            return Err(LicenseOperationError::LicenseNotFound);
+        }
+
         let device = self
             .device_repository
             .find_by_license_and_device_id(license.id, device_id)
             .await?
             .filter(|d| d.deactivated_at.is_none())
             .ok_or(LicenseOperationError::DeviceNotActivated)?;
+
+        if device.machine_fingerprint != machine_fingerprint {
+            tracing::warn!(
+                license_id = license.id,
+                device_id = %device_id,
+                "machine fingerprint mismatch on deactivate-license; rejecting"
+            );
+            return Err(LicenseOperationError::DeviceMismatch);
+        }
 
         self.device_repository.deactivate(device.id).await?;
         let devices_active = self
@@ -447,6 +571,16 @@ pub enum LicenseOperationError {
     /// `409 DEVICE_LIMIT_REACHED` documentation ("response includes the
     /// existing device list so the customer/admin can deactivate one").
     DeviceLimitReached(Vec<Device>),
+    /// Production Hardening, Finding C1: the caller-supplied
+    /// `machine_fingerprint` doesn't match the device's stored one —
+    /// `validate`/`refresh-license` (already carried `machine_fingerprint`
+    /// on the wire) and `deactivate` (which now requires it too, see that
+    /// method's own doc comment) both reject outright on a mismatch rather
+    /// than the old "report `fingerprint_matched: false` but still succeed"
+    /// behavior — bringing this in line with how every *other* invalid-
+    /// device/license condition here is already handled (as a rejection,
+    /// not a soft 200).
+    DeviceMismatch,
     Repository(RepositoryError),
 }
 
@@ -461,6 +595,9 @@ impl fmt::Display for LicenseOperationError {
             }
             LicenseOperationError::DeviceLimitReached(_) => {
                 write!(f, "device limit reached for this license")
+            }
+            LicenseOperationError::DeviceMismatch => {
+                write!(f, "machine fingerprint does not match the activated device")
             }
             LicenseOperationError::Repository(e) => write!(f, "{e}"),
         }
@@ -995,7 +1132,7 @@ mod tests {
         let service = service_with(vec![], vec![], vec![]);
 
         let err = service
-            .validate(999, Uuid::new_v4(), "fp")
+            .validate(999, Uuid::new_v4(), "fp", None)
             .await
             .unwrap_err();
         assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
@@ -1009,12 +1146,19 @@ mod tests {
             vec![],
         );
 
-        let err = service.validate(1, Uuid::new_v4(), "fp").await.unwrap_err();
+        let err = service
+            .validate(1, Uuid::new_v4(), "fp", None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
     }
 
+    /// Production Hardening, Finding C1: was
+    /// `validate_reports_a_fingerprint_mismatch_without_rejecting` — the
+    /// exact "soft" behavior this finding fixes. A mismatch now rejects
+    /// outright instead of succeeding with `fingerprint_matched: false`.
     #[tokio::test]
-    async fn validate_reports_a_fingerprint_mismatch_without_rejecting() {
+    async fn validate_rejects_a_fingerprint_mismatch_with_device_mismatch() {
         let device_id = Uuid::new_v4();
         let license = sample_license(LicenseRecordStatus::Active, 1);
         let device = Device {
@@ -1029,12 +1173,11 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service
-            .validate(1, device_id, "different-fp")
+        let err = service
+            .validate(1, device_id, "different-fp", None)
             .await
-            .unwrap();
-        assert!(!outcome.fingerprint_matched);
-        assert_eq!(outcome.status, LicenseRecordStatus::Active);
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceMismatch));
     }
 
     #[tokio::test]
@@ -1053,7 +1196,7 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service.deactivate(1, device_id).await.unwrap();
+        let outcome = service.deactivate(1, device_id, "fp", None).await.unwrap();
         assert_eq!(outcome.devices_active, 0);
     }
 
@@ -1073,8 +1216,179 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let err = service.deactivate(1, device_id).await.unwrap_err();
+        let err = service
+            .deactivate(1, device_id, "fp", None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
+    }
+
+    /// Production Hardening, Finding C1: `/deactivate-license` now requires
+    /// `machine_fingerprint` and rejects a mismatch — safe to make
+    /// mandatory since no live client calls this endpoint (see
+    /// `LicenseService::deactivate`'s doc comment).
+    #[tokio::test]
+    async fn deactivate_rejects_a_fingerprint_mismatch_with_device_mismatch() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "original-fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![]);
+
+        let err = service
+            .deactivate(1, device_id, "different-fp", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceMismatch));
+    }
+
+    // ── Production Hardening, Finding C1: optional-session ownership ────
+    //
+    // `sample_subscription()` is `id: 10, user_id: 100`; `sample_license()`
+    // is `subscription_id: 10` — so `Some(100)` owns it and any other id
+    // does not.
+
+    #[tokio::test]
+    async fn validate_succeeds_when_the_presented_session_owns_the_license() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![sample_subscription()]);
+
+        let outcome = service
+            .validate(1, device_id, "fp", Some(100))
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_when_the_presented_session_does_not_own_the_license() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![sample_subscription()]);
+
+        let err = service
+            .validate(1, device_id, "fp", Some(999))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_succeeds_when_the_presented_session_owns_the_license() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![sample_subscription()]);
+
+        let outcome = service.heartbeat(1, device_id, Some(100)).await.unwrap();
+        assert_eq!(outcome.status, LicenseRecordStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_rejects_when_the_presented_session_does_not_own_the_license() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![sample_subscription()]);
+
+        let err = service
+            .heartbeat(1, device_id, Some(999))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
+    }
+
+    #[tokio::test]
+    async fn deactivate_succeeds_when_the_presented_session_owns_the_license() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![sample_subscription()]);
+
+        let outcome = service
+            .deactivate(1, device_id, "fp", Some(100))
+            .await
+            .unwrap();
+        assert_eq!(outcome.devices_active, 0);
+    }
+
+    #[tokio::test]
+    async fn deactivate_rejects_when_the_presented_session_does_not_own_the_license() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(vec![license], vec![device], vec![sample_subscription()]);
+
+        let err = service
+            .deactivate(1, device_id, "fp", Some(999))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::LicenseNotFound));
     }
 
     // ── Phase 4J.7: /heartbeat, /refresh-license, /subscription ─────────
@@ -1095,7 +1409,7 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        let outcome = service.heartbeat(1, device_id, None).await.unwrap();
         assert_eq!(outcome.status, LicenseRecordStatus::Active);
     }
 
@@ -1128,7 +1442,7 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        let outcome = service.heartbeat(1, device_id, None).await.unwrap();
         assert_eq!(outcome.status, LicenseRecordStatus::Expired);
     }
 
@@ -1152,7 +1466,7 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service.validate(1, device_id, "fp").await.unwrap();
+        let outcome = service.validate(1, device_id, "fp", None).await.unwrap();
         assert_eq!(outcome.status, LicenseRecordStatus::Expired);
     }
 
@@ -1175,7 +1489,7 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        let outcome = service.heartbeat(1, device_id, None).await.unwrap();
         assert_eq!(outcome.status, LicenseRecordStatus::Active);
     }
 
@@ -1201,7 +1515,7 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        let outcome = service.heartbeat(1, device_id, None).await.unwrap();
         assert_eq!(outcome.status, LicenseRecordStatus::Suspended);
     }
 
@@ -1225,7 +1539,7 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let outcome = service.heartbeat(1, device_id).await.unwrap();
+        let outcome = service.heartbeat(1, device_id, None).await.unwrap();
         assert_eq!(outcome.status, LicenseRecordStatus::Expired);
     }
 
@@ -1238,7 +1552,10 @@ mod tests {
             vec![],
         );
 
-        let err = service.heartbeat(1, Uuid::new_v4()).await.unwrap_err();
+        let err = service
+            .heartbeat(1, Uuid::new_v4(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
     }
 
@@ -1246,7 +1563,10 @@ mod tests {
     async fn heartbeat_with_an_unknown_license_id_returns_device_not_activated() {
         let service = service_with(vec![], vec![], vec![]);
 
-        let err = service.heartbeat(999, Uuid::new_v4()).await.unwrap_err();
+        let err = service
+            .heartbeat(999, Uuid::new_v4(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LicenseOperationError::DeviceNotActivated));
     }
 
@@ -1270,8 +1590,8 @@ mod tests {
         };
         let service = service_with(vec![license], vec![device], vec![]);
 
-        let validate_outcome = service.validate(1, device_id, "fp").await.unwrap();
-        let heartbeat_outcome = service.heartbeat(1, device_id).await.unwrap();
+        let validate_outcome = service.validate(1, device_id, "fp", None).await.unwrap();
+        let heartbeat_outcome = service.heartbeat(1, device_id, None).await.unwrap();
         assert_eq!(validate_outcome.status, heartbeat_outcome.status);
     }
 

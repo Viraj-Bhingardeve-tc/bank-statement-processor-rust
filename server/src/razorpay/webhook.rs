@@ -52,6 +52,33 @@ pub fn extract_entity_id(payload: &Value, entity_key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Reads `payload.<entity_key>.entity.amount` (Razorpay's actual captured
+/// amount, integer minor units — paise) — used to verify a webhook's real
+/// captured amount against `payments.amount_minor`, the value stored at
+/// checkout time, before granting entitlement (Production Hardening,
+/// Finding C2). `None` for a missing/non-integer field is treated the same
+/// as `extract_entity_id`'s own absence case — nothing to verify against,
+/// not itself a mismatch; only an actual present-and-different value
+/// blocks activation (`service::payment_service::resolve_activation`).
+pub fn extract_entity_amount_minor(payload: &Value, entity_key: &str) -> Option<i64> {
+    payload
+        .get(entity_key)?
+        .get("entity")?
+        .get("amount")
+        .and_then(Value::as_i64)
+}
+
+/// Reads `payload.<entity_key>.entity.currency` — paired with
+/// `extract_entity_amount_minor` for the same Finding C2 verification.
+pub fn extract_entity_currency(payload: &Value, entity_key: &str) -> Option<String> {
+    payload
+        .get(entity_key)?
+        .get("entity")?
+        .get("currency")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Reads `payload.dispute.entity.status` — Razorpay's own dispute status
 /// string (`"open"`, `"under_review"`, `"won"`, `"lost"`, ...). Only
 /// `"won"`/`"lost"` are terminal outcomes `payment.dispute.closed`
@@ -121,6 +148,42 @@ mod tests {
     fn extract_entity_id_returns_none_for_a_missing_entity_key() {
         let payload = json!({ "payment": { "entity": { "id": "pay_123" } } });
         assert_eq!(extract_entity_id(&payload, "refund"), None);
+    }
+
+    #[test]
+    fn extract_entity_amount_minor_reads_the_entitys_amount() {
+        let payload = json!({ "payment": { "entity": { "amount": 499900 } } });
+        assert_eq!(
+            extract_entity_amount_minor(&payload, "payment"),
+            Some(499900)
+        );
+    }
+
+    #[test]
+    fn extract_entity_amount_minor_returns_none_for_a_missing_entity_key() {
+        let payload = json!({ "payment": { "entity": { "amount": 499900 } } });
+        assert_eq!(extract_entity_amount_minor(&payload, "refund"), None);
+    }
+
+    #[test]
+    fn extract_entity_amount_minor_returns_none_for_a_non_integer_amount() {
+        let payload = json!({ "payment": { "entity": { "amount": "not-a-number" } } });
+        assert_eq!(extract_entity_amount_minor(&payload, "payment"), None);
+    }
+
+    #[test]
+    fn extract_entity_currency_reads_the_entitys_currency() {
+        let payload = json!({ "payment": { "entity": { "currency": "INR" } } });
+        assert_eq!(
+            extract_entity_currency(&payload, "payment"),
+            Some("INR".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_entity_currency_returns_none_for_a_missing_entity_key() {
+        let payload = json!({ "payment": { "entity": { "currency": "INR" } } });
+        assert_eq!(extract_entity_currency(&payload, "refund"), None);
     }
 
     #[test]

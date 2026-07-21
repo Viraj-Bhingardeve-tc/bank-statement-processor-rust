@@ -13,5 +13,6 @@ pub use client::{
     RazorpayError, RazorpayPayment,
 };
 pub use webhook::{
-    extract_dispute_status, extract_entity_id, extract_entity_ref, RazorpayWebhookPayload,
+    extract_dispute_status, extract_entity_amount_minor, extract_entity_currency,
+    extract_entity_id, extract_entity_ref, RazorpayWebhookPayload,
 };

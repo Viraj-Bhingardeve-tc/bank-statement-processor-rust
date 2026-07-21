@@ -56,6 +56,12 @@ pub enum ApiError {
     LicenseExpired,
     DeviceNotActivated,
     DeviceLimitReached(Vec<Device>),
+    /// Production Hardening, Finding C1: `/validate-license`,
+    /// `/refresh-license`, `/deactivate-license` reject outright on a
+    /// `machine_fingerprint` mismatch instead of the old "report but
+    /// succeed" behavior. Additive `403 DEVICE_MISMATCH` — no existing
+    /// caller could previously receive this code.
+    DeviceMismatch,
     /// `POST /login` failure — matches `API_SPECIFICATION.md`'s
     /// `401 INVALID_CREDENTIALS`. Deliberately the same response whether
     /// the email is unknown or the password is wrong (see
@@ -104,6 +110,9 @@ impl fmt::Display for ApiError {
             ApiError::LicenseExpired => write!(f, "license has expired"),
             ApiError::DeviceNotActivated => write!(f, "device not activated for this license"),
             ApiError::DeviceLimitReached(_) => write!(f, "device limit reached for this license"),
+            ApiError::DeviceMismatch => {
+                write!(f, "machine fingerprint does not match the activated device")
+            }
             ApiError::InvalidCredentials => write!(f, "invalid credentials"),
             ApiError::Unauthorized => write!(f, "unauthorized"),
             ApiError::Forbidden => write!(f, "forbidden"),
@@ -127,6 +136,7 @@ impl From<LicenseOperationError> for ApiError {
             LicenseOperationError::DeviceLimitReached(devices) => {
                 ApiError::DeviceLimitReached(devices)
             }
+            LicenseOperationError::DeviceMismatch => ApiError::DeviceMismatch,
             LicenseOperationError::Repository(err) => ApiError::Server(err.to_string()),
         }
     }
@@ -183,6 +193,7 @@ impl IntoResponse for ApiError {
                 ),
                 ApiError::LicenseExpired => (StatusCode::GONE, "LICENSE_EXPIRED", None),
                 ApiError::LicenseRevoked => (StatusCode::GONE, "LICENSE_REVOKED", None),
+                ApiError::DeviceMismatch => (StatusCode::FORBIDDEN, "DEVICE_MISMATCH", None),
                 ApiError::InvalidCredentials => {
                     (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", None)
                 }

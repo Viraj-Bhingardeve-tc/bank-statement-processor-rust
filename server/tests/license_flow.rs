@@ -14,9 +14,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use license_protocol::{
     ActivateLicenseRequest, ActivateLicenseResponse, DeactivateLicenseRequest,
-    DeactivateLicenseResponse, HeartbeatRequest, HeartbeatResponse, ValidateLicenseRequest,
-    ValidateLicenseResponse,
+    DeactivateLicenseResponse, HeartbeatRequest, HeartbeatResponse, LoginRequest, LoginResponse,
+    ValidateLicenseRequest, ValidateLicenseResponse,
 };
+use license_server::auth::password::hash_password;
 use license_server::state::AppState;
 use license_server::{build_router, db};
 use sqlx::PgPool;
@@ -100,13 +101,31 @@ async fn post_json<Req: serde::Serialize>(
     uri: &str,
     body: &Req,
 ) -> (StatusCode, serde_json::Value) {
+    post_json_with_auth(app, uri, body, None).await
+}
+
+/// Production Hardening, Finding C1: like `post_json`, plus an optional
+/// `Authorization` header — used by the optional-session ownership tests
+/// below. `post_json` itself is unchanged (delegates here with `None`) so
+/// every existing anonymous-call test keeps exercising exactly the same
+/// request it always has.
+async fn post_json_with_auth<Req: serde::Serialize>(
+    app: &axum::Router,
+    uri: &str,
+    body: &Req,
+    auth_header: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(value) = auth_header {
+        builder = builder.header("authorization", value);
+    }
     let response = app
         .clone()
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("content-type", "application/json")
+            builder
                 .body(Body::from(serde_json::to_vec(body).unwrap()))
                 .unwrap(),
         )
@@ -118,6 +137,67 @@ async fn post_json<Req: serde::Serialize>(
         .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap();
     (status, json)
+}
+
+/// Sets a real, loginable password for a user `seed_license` already
+/// created (that helper writes a literal, non-hashed `"hash"` placeholder,
+/// fine for every existing anonymous-call test but not usable to actually
+/// log in) and returns their email, so an ownership test can obtain a real
+/// session token for the account that owns a seeded license.
+async fn make_loginable(pool: &PgPool, user_id: i64, password: &str) -> String {
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let password_hash = hash_password(password).unwrap();
+    sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+        .bind(user_id)
+        .bind(&password_hash)
+        .execute(pool)
+        .await
+        .unwrap();
+    email
+}
+
+/// A second, unrelated account — used by the "wrong owner" tests below to
+/// present a genuinely valid session that just doesn't own the license
+/// under test.
+async fn seed_other_user(pool: &PgPool, password: &str) -> (i64, String) {
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let password_hash = hash_password(password).unwrap();
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind(&password_hash)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    (user_id, email)
+}
+
+async fn cleanup_bare_user(pool: &PgPool, user_id: i64) {
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .ok();
+}
+
+async fn login_bearer(app: &axum::Router, email: &str, password: &str) -> String {
+    let login_req = LoginRequest {
+        email: email.to_string(),
+        password: password.to_string(),
+    };
+    let (status, body) = post_json(app, "/login", &login_req).await;
+    assert_eq!(status, StatusCode::OK, "login response: {body}");
+    let login_resp: LoginResponse = serde_json::from_value(body).unwrap();
+    format!("Bearer {}", login_resp.session_token)
 }
 
 #[tokio::test]
@@ -157,6 +237,7 @@ async fn activate_then_validate_then_deactivate_full_flow() {
     let deactivate_req = DeactivateLicenseRequest {
         license_id: activate_resp.license_id.clone(),
         device_id,
+        machine_fingerprint: "fp-1".to_string(),
     };
     let (status, body) = post_json(&app, "/deactivate-license", &deactivate_req).await;
     assert_eq!(status, StatusCode::OK, "deactivate response: {body}");
@@ -451,4 +532,226 @@ async fn heartbeat_and_validate_report_an_expired_license_status_without_errorin
     assert_eq!(validate_resp.status, "expired");
 
     cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+// ── Production Hardening, Finding C1 ──────────────────────────────────────
+//
+// Session/ownership validation for /validate-license, /heartbeat,
+// /refresh-license, /deactivate-license — backward-compatible: every test
+// above this section calls these endpoints with no Authorization header at
+// all and continues to pass unchanged, proving the desktop's real,
+// session-less `HttpLicenseClient` flow is untouched. These tests cover the
+// two things that changed: an optional session, when present, must be
+// cross-checked for ownership; and a `machine_fingerprint` mismatch now
+// rejects outright instead of merely being reported.
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn validate_license_succeeds_with_a_bearer_token_that_owns_the_license() {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let email = make_loginable(&pool, user_id, "correct-password").await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let bearer = login_bearer(&app, &email, "correct-password").await;
+    let validate_req = ValidateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id,
+        machine_fingerprint: "fp-1".to_string(),
+        client_clock: chrono::Utc::now().to_rfc3339(),
+    };
+    let (status, body) =
+        post_json_with_auth(&app, "/validate-license", &validate_req, Some(&bearer)).await;
+    assert_eq!(status, StatusCode::OK, "validate response: {body}");
+    let validate_resp: ValidateLicenseResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(validate_resp.status, "active");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn validate_license_is_masked_as_device_not_activated_for_a_bearer_token_from_a_different_user(
+) {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let (other_user_id, other_email) = seed_other_user(&pool, "correct-password").await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let bearer = login_bearer(&app, &other_email, "correct-password").await;
+    let validate_req = ValidateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id,
+        machine_fingerprint: "fp-1".to_string(),
+        client_clock: chrono::Utc::now().to_rfc3339(),
+    };
+    let (status, body) =
+        post_json_with_auth(&app, "/validate-license", &validate_req, Some(&bearer)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "response: {body}");
+    assert_eq!(body["error"]["code"], "DEVICE_NOT_ACTIVATED");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+    cleanup_bare_user(&pool, other_user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn validate_license_with_a_malformed_bearer_token_is_unauthorized() {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let validate_req = ValidateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id,
+        machine_fingerprint: "fp-1".to_string(),
+        client_clock: chrono::Utc::now().to_rfc3339(),
+    };
+    let (status, body) = post_json_with_auth(
+        &app,
+        "/validate-license",
+        &validate_req,
+        Some("Bearer not-a-real-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "response: {body}");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn validate_license_rejects_a_fingerprint_mismatch_with_403() {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let validate_req = ValidateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id,
+        machine_fingerprint: "wrong-fp".to_string(),
+        client_clock: chrono::Utc::now().to_rfc3339(),
+    };
+    let (status, body) = post_json(&app, "/validate-license", &validate_req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "response: {body}");
+    assert_eq!(body["error"]["code"], "DEVICE_MISMATCH");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn deactivate_license_requires_the_correct_machine_fingerprint() {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let wrong_fingerprint_req = DeactivateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id: device_id.clone(),
+        machine_fingerprint: "wrong-fp".to_string(),
+    };
+    let (status, body) = post_json(&app, "/deactivate-license", &wrong_fingerprint_req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "response: {body}");
+    assert_eq!(body["error"]["code"], "DEVICE_MISMATCH");
+
+    let correct_fingerprint_req = DeactivateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id,
+        machine_fingerprint: "fp-1".to_string(),
+    };
+    let (status, body) = post_json(&app, "/deactivate-license", &correct_fingerprint_req).await;
+    assert_eq!(status, StatusCode::OK, "response: {body}");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn deactivate_license_is_masked_as_license_not_found_for_a_bearer_token_from_a_different_user(
+) {
+    let pool = connected_pool().await;
+    let (license_key, license_id, subscription_id, user_id) = seed_license(&pool, 1).await;
+    let (other_user_id, other_email) = seed_other_user(&pool, "correct-password").await;
+    let config = common::test_config();
+    let app = build_router(AppState::new(config, pool.clone()));
+    let device_id = Uuid::new_v4().to_string();
+
+    let activate_req = ActivateLicenseRequest {
+        license_key,
+        device_id: device_id.clone(),
+        machine_fingerprint: "fp-1".to_string(),
+        device_label: "test-device".to_string(),
+    };
+    let (status, _) = post_json(&app, "/activate-license", &activate_req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let bearer = login_bearer(&app, &other_email, "correct-password").await;
+    let deactivate_req = DeactivateLicenseRequest {
+        license_id: license_id.to_string(),
+        device_id,
+        machine_fingerprint: "fp-1".to_string(),
+    };
+    let (status, body) =
+        post_json_with_auth(&app, "/deactivate-license", &deactivate_req, Some(&bearer)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "response: {body}");
+    assert_eq!(body["error"]["code"], "LICENSE_NOT_FOUND");
+
+    cleanup(&pool, license_id, subscription_id, user_id).await;
+    cleanup_bare_user(&pool, other_user_id).await;
 }
