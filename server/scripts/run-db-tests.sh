@@ -32,10 +32,34 @@ cd "$(dirname "$0")/../.."
 # other ignored test's setup step happened to run first.
 cargo test -p license-server --test db_migrations -- --ignored
 
-# Every other ignored, Postgres-backed integration test in the crate
-# (auth_flow, license_flow, payment_flow, reconciliation_flow,
-# least_privilege_role, ready, admin_api_flow, db_migrations again — a
-# no-op re-run, harmless since migrations are idempotent). `--all-targets`
-# picks up every test binary under server/tests/ without hardcoding a list
-# that would go stale the next time a suite is added or renamed.
-cargo test -p license-server --all-targets -- --ignored
+# Every other ignored, Postgres-backed integration test in the crate,
+# *except* least_privilege_role (run separately below). `least_privilege_role`
+# is deliberately left out of this `--all-targets` sweep — see the next
+# comment block for why — so this list has to be named explicitly rather
+# than just excluding one target from `--all-targets` (cargo has no
+# "all targets except this one" selector). If a new ignored, Postgres-backed
+# test file is added under server/tests/, add it here too.
+cargo test -p license-server --lib --bin license-server \
+  --test admin_api_flow \
+  --test auth_flow \
+  --test db_migrations \
+  --test health \
+  --test license_flow \
+  --test metrics \
+  --test payment_flow \
+  --test rate_limit_flow \
+  --test ready \
+  --test reconciliation_flow \
+  -- --ignored
+
+# `least_privilege_role` alone, single-threaded. Its 4 tests each call
+# `ALTER ROLE license_server_app WITH LOGIN PASSWORD ...` as part of their
+# own setup (see that file's `admin_pool_with_role_ready()`) — Postgres's
+# system catalogs (pg_authid here) don't give concurrent `ALTER ROLE`
+# statements on the same role the same MVCC-safe concurrent-update handling
+# an ordinary user-table UPDATE gets, so running them at once under the
+# test harness's default multi-threaded execution intermittently raises
+# `XX000: tuple concurrently updated`. `--test-threads=1` forces this one
+# binary's tests to run sequentially instead, which avoids the race without
+# touching the test code, its assertions, or any production code.
+cargo test -p license-server --test least_privilege_role -- --ignored --test-threads=1
