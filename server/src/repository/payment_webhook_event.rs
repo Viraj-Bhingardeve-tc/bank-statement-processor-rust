@@ -14,6 +14,15 @@
 //! happens *first*, inside the same transaction as every mutation the
 //! event implies — only one concurrent caller can ever win the claim, and
 //! only the winner ever writes anything else.
+//!
+//! **Production Hardening, Finding #9:** `UpdateSubscriptionStatus`
+//! (`subscription.cancelled`/`.halted`) now carries an optional
+//! [`AffectedLicenseStatusChange`], applied in the same transaction as the
+//! subscription-status write. Previously this variant only ever touched
+//! `subscriptions` — a cancelled or halted subscription left its license
+//! `active` until that license's own `expires_at` separately passed, so a
+//! lapsed subscriber kept full access for the remainder of the license's
+//! original term.
 
 use crate::domain::{
     LicenseRecordStatus, NewPaymentWebhookEvent, PaymentStatus, SubscriptionStatus,
@@ -48,11 +57,18 @@ pub enum WebhookMutation {
     },
     /// `payment.failed`.
     MarkPaymentFailed { payment_id: i64 },
-    /// `subscription.cancelled`/`.halted`.
+    /// `subscription.cancelled`/`.halted`. **Production Hardening, Finding
+    /// #9:** a subscription going inactive must immediately invalidate its
+    /// license too — `service::payment_service::resolve_subscription_inactive`
+    /// resolves the license the same way `find_payment_and_license` does
+    /// for refund/dispute (`find_latest_by_subscription`, which already
+    /// excludes an already-`revoked` license, so this never "revives" one
+    /// a prior refund/dispute already terminated).
     UpdateSubscriptionStatus {
         subscription_id: i64,
         status: SubscriptionStatus,
         current_period_end: Option<DateTime<Utc>>,
+        license: Option<AffectedLicenseStatusChange>,
     },
     /// `refund.created` / `refund.processed` (Phase 4K.2). Marks the
     /// payment refunded and, if an active-or-suspended license still
@@ -111,6 +127,21 @@ pub enum LicenseMutation {
 pub struct AffectedLicense {
     pub license_id: i64,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Like [`AffectedLicense`], plus the target `status` itself — unlike
+/// `RefundPayment`/`MarkPaymentDisputed` (each targeting exactly one fixed
+/// license status) and `ResolveDispute` (a two-way branch on
+/// `merchant_won`), `UpdateSubscriptionStatus` covers two independently
+/// different subscription outcomes (`halted` → recoverable, `cancelled` →
+/// terminal) that map to two different license outcomes, so the target
+/// status has to travel with the license id/expiry rather than being
+/// hardcoded where this is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffectedLicenseStatusChange {
+    pub license_id: i64,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub status: LicenseRecordStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +239,7 @@ impl PaymentWebhookEventRepository for PgPaymentWebhookEventRepository {
                 subscription_id,
                 status,
                 current_period_end,
+                license,
             } => {
                 sqlx::query(
                     "UPDATE subscriptions SET status = $2, current_period_end = $3, updated_at = now() \
@@ -218,6 +250,15 @@ impl PaymentWebhookEventRepository for PgPaymentWebhookEventRepository {
                 .bind(current_period_end)
                 .execute(&mut *tx)
                 .await?;
+
+                if let Some(license) = license {
+                    sqlx::query("UPDATE licenses SET status = $2, expires_at = $3 WHERE id = $1")
+                        .bind(license.license_id)
+                        .bind(license.status.as_str())
+                        .bind(license.expires_at)
+                        .execute(&mut *tx)
+                        .await?;
+                }
             }
             WebhookMutation::ActivateSubscriptionAndLicense {
                 payment_id,

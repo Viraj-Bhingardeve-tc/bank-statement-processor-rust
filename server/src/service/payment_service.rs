@@ -63,8 +63,8 @@
 //! license row; only transitions their status.
 
 use crate::domain::{
-    NewPayment, NewPaymentWebhookEvent, NewSubscription, Payment, PaymentStatus, PlanType,
-    SubscriptionStatus,
+    LicenseRecordStatus, NewPayment, NewPaymentWebhookEvent, NewSubscription, Payment,
+    PaymentStatus, PlanType, SubscriptionStatus,
 };
 use crate::razorpay::{
     extract_dispute_status, extract_entity_id, extract_entity_ref, CreateCheckoutRequest,
@@ -74,7 +74,8 @@ use crate::repository::error::RepositoryError;
 use crate::repository::license::LicenseRepository;
 use crate::repository::payment::PaymentRepository;
 use crate::repository::payment_webhook_event::{
-    AffectedLicense, LicenseMutation, PaymentWebhookEventRepository, WebhookMutation,
+    AffectedLicense, AffectedLicenseStatusChange, LicenseMutation, PaymentWebhookEventRepository,
+    WebhookMutation,
 };
 use crate::repository::subscription::SubscriptionRepository;
 use chrono::{Duration, Utc};
@@ -325,6 +326,24 @@ impl PaymentService {
             .await
     }
 
+    /// `subscription.cancelled`/`.halted`.
+    ///
+    /// **Production Hardening, Finding #9:** as well as transitioning the
+    /// subscription itself, this now resolves the subscription's current
+    /// license (`find_latest_by_subscription` — same lookup
+    /// `find_payment_and_license` uses for refund/dispute, so a license
+    /// already `revoked` by an earlier refund/dispute is correctly excluded
+    /// rather than "revived") and includes it in the same
+    /// `WebhookMutation`, applied atomically alongside the subscription
+    /// write by `claim_and_apply`. `subscription.halted` (temporary —
+    /// Razorpay's own retry/dunning window) maps to `Suspended`, matching
+    /// the existing dispute-suspension precedent: reversible, and still
+    /// found (not `revoked`) by a later `resolve_activation` if the
+    /// subscription recovers. `subscription.cancelled` (terminal) maps to
+    /// `Revoked`, matching the existing refund precedent: a later
+    /// legitimate payment on the same subscription issues a fresh license
+    /// rather than reviving this one, since `find_latest_by_subscription`
+    /// excludes it once revoked.
     async fn resolve_subscription_inactive(
         &self,
         payload: &RazorpayWebhookPayload,
@@ -349,15 +368,30 @@ impl PaymentService {
             return Ok(WebhookMutation::None);
         };
 
-        let new_status = if payload.event == "subscription.halted" {
-            SubscriptionStatus::Suspended
+        let (new_status, license_status) = if payload.event == "subscription.halted" {
+            (
+                SubscriptionStatus::Suspended,
+                LicenseRecordStatus::Suspended,
+            )
         } else {
-            SubscriptionStatus::Cancelled
+            (SubscriptionStatus::Cancelled, LicenseRecordStatus::Revoked)
         };
+
+        let license = self
+            .license_repository
+            .find_latest_by_subscription(subscription.id)
+            .await?
+            .map(|l| AffectedLicenseStatusChange {
+                license_id: l.id,
+                expires_at: l.expires_at,
+                status: license_status,
+            });
+
         Ok(WebhookMutation::UpdateSubscriptionStatus {
             subscription_id: subscription.id,
             status: new_status,
             current_period_end: subscription.current_period_end,
+            license,
         })
     }
 
@@ -1044,10 +1078,16 @@ mod tests {
                     subscription_id,
                     status,
                     current_period_end,
+                    license,
                 } => {
                     self.subscription_repository
                         .update_status(subscription_id, status, current_period_end)
                         .await?;
+                    if let Some(license) = license {
+                        self.license_repository
+                            .extend(license.license_id, license.status, license.expires_at)
+                            .await?;
+                    }
                 }
                 WebhookMutation::ActivateSubscriptionAndLicense {
                     payment_id,
@@ -2096,7 +2136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_cancelled_updates_status_without_touching_the_license() {
+    async fn subscription_cancelled_with_no_license_issued_yet_only_updates_the_subscription() {
         let subscription = sample_subscription(10, SubscriptionStatus::Active);
         let payment = sample_payment(1, 10, "sub_rzp_xyz", PaymentStatus::Succeeded);
         let (service, subscriptions, _licenses) =
@@ -2116,7 +2156,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_halted_marks_the_subscription_suspended_not_cancelled() {
+    async fn subscription_halted_with_no_license_issued_yet_marks_the_subscription_suspended_not_cancelled(
+    ) {
         let subscription = sample_subscription(10, SubscriptionStatus::Active);
         let payment = sample_payment(1, 10, "sub_rzp_xyz", PaymentStatus::Succeeded);
         let (service, subscriptions, _licenses) =
@@ -2133,6 +2174,121 @@ mod tests {
 
         let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
         assert_eq!(subscription.status, SubscriptionStatus::Suspended);
+    }
+
+    // ── Production Hardening, Finding #9: subscription→license consistency ──
+
+    #[tokio::test]
+    async fn subscription_cancelled_immediately_revokes_its_active_license() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_payment(1, 10, "sub_rzp_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, subscriptions, licenses) = service_with(
+            vec![payment],
+            vec![subscription],
+            vec![license],
+            ok_checkout(),
+        );
+
+        let payload = RazorpayWebhookPayload {
+            event: "subscription.cancelled".to_string(),
+            payload: json!({ "subscription": { "entity": { "id": "sub_rzp_xyz" } } }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Cancelled);
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn subscription_halted_immediately_suspends_its_active_license() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_payment(1, 10, "sub_rzp_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Active);
+        let (service, subscriptions, licenses) = service_with(
+            vec![payment],
+            vec![subscription],
+            vec![license],
+            ok_checkout(),
+        );
+
+        let payload = RazorpayWebhookPayload {
+            event: "subscription.halted".to_string(),
+            payload: json!({ "subscription": { "entity": { "id": "sub_rzp_xyz" } } }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(subscription.status, SubscriptionStatus::Suspended);
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn subscription_cancelled_does_not_revive_a_license_already_revoked_by_an_earlier_refund()
+    {
+        // `find_latest_by_subscription` excludes `revoked` licenses, so a
+        // `subscription.cancelled` arriving after an earlier `refund.created`
+        // already revoked the license must find nothing to touch, not
+        // "resurrect" it back to some other status.
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment = sample_payment(1, 10, "sub_rzp_xyz", PaymentStatus::Refunded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Revoked);
+        let (service, _subscriptions, licenses) = service_with(
+            vec![payment],
+            vec![subscription],
+            vec![license],
+            ok_checkout(),
+        );
+
+        let payload = RazorpayWebhookPayload {
+            event: "subscription.cancelled".to_string(),
+            payload: json!({ "subscription": { "entity": { "id": "sub_rzp_xyz" } } }),
+        };
+        service
+            .process_webhook_event("evt_1", payload)
+            .await
+            .unwrap();
+
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn subscription_halted_redelivered_is_idempotent_for_an_already_suspended_license() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Suspended);
+        let payment = sample_payment(1, 10, "sub_rzp_xyz", PaymentStatus::Succeeded);
+        let license = sample_license(50, 10, LicenseRecordStatus::Suspended);
+        let (service, _subscriptions, licenses) = service_with(
+            vec![payment],
+            vec![subscription],
+            vec![license],
+            ok_checkout(),
+        );
+
+        let payload = RazorpayWebhookPayload {
+            event: "subscription.halted".to_string(),
+            payload: json!({ "subscription": { "entity": { "id": "sub_rzp_xyz" } } }),
+        };
+        service
+            .process_webhook_event("evt_1", payload.clone())
+            .await
+            .unwrap();
+        service
+            .process_webhook_event("evt_2", payload)
+            .await
+            .unwrap();
+
+        let license = licenses.find_by_id(50).await.unwrap().unwrap();
+        assert_eq!(license.status, LicenseRecordStatus::Suspended);
     }
 
     // ── refund.*/payment.dispute.* (Phase 4K.2) ─────────────────────────

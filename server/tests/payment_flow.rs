@@ -333,6 +333,97 @@ async fn a_valid_webhook_is_processed_and_a_replay_is_idempotent() {
     cleanup_user(&pool, user_id).await;
 }
 
+/// Production Hardening, Finding #9: `subscription.cancelled`/`.halted`
+/// must immediately invalidate the subscription's license, not just the
+/// subscription row — the actual end-to-end regression test (real
+/// Postgres, real webhook route) for the fix in
+/// `repository::payment_webhook_event`/`service::payment_service`.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn subscription_cancelled_webhook_immediately_revokes_the_license() {
+    let pool = connected_pool().await;
+    let secret = "whsec_integration_test_cancel";
+    let config = AppConfig {
+        payment: PaymentConfig {
+            razorpay_webhook_secret: Some(Secret::new(secret.to_string())),
+            ..common::test_config().payment
+        },
+        ..common::test_config()
+    };
+    let app = build_router(AppState::new(config, pool.clone()));
+
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at, current_period_end) \
+         VALUES ($1, 'monthly', 'active', now(), now() + interval '30 days') RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let subscription_ref = format!("sub_{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, provider_ref, status) \
+         VALUES ($1, 49900, 'INR', 'razorpay', $2, 'succeeded')",
+    )
+    .bind(subscription_id)
+    .bind(&subscription_ref)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let license_id: i64 = sqlx::query_scalar(
+        "INSERT INTO licenses (subscription_id, license_key, status, expires_at, max_devices) \
+         VALUES ($1, $2, 'active', now() + interval '30 days', 1) RETURNING id",
+    )
+    .bind(subscription_id)
+    .bind(format!("TEST-CANCEL-{}", Uuid::new_v4()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let body = json!({
+        "event": "subscription.cancelled",
+        "payload": { "subscription": { "entity": { "id": subscription_ref } } }
+    });
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let signature = sign(secret, &body_bytes);
+
+    let status = post_webhook(&app, &body_bytes, Some(&signature)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let subscription_status: String =
+        sqlx::query_scalar("SELECT status FROM subscriptions WHERE id = $1")
+            .bind(subscription_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(subscription_status, "cancelled");
+
+    let license_status: String = sqlx::query_scalar("SELECT status FROM licenses WHERE id = $1")
+        .bind(license_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        license_status, "revoked",
+        "the license must become invalid in the same webhook call that cancels its subscription"
+    );
+
+    sqlx::query("DELETE FROM licenses WHERE id = $1")
+        .bind(license_id)
+        .execute(&pool)
+        .await
+        .ok();
+    cleanup_user(&pool, user_id).await;
+}
+
 /// Phase 4J.1 — the actual regression test for the production readiness
 /// audit's CRITICAL finding #1: two *genuinely concurrent* deliveries of
 /// the identical webhook event (real, separate Postgres connections/
