@@ -244,6 +244,38 @@ impl PaymentService {
         Ok(())
     }
 
+    /// Production Hardening, Finding H2: resolves `provider_ref` to its
+    /// local `payments` row, treating both "no match" and "ambiguous
+    /// match" (`RepositoryError::DuplicateProviderReference` —
+    /// `find_by_provider_ref` no longer silently picks one) the same
+    /// way every `resolve_*` method here already treats "nothing safe to
+    /// act on": log a warning and let the caller fall through to its own
+    /// `Ok(WebhookMutation::None)`, never letting the ambiguity surface as
+    /// a `PaymentOperationError` (which would otherwise turn into a `500`
+    /// and trigger pointless Razorpay redelivery of a webhook this server
+    /// can never safely resolve until the underlying duplicate rows are
+    /// fixed).
+    async fn find_payment_by_provider_ref_or_none(
+        &self,
+        provider_ref: &str,
+    ) -> Result<Option<Payment>, PaymentOperationError> {
+        match self
+            .payment_repository
+            .find_by_provider_ref(provider_ref)
+            .await
+        {
+            Ok(payment) => Ok(payment),
+            Err(RepositoryError::DuplicateProviderReference(_)) => {
+                tracing::warn!(
+                    provider_ref = %provider_ref,
+                    "multiple payments rows share this provider_ref; refusing to guess which one this webhook concerns"
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn resolve_payment_captured(
         &self,
         payload: &RazorpayWebhookPayload,
@@ -311,8 +343,7 @@ impl PaymentService {
             return Ok(WebhookMutation::None);
         };
         let Some(payment) = self
-            .payment_repository
-            .find_by_provider_ref(&provider_ref)
+            .find_payment_by_provider_ref_or_none(&provider_ref)
             .await?
         else {
             tracing::warn!(provider_ref = %provider_ref, "payment.failed webhook references an unknown payment; ignoring");
@@ -389,8 +420,7 @@ impl PaymentService {
             return Ok(WebhookMutation::None);
         };
         let Some(payment) = self
-            .payment_repository
-            .find_by_provider_ref(&provider_ref)
+            .find_payment_by_provider_ref_or_none(&provider_ref)
             .await?
         else {
             tracing::warn!(provider_ref = %provider_ref, "subscription webhook references an unknown payment; ignoring");
@@ -446,8 +476,7 @@ impl PaymentService {
         captured_currency: Option<String>,
     ) -> Result<WebhookMutation, PaymentOperationError> {
         let Some(payment) = self
-            .payment_repository
-            .find_by_provider_ref(provider_ref)
+            .find_payment_by_provider_ref_or_none(provider_ref)
             .await?
         else {
             tracing::warn!(provider_ref = %provider_ref, "webhook references an unknown payment; ignoring (no local record)");
@@ -1018,17 +1047,27 @@ mod tests {
             Ok(payment)
         }
 
+        /// Production Hardening, Finding H2: mirrors the real
+        /// `PgPaymentRepository`'s "more than one match is an error, never
+        /// silently pick one" semantics, so tests exercising a duplicate
+        /// `provider_ref` (impossible to arrange against the real,
+        /// migration-`0008`-constrained schema) get faithful behavior from
+        /// this mock instead of the old "just take the first" shortcut.
         async fn find_by_provider_ref(
             &self,
             provider_ref: &str,
         ) -> Result<Option<Payment>, RepositoryError> {
-            Ok(self
-                .payments
-                .lock()
-                .unwrap()
+            let payments = self.payments.lock().unwrap();
+            let mut matches = payments
                 .iter()
-                .find(|p| p.provider_ref.as_deref() == Some(provider_ref))
-                .cloned())
+                .filter(|p| p.provider_ref.as_deref() == Some(provider_ref));
+            let first = matches.next().cloned();
+            if matches.next().is_some() {
+                return Err(RepositoryError::DuplicateProviderReference(
+                    provider_ref.to_string(),
+                ));
+            }
+            Ok(first)
         }
 
         async fn find_by_gateway_payment_id(
@@ -2042,6 +2081,126 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    // ── Production Hardening, Finding H2: duplicate provider_ref ─────────
+    //
+    // Two `sample_payment` rows deliberately sharing the same
+    // `provider_ref` — impossible to arrange against the real,
+    // migration-`0008`-constrained schema, but exactly what
+    // `MockPaymentRepository::find_by_provider_ref` now faithfully
+    // rejects, the same way the real repository would have before that
+    // migration ever ran.
+
+    #[tokio::test]
+    async fn payment_captured_does_not_activate_when_the_provider_ref_is_duplicated() {
+        let subscription = sample_subscription(10, SubscriptionStatus::PendingPayment);
+        let payment_a = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let payment_b = sample_payment(2, 10, "order_abc", PaymentStatus::Pending);
+        let (service, subscriptions, licenses) = service_with(
+            vec![payment_a, payment_b],
+            vec![subscription],
+            vec![],
+            ok_checkout(),
+        );
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.captured".to_string(),
+            payload: json!({ "payment": { "entity": { "id": "pay_xyz", "order_id": "order_abc" } } }),
+        };
+        let result = service.process_webhook_event("evt_1", payload).await;
+        assert!(
+            result.is_ok(),
+            "a duplicate provider_ref must not surface as a webhook processing error"
+        );
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(
+            subscription.status,
+            SubscriptionStatus::PendingPayment,
+            "a duplicate provider_ref must never activate a subscription"
+        );
+        assert!(
+            licenses
+                .find_latest_by_subscription(10)
+                .await
+                .unwrap()
+                .is_none(),
+            "a duplicate provider_ref must never issue a license"
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_failed_does_not_mutate_when_the_provider_ref_is_duplicated() {
+        let payment_a = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let payment_b = sample_payment(2, 10, "order_abc", PaymentStatus::Pending);
+        let (service, _subscriptions, _licenses) =
+            service_with(vec![payment_a, payment_b], vec![], vec![], ok_checkout());
+
+        let payload = RazorpayWebhookPayload {
+            event: "payment.failed".to_string(),
+            payload: json!({ "payment": { "entity": { "id": "pay_xyz", "order_id": "order_abc" } } }),
+        };
+        let result = service.process_webhook_event("evt_1", payload).await;
+        assert!(result.is_ok());
+        // Both rows must still be exactly `Pending` — neither was guessed
+        // at and flipped to `Failed`.
+    }
+
+    #[tokio::test]
+    async fn subscription_cancelled_does_not_mutate_when_the_provider_ref_is_duplicated() {
+        let subscription = sample_subscription(10, SubscriptionStatus::Active);
+        let payment_a = sample_payment(1, 10, "sub_abc", PaymentStatus::Succeeded);
+        let payment_b = sample_payment(2, 10, "sub_abc", PaymentStatus::Succeeded);
+        let (service, subscriptions, _licenses) = service_with(
+            vec![payment_a, payment_b],
+            vec![subscription],
+            vec![],
+            ok_checkout(),
+        );
+
+        let payload = RazorpayWebhookPayload {
+            event: "subscription.cancelled".to_string(),
+            payload: json!({ "subscription": { "entity": { "id": "sub_abc" } } }),
+        };
+        let result = service.process_webhook_event("evt_1", payload).await;
+        assert!(result.is_ok());
+
+        let subscription = subscriptions.find_by_id(10).await.unwrap().unwrap();
+        assert_eq!(
+            subscription.status,
+            SubscriptionStatus::Active,
+            "a duplicate provider_ref must never transition the subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_skips_a_payment_whose_provider_ref_is_duplicated_locally() {
+        // `reconcile_one` propagates `DuplicateProviderReference` via `?`;
+        // `reconcile_once`'s own per-item catch (already relied on so one
+        // bad payment never aborts the whole run) is what keeps this safe
+        // — logged and skipped, retried next run, never crashing the batch
+        // or guessing which local row to heal.
+        let payment_a = sample_payment(1, 10, "order_abc", PaymentStatus::Pending);
+        let payment_b = sample_payment(2, 10, "order_abc", PaymentStatus::Pending);
+        let razorpay_payment = RazorpayPayment {
+            id: "pay_xyz".to_string(),
+            order_id: Some("order_abc".to_string()),
+            status: "captured".to_string(),
+        };
+        let (service, _payments, _subscriptions, _licenses) = service_with_reconciliation(
+            vec![payment_a, payment_b],
+            vec![],
+            vec![],
+            vec![razorpay_payment],
+        );
+
+        let summary = service.reconcile_once().await.unwrap();
+        assert_eq!(summary.checked, 1);
+        assert_eq!(
+            summary.healed, 0,
+            "a duplicate provider_ref must never be reported as healed"
+        );
     }
 
     #[tokio::test]

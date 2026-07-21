@@ -522,3 +522,108 @@ async fn concurrent_duplicate_webhook_deliveries_apply_the_mutation_exactly_once
 
     cleanup_user(&pool, user_id).await;
 }
+
+// ── Production Hardening, Finding H2: payments.provider_ref uniqueness ──
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn payments_provider_ref_unique_index_rejects_a_duplicate() {
+    let pool = connected_pool().await;
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at) \
+         VALUES ($1, 'yearly', 'pending_payment', now()) RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let provider_ref = format!("order_{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, provider_ref, status) \
+         VALUES ($1, 499900, 'INR', 'razorpay', $2, 'pending')",
+    )
+    .bind(subscription_id)
+    .bind(&provider_ref)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Migration 0008's partial UNIQUE index must reject this at the
+    // database level — not merely something application code happens to
+    // avoid doing.
+    let second_insert = sqlx::query(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, provider_ref, status) \
+         VALUES ($1, 499900, 'INR', 'razorpay', $2, 'pending')",
+    )
+    .bind(subscription_id)
+    .bind(&provider_ref)
+    .execute(&pool)
+    .await;
+
+    assert!(
+        second_insert.is_err(),
+        "inserting a second payments row with the same provider_ref must be rejected by the database"
+    );
+
+    cleanup_user(&pool, user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn payments_provider_ref_unique_index_does_not_constrain_null_values() {
+    // The index is partial (`WHERE provider_ref IS NOT NULL`) precisely so
+    // multiple not-yet-referenced payments (no gateway reference back yet)
+    // never collide with each other the way a plain, non-partial UNIQUE
+    // index applied to a nullable column might be mistaken for doing.
+    let pool = connected_pool().await;
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at) \
+         VALUES ($1, 'yearly', 'pending_payment', now()) RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    for _ in 0..2 {
+        sqlx::query(
+            "INSERT INTO payments (subscription_id, amount_minor, currency, provider, provider_ref, status) \
+             VALUES ($1, 499900, 'INR', 'razorpay', NULL, 'pending')",
+        )
+        .bind(subscription_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payments WHERE subscription_id = $1 AND provider_ref IS NULL",
+    )
+    .bind(subscription_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 2,
+        "multiple NULL provider_ref rows must both be allowed"
+    );
+
+    cleanup_user(&pool, user_id).await;
+}

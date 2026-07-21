@@ -95,6 +95,28 @@ impl TryFrom<PaymentRow> for Payment {
     }
 }
 
+/// Interprets however many rows matched a `provider_ref` lookup: zero →
+/// `None`, exactly one → that row, more than one →
+/// `RepositoryError::DuplicateProviderReference` (Production Hardening,
+/// Finding H2) — never silently picks one. Split out as its own pure,
+/// `sqlx`-free function so this decision is unit-testable directly: once
+/// migration `0008`'s partial `UNIQUE` index is applied, a real duplicate
+/// row can never exist in a freshly migrated database, so a test can't
+/// arrange one through the real repository at all — this is the only
+/// practical way to exercise the "duplicate" branch.
+fn single_payment_or_duplicate_error(
+    rows: Vec<PaymentRow>,
+    provider_ref: &str,
+) -> Result<Option<Payment>, RepositoryError> {
+    match rows.len() {
+        0 => Ok(None),
+        1 => rows.into_iter().next().map(Payment::try_from).transpose(),
+        _ => Err(RepositoryError::DuplicateProviderReference(
+            provider_ref.to_string(),
+        )),
+    }
+}
+
 #[async_trait]
 impl PaymentRepository for PgPaymentRepository {
     async fn insert(&self, new_payment: NewPayment) -> Result<Payment, RepositoryError> {
@@ -115,20 +137,26 @@ impl PaymentRepository for PgPaymentRepository {
         Payment::try_from(row)
     }
 
+    /// Production Hardening, Finding H2: used to `ORDER BY created_at DESC
+    /// LIMIT 1`, silently picking the most recently created match on a
+    /// `provider_ref` collision — the wrong payment could be mutated by a
+    /// webhook if two rows ever shared one. Now fetches every matching row
+    /// and lets [`single_payment_or_duplicate_error`] decide what that
+    /// means; see migration `0008` for the partial `UNIQUE` index that
+    /// makes a genuine collision unreachable going forward.
     async fn find_by_provider_ref(
         &self,
         provider_ref: &str,
     ) -> Result<Option<Payment>, RepositoryError> {
-        let row = sqlx::query_as::<_, PaymentRow>(
+        let rows = sqlx::query_as::<_, PaymentRow>(
             "SELECT id, subscription_id, amount_minor, currency, provider, provider_ref, gateway_payment_id, status, created_at \
-             FROM payments WHERE provider_ref = $1 \
-             ORDER BY created_at DESC LIMIT 1",
+             FROM payments WHERE provider_ref = $1",
         )
         .bind(provider_ref)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
 
-        row.map(Payment::try_from).transpose()
+        single_payment_or_duplicate_error(rows, provider_ref)
     }
 
     async fn find_by_gateway_payment_id(
@@ -169,5 +197,67 @@ impl PaymentRepository for PgPaymentRepository {
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_row(id: i64, provider_ref: &str) -> PaymentRow {
+        PaymentRow {
+            id,
+            subscription_id: 1,
+            amount_minor: 499_900,
+            currency: "INR".to_string(),
+            provider: "razorpay".to_string(),
+            provider_ref: Some(provider_ref.to_string()),
+            gateway_payment_id: None,
+            status: "pending".to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    // ── Production Hardening, Finding H2 ──────────────────────────────
+
+    #[test]
+    fn single_payment_or_duplicate_error_returns_none_for_zero_rows() {
+        let result = single_payment_or_duplicate_error(vec![], "order_abc");
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn single_payment_or_duplicate_error_returns_the_one_match() {
+        let result =
+            single_payment_or_duplicate_error(vec![sample_row(1, "order_abc")], "order_abc");
+        let payment = result.unwrap().unwrap();
+        assert_eq!(payment.id, 1);
+        assert_eq!(payment.provider_ref.as_deref(), Some("order_abc"));
+    }
+
+    #[test]
+    fn single_payment_or_duplicate_error_rejects_two_rows_sharing_a_provider_ref() {
+        let rows = vec![sample_row(1, "order_abc"), sample_row(2, "order_abc")];
+        let err = single_payment_or_duplicate_error(rows, "order_abc").unwrap_err();
+        match err {
+            RepositoryError::DuplicateProviderReference(provider_ref) => {
+                assert_eq!(provider_ref, "order_abc");
+            }
+            other => panic!("expected DuplicateProviderReference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_payment_or_duplicate_error_rejects_more_than_two_rows_too() {
+        let rows = vec![
+            sample_row(1, "order_abc"),
+            sample_row(2, "order_abc"),
+            sample_row(3, "order_abc"),
+        ];
+        let err = single_payment_or_duplicate_error(rows, "order_abc").unwrap_err();
+        assert!(matches!(
+            err,
+            RepositoryError::DuplicateProviderReference(_)
+        ));
     }
 }

@@ -11,6 +11,17 @@ pub enum RepositoryError {
     /// a version skew between the running binary and the schema) —
     /// distinct from a `sqlx::Error` since the query itself was fine.
     InvalidData(String),
+    /// Production Hardening, Finding H2: more than one `payments` row
+    /// shares the given `provider_ref` — `repository::payment::
+    /// PgPaymentRepository::find_by_provider_ref` used to mask this by
+    /// silently picking the most recently created match; it now surfaces
+    /// the ambiguity explicitly instead of guessing which row a webhook
+    /// concerns. Migration `0008`'s partial `UNIQUE` index makes this
+    /// unreachable against a freshly migrated schema — this variant exists
+    /// for defense-in-depth against pre-migration data and in case that
+    /// constraint is ever dropped, not because it's expected to fire in
+    /// normal operation.
+    DuplicateProviderReference(String),
 }
 
 impl fmt::Display for RepositoryError {
@@ -18,6 +29,10 @@ impl fmt::Display for RepositoryError {
         match self {
             RepositoryError::Database(e) => write!(f, "database error: {e}"),
             RepositoryError::InvalidData(msg) => write!(f, "invalid stored data: {msg}"),
+            RepositoryError::DuplicateProviderReference(provider_ref) => write!(
+                f,
+                "multiple payments rows share provider_ref {provider_ref:?}"
+            ),
         }
     }
 }
@@ -27,6 +42,7 @@ impl std::error::Error for RepositoryError {
         match self {
             RepositoryError::Database(e) => Some(e),
             RepositoryError::InvalidData(_) => None,
+            RepositoryError::DuplicateProviderReference(_) => None,
         }
     }
 }
