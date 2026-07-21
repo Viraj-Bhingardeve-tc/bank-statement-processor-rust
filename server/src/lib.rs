@@ -36,6 +36,7 @@ pub mod db;
 pub mod domain;
 pub mod observability;
 pub mod rate_limit;
+pub mod rate_limit_cleanup;
 pub mod razorpay;
 pub mod reconciliation;
 pub mod repository;

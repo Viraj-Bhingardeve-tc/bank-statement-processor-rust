@@ -5,7 +5,7 @@
 
 use license_server::config::AppConfig;
 use license_server::state::AppState;
-use license_server::{build_router, db, reconciliation};
+use license_server::{build_router, db, rate_limit_cleanup, reconciliation};
 
 /// Debug builds get the default human-readable `.pretty()` formatter
 /// (multi-line, easy to read in a terminal during local development);
@@ -127,6 +127,13 @@ async fn main() {
     // dropping this handle does not stop the task (it isn't `.abort()`ed),
     // it just means nothing here awaits its (never-returning) completion.
     let _reconciliation_handle = reconciliation::spawn(state.clone());
+
+    // Production Hardening, Finding H4: bounds the keyed rate limiters'
+    // memory by periodically evicting entries idle long enough to be
+    // indistinguishable from a fresh one (`rate_limit::RateLimiters::
+    // cleanup`, `RATE_LIMIT_ENTRY_TTL_SECONDS`-configured interval). Same
+    // never-awaited background-task pattern as reconciliation above.
+    let _rate_limit_cleanup_handle = rate_limit_cleanup::spawn(state.clone());
 
     let app = build_router(state);
 

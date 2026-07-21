@@ -3,7 +3,8 @@
 //! doesn't treat it as its own top-level test binary.
 
 use license_server::config::{
-    AppConfig, DatabaseConfig, PaymentConfig, ReconciliationConfig, Secret, ServerConfig,
+    AppConfig, DatabaseConfig, PaymentConfig, RateLimitConfig, ReconciliationConfig, Secret,
+    ServerConfig,
 };
 
 /// A config pointing `DATABASE_URL` at a loopback address nothing listens
@@ -41,6 +42,14 @@ pub fn test_config() -> AppConfig {
             interval_secs: 15 * 60,
             batch_size: 100,
             max_age_hours: 2,
+        },
+        // Production Hardening, Finding H4: matches the real default
+        // (`RATE_LIMIT_ENTRY_TTL_SECONDS` unset) — tests exercising the
+        // cleanup sweep itself override via
+        // `AppConfig { rate_limit: RateLimitConfig { entry_ttl_secs: .. },
+        // ..common::test_config() }`.
+        rate_limit: RateLimitConfig {
+            entry_ttl_secs: 900,
         },
     }
 }

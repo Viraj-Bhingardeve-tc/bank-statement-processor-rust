@@ -165,12 +165,63 @@ pub struct ReconciliationConfig {
     pub max_age_hours: i64,
 }
 
+/// `RATE_LIMIT_ENTRY_TTL_SECONDS` (Production Hardening, Finding H4 — "the
+/// in-memory rate limiters grow forever").
+///
+/// [`rate_limit::RateLimiters`](crate::rate_limit::RateLimiters) keys its
+/// login/device limiters by client IP / `device_id`; every *distinct* key
+/// ever seen gets its own entry in `governor`'s keyed state store, and
+/// nothing removed one until this finding — an attacker cycling through
+/// fresh IPs/device ids indefinitely could grow that memory without bound.
+/// [`rate_limit_cleanup::spawn`](crate::rate_limit_cleanup::spawn) fixes
+/// this by periodically calling `governor`'s own built-in
+/// `RateLimiter::retain_recent`/`shrink_to_fit` housekeeping (every keyed
+/// state store `governor` ships implements
+/// `governor::state::keyed::ShrinkableKeyedStateStore` for exactly this
+/// purpose) — this field is that period.
+///
+/// **What this does and does not control:** `retain_recent`'s own eviction
+/// rule is intrinsic to each limiter's quota — a key is dropped once its
+/// GCRA bucket's last-recorded state is older than the quota's own
+/// per-cell replenishment weight (`governor`'s `Gcra::t()`: for a
+/// `Quota::per_minute(N)` budget, `60/N` seconds — 12 seconds for the
+/// login limiter's `N = 5`, 2 seconds for the device limiter's `N = 30`;
+/// verified directly against `governor` 0.10.4's `gcra.rs` source, not
+/// assumed). `governor` exposes no public hook to override that per-key
+/// threshold with an arbitrary externally-supplied duration (`RateLimiter::
+/// retain_recent()` takes no arguments and computes its own cutoff from the
+/// quota; the only variant that accepts a custom age lives on the private
+/// state store field, unreachable without consuming the whole limiter,
+/// which isn't possible once it's shared behind the `Arc` `RateLimiters`
+/// holds). So `entry_ttl_secs` configures **how often the cleanup sweep
+/// runs**, not a standalone idle threshold — an idle entry becomes
+/// eligible for removal after that quota-derived handful of seconds
+/// (unchanged, and deliberately not reconfigurable here, since shortening
+/// or lengthening it independently of the quota would change actual
+/// rate-limiting behavior, which Finding H4 explicitly must not do) and is
+/// guaranteed to actually be reclaimed within `entry_ttl_secs` of that. A
+/// hand-rolled, fully independent last-access TTL layered on top was
+/// considered and rejected: it would duplicate state `governor` already
+/// tracks internally, add a new lock, and — since no key can usefully
+/// outlive its own quota's replenishment window anyway — buy nothing a
+/// shorter sweep interval doesn't already give for free.
+///
+/// Default: 900 seconds (15 minutes) — frequent enough that abandoned keys
+/// don't linger long, infrequent enough that the periodic sweep (an O(n)
+/// scan of currently-tracked keys, `n` bounded by recent unique
+/// callers/devices) stays negligible against normal traffic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    pub entry_ttl_secs: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub payment: PaymentConfig,
     pub reconciliation: ReconciliationConfig,
+    pub rate_limit: RateLimitConfig,
 }
 
 impl AppConfig {
@@ -281,6 +332,16 @@ impl AppConfig {
             None => 2,
         };
 
+        // Production Hardening, Finding H4: see `RateLimitConfig`'s own doc
+        // comment for what this actually controls (the cleanup sweep
+        // interval, not a standalone per-key idle threshold) and why.
+        let rate_limit_entry_ttl_secs = match get("RATE_LIMIT_ENTRY_TTL_SECONDS") {
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|_| ConfigError::InvalidRateLimitEntryTtl(v))?,
+            None => 900,
+        };
+
         Ok(AppConfig {
             server: ServerConfig {
                 bind_addr: SocketAddr::new(host, port),
@@ -302,6 +363,9 @@ impl AppConfig {
                 interval_secs: reconciliation_interval_secs,
                 batch_size: reconciliation_batch_size,
                 max_age_hours: reconciliation_max_age_hours,
+            },
+            rate_limit: RateLimitConfig {
+                entry_ttl_secs: rate_limit_entry_ttl_secs,
             },
         })
     }
@@ -340,6 +404,9 @@ pub enum ConfigError {
     /// (Phase 4K.4) `RECONCILIATION_MAX_AGE_HOURS` set but not a valid
     /// integer.
     InvalidReconciliationMaxAge(String),
+    /// Production Hardening, Finding H4: `RATE_LIMIT_ENTRY_TTL_SECONDS` set
+    /// but not a valid non-negative integer.
+    InvalidRateLimitEntryTtl(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -388,6 +455,10 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidReconciliationMaxAge(v) => write!(
                 f,
                 "invalid RECONCILIATION_MAX_AGE_HOURS value {v:?} (expected a number of hours)"
+            ),
+            ConfigError::InvalidRateLimitEntryTtl(v) => write!(
+                f,
+                "invalid RATE_LIMIT_ENTRY_TTL_SECONDS value {v:?} (expected a non-negative number of seconds)"
             ),
         }
     }
@@ -814,6 +885,51 @@ mod tests {
             result.unwrap_err(),
             ConfigError::InvalidReconciliationMaxAge("not-a-number".to_string())
         );
+    }
+
+    // ── Rate limit entry TTL / cleanup sweep interval (Production
+    // Hardening, Finding H4) ─────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_entry_ttl_defaults_to_900_seconds_when_unset() {
+        let config = AppConfig::from_vars(vars(&[("DATABASE_URL", DB_URL)])).unwrap();
+        assert_eq!(config.rate_limit.entry_ttl_secs, 900);
+    }
+
+    #[test]
+    fn explicit_rate_limit_entry_ttl_is_honored() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RATE_LIMIT_ENTRY_TTL_SECONDS", "60"),
+        ]))
+        .unwrap();
+        assert_eq!(config.rate_limit.entry_ttl_secs, 60);
+    }
+
+    #[test]
+    fn invalid_rate_limit_entry_ttl_is_a_config_error_not_a_silent_fallback() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RATE_LIMIT_ENTRY_TTL_SECONDS", "not-a-number"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidRateLimitEntryTtl("not-a-number".to_string())
+        );
+    }
+
+    #[test]
+    fn a_zero_rate_limit_entry_ttl_is_accepted_as_a_valid_non_negative_integer() {
+        // Not a sensible production value (it'd sweep on every tick), but
+        // `u64` parsing has no reason to special-case zero as invalid —
+        // an operator who sets this is responsible for the consequences,
+        // same as any other tuning knob here.
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RATE_LIMIT_ENTRY_TTL_SECONDS", "0"),
+        ]))
+        .unwrap();
+        assert_eq!(config.rate_limit.entry_ttl_secs, 0);
     }
 
     #[test]
