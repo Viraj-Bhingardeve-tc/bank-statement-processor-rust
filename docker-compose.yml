@@ -50,7 +50,14 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - license-server
+      # Production Hardening, Finding H6: was `- license-server` (only
+      # "started", never "actually answering HTTP") — Caddy could begin
+      # proxying to a container that had merely been launched, not one
+      # that had finished migrating and bound its listener yet. Now waits
+      # for the same `HEALTHCHECK` `server/Dockerfile` bakes into the
+      # image (`GET /healthz`) to report healthy first.
+      license-server:
+        condition: service_healthy
     networks:
       - licensing
 
