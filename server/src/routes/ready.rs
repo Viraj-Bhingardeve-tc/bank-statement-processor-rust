@@ -34,17 +34,29 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/readyz", get(ready))
 }
 
+/// Production Hardening, Finding H5: this used to put `e.to_string()` — the
+/// raw `sqlx::Error` display text — directly into the public JSON body.
+/// `/readyz` is unauthenticated by design (an orchestrator/uptime monitor
+/// endpoint, same precedent `routes::metrics` documents for itself), so
+/// that leaked schema/connection detail to anyone who happened to hit it
+/// while the database was degraded — exactly when a real attacker would be
+/// probing. The real error is now only ever logged server-side; every
+/// caller of this endpoint gets the same fixed, generic reason string
+/// regardless of what actually went wrong.
 async fn ready(State(state): State<AppState>) -> Response {
     match repository::health::ping(&state.db_pool).await {
         Ok(()) => (StatusCode::OK, Json(ReadyResponse { status: "ready" })).into_response(),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(NotReadyResponse {
-                status: "not_ready",
-                reason: e.to_string(),
-            }),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "database readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(NotReadyResponse {
+                    status: "not_ready",
+                    reason: "database unreachable".to_string(),
+                }),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -62,10 +74,10 @@ mod tests {
     fn not_ready_response_includes_a_reason() {
         let json = serde_json::to_value(NotReadyResponse {
             status: "not_ready",
-            reason: "connection refused".to_string(),
+            reason: "database unreachable".to_string(),
         })
         .unwrap();
         assert_eq!(json["status"], "not_ready");
-        assert_eq!(json["reason"], "connection refused");
+        assert_eq!(json["reason"], "database unreachable");
     }
 }

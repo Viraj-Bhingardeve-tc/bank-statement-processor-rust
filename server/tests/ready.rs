@@ -37,7 +37,69 @@ async fn readyz_returns_503_when_database_is_unreachable() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "not_ready");
-    assert!(!json["reason"].as_str().unwrap().is_empty());
+    // Production Hardening, Finding H5: a fixed, generic reason — never
+    // the raw sqlx::Error text (schema/connection detail) that used to be
+    // placed directly in this unauthenticated, public response body.
+    assert_eq!(json["reason"], "database unreachable");
+}
+
+/// Production Hardening, Finding H5 — the regression test proving the fix:
+/// no internal SQL/connection error text (a real `sqlx::Error`'s `Display`
+/// output always mentions at least one of these) appears anywhere in the
+/// response body, not just that the `reason` field matches exactly.
+#[tokio::test]
+async fn readyz_response_body_never_contains_internal_database_error_text() {
+    let config = common::test_config();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
+    let app = license_server::build_router(AppState::new(config, pool));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_text = String::from_utf8(body.to_vec()).unwrap();
+    let body_lower = body_text.to_lowercase();
+
+    // The exact, complete expected body — the strongest possible proof
+    // nothing else (a stray field, extra detail) snuck in alongside it.
+    let json: serde_json::Value = serde_json::from_str(&body_text).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "status": "not_ready", "reason": "database unreachable" })
+    );
+
+    // Belt-and-suspenders: none of the substrings a real sqlx/Postgres
+    // connection error's Display text would contain (host, port, driver
+    // name, connection-refused wording, ...) appear anywhere in the body.
+    for forbidden in [
+        "sqlx",
+        "postgres",
+        "connect",
+        "refused",
+        "127.0.0.1",
+        "error:",
+        "nonexistent_db",
+    ] {
+        assert!(
+            !body_lower.contains(forbidden),
+            "response body must never leak internal database error detail; found {forbidden:?} in {body_text:?}"
+        );
+    }
 }
 
 /// Needs a real, reachable Postgres at `DATABASE_URL` — not run by default
