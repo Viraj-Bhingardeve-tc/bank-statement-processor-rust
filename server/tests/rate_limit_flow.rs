@@ -35,6 +35,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use license_protocol::{HeartbeatRequest, LoginRequest, ValidateLicenseRequest};
+use license_server::config::{AppConfig, ServerConfig};
 use license_server::rate_limit::{DEVICE_REQUESTS_PER_MINUTE, LOGIN_REQUESTS_PER_MINUTE};
 use license_server::state::AppState;
 use license_server::{build_router, db};
@@ -45,6 +46,25 @@ use uuid::Uuid;
 
 fn app() -> axum::Router {
     let config = common::test_config();
+    let pool = db::build_pool(
+        config.database.url.expose_secret(),
+        config.database.max_connections,
+    )
+    .unwrap();
+    build_router(AppState::new(config, pool))
+}
+
+/// Production Hardening, Finding H3: like `app()`, but with
+/// `TRUSTED_PROXY_CIDRS` set to `cidrs` — used by the proxy-aware
+/// `/login` tests below.
+fn app_with_trusted_proxies(cidrs: &[&str]) -> axum::Router {
+    let config = AppConfig {
+        server: ServerConfig {
+            trusted_proxies: cidrs.iter().map(|c| c.parse().unwrap()).collect(),
+            ..common::test_config().server
+        },
+        ..common::test_config()
+    };
     let pool = db::build_pool(
         config.database.url.expose_secret(),
         config.database.max_connections,
@@ -150,6 +170,78 @@ async fn fire_concurrent_burst<Req: serde::Serialize>(
     let bytes = serde_json::to_vec(body).unwrap();
     let handles: Vec<_> = (0..count)
         .map(|_| spawn_json_request(app.clone(), uri.to_string(), bytes.clone(), peer))
+        .collect();
+
+    for _ in 0..(count as usize + 10) {
+        tokio::task::yield_now().await;
+    }
+
+    handles
+}
+
+// ── Production Hardening, Finding H3 ─────────────────────────────────────
+
+async fn post_json_from_with_forwarded_for<Req: serde::Serialize>(
+    app: &axum::Router,
+    uri: &str,
+    body: &Req,
+    peer: SocketAddr,
+    forwarded_for: &str,
+) -> StatusCode {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", forwarded_for)
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap();
+    request.extensions_mut().insert(ConnectInfo(peer));
+
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+fn spawn_json_request_with_forwarded_for(
+    app: axum::Router,
+    uri: String,
+    body: Vec<u8>,
+    peer: SocketAddr,
+    forwarded_for: String,
+) -> JoinHandle<StatusCode> {
+    tokio::spawn(async move {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", forwarded_for)
+            .body(Body::from(body))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+
+        app.oneshot(request).await.unwrap().status()
+    })
+}
+
+/// Same concurrency-safety reasoning as `fire_concurrent_burst`, plus a
+/// fixed `X-Forwarded-For` value on every request in the batch.
+async fn fire_concurrent_burst_with_forwarded_for<Req: serde::Serialize>(
+    app: &axum::Router,
+    uri: &str,
+    body: &Req,
+    peer: SocketAddr,
+    forwarded_for: &str,
+    count: u32,
+) -> Vec<JoinHandle<StatusCode>> {
+    let bytes = serde_json::to_vec(body).unwrap();
+    let handles: Vec<_> = (0..count)
+        .map(|_| {
+            spawn_json_request_with_forwarded_for(
+                app.clone(),
+                uri.to_string(),
+                bytes.clone(),
+                peer,
+                forwarded_for.to_string(),
+            )
+        })
         .collect();
 
     for _ in 0..(count as usize + 10) {
@@ -393,4 +485,86 @@ async fn a_malformed_body_on_validate_license_is_not_rate_limited_and_reaches_th
         .unwrap();
 
     assert_ne!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+// ── Production Hardening, Finding H3 ─────────────────────────────────────
+
+#[tokio::test]
+async fn login_rate_limit_uses_the_forwarded_ip_when_the_peer_is_a_trusted_proxy() {
+    let trusted_peer: SocketAddr = "198.51.100.50:1".parse().unwrap();
+    let app = app_with_trusted_proxies(&["198.51.100.50/32"]);
+    let req = login_request();
+
+    // Exhaust the budget for forwarded client "203.0.113.1", all arriving
+    // through the same trusted proxy peer...
+    let burst = fire_concurrent_burst_with_forwarded_for(
+        &app,
+        "/login",
+        &req,
+        trusted_peer,
+        "203.0.113.1",
+        LOGIN_REQUESTS_PER_MINUTE,
+    )
+    .await;
+
+    let status =
+        post_json_from_with_forwarded_for(&app, "/login", &req, trusted_peer, "203.0.113.1").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "sanity check: this forwarded client's budget must actually be exhausted"
+    );
+
+    // ...but a DIFFERENT forwarded client IP, through the exact same
+    // trusted proxy peer, must have its own untouched budget — proving the
+    // limiter's real key is now the forwarded IP, not the shared peer IP.
+    let status =
+        post_json_from_with_forwarded_for(&app, "/login", &req, trusted_peer, "203.0.113.2").await;
+    assert_ne!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a different forwarded client IP must have its own, untouched budget"
+    );
+
+    for handle in burst {
+        let _ = handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn login_rate_limit_ignores_the_forwarded_header_when_the_peer_is_not_a_trusted_proxy() {
+    // `trusted_proxies` is configured (non-empty), but this specific peer
+    // isn't in it — proving "some proxy is trusted somewhere" doesn't
+    // imply "every peer is trusted."
+    let untrusted_peer: SocketAddr = "198.51.100.60:1".parse().unwrap();
+    let app = app_with_trusted_proxies(&["127.0.0.1/32"]);
+    let req = login_request();
+
+    // Exhaust the budget while sending a different forged X-Forwarded-For
+    // value on every request in the burst...
+    let burst = fire_concurrent_burst_with_forwarded_for(
+        &app,
+        "/login",
+        &req,
+        untrusted_peer,
+        "9.9.9.9",
+        LOGIN_REQUESTS_PER_MINUTE,
+    )
+    .await;
+
+    // ...then even a request claiming a brand-new forwarded IP must still
+    // be rejected: the header must be ignored entirely for an untrusted
+    // peer, so the real key was always the peer IP, which is now over
+    // budget regardless of what it claims via the header.
+    let status =
+        post_json_from_with_forwarded_for(&app, "/login", &req, untrusted_peer, "1.2.3.4").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "an untrusted peer's forged X-Forwarded-For must never grant a fresh budget"
+    );
+
+    for handle in burst {
+        let _ = handle.await.unwrap();
+    }
 }

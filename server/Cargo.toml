@@ -134,3 +134,10 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 # `axum = "0.7"`. `governor` has no HTTP-framework dependency at all, so it
 # composes cleanly via a small hand-written middleware instead.
 governor = "0.10"
+# Production Hardening, Finding H3: parses `TRUSTED_PROXY_CIDRS`
+# (`config::ServerConfig::trusted_proxies`) and checks whether a peer IP
+# falls inside one, for `rate_limit::resolve_client_ip`. A well-established,
+# zero-transitive-dependency crate — deliberately not hand-rolled IPv4/IPv6
+# prefix-mask arithmetic, which is easy to get subtly wrong (off-by-one
+# prefix lengths, IPv6 edge cases) for something this security-sensitive.
+ipnet = "2"

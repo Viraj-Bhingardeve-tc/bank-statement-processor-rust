@@ -20,6 +20,11 @@ pub fn test_config() -> AppConfig {
         server: ServerConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             log_filter: "info".to_string(),
+            // Production Hardening, Finding H3: empty by default, matching
+            // every deployment that hasn't set TRUSTED_PROXY_CIDRS — tests
+            // needing a trusted proxy override via
+            // `ServerConfig { trusted_proxies: vec![...], ..common::test_config().server }`.
+            trusted_proxies: Vec::new(),
         },
         database: DatabaseConfig {
             url: Secret::new("postgres://user:pass@127.0.0.1:1/nonexistent_db".to_string()),

@@ -43,6 +43,7 @@
 //! neither is a currently-real secret this module has anything to load or
 //! validate.
 
+use ipnet::IpNet;
 use std::env;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -95,12 +96,27 @@ impl<T> From<T> for Secret<T> {
     }
 }
 
-/// `HOST`/`PORT`/`RUST_LOG` — nothing secret here, just where and how
-/// loudly this process listens and logs.
+/// `HOST`/`PORT`/`RUST_LOG`/`TRUSTED_PROXY_CIDRS` — nothing secret here,
+/// just where and how loudly this process listens and logs, plus (Production
+/// Hardening, Finding H3) which reverse proxies it's willing to trust an
+/// `X-Forwarded-For` header from at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     pub log_filter: String,
+    /// Production Hardening, Finding H3: CIDR ranges whose direct TCP peer
+    /// address `rate_limit::login_rate_limit` trusts enough to read
+    /// `X-Forwarded-For` from at all — `rate_limit::resolve_client_ip` is
+    /// the actual decision logic; this is just its configuration input.
+    /// **Empty by default** (`TRUSTED_PROXY_CIDRS` unset) — an empty list
+    /// means no peer is ever trusted, so `X-Forwarded-For` is never
+    /// consulted and every existing deployment that hasn't set this
+    /// variable behaves byte-for-byte as it did before this finding was
+    /// fixed (this crate's own documented Caddy topology,
+    /// `PHASE4_DESIGN.md` §8, needs `TRUSTED_PROXY_CIDRS` set to the
+    /// Docker network's own subnet — see `server/.env.example` — to
+    /// actually benefit from this fix).
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 /// `DATABASE_URL`/`DATABASE_MAX_CONNECTIONS` — `url` is a real secret (it
@@ -193,6 +209,24 @@ impl AppConfig {
         let log_filter =
             get("RUST_LOG").unwrap_or_else(|| "license_server=info,tower_http=info".to_string());
 
+        // Production Hardening, Finding H3: comma-separated CIDR list
+        // (e.g. "127.0.0.1/32,172.16.0.0/12"). Unset or empty means no
+        // trusted proxies at all — see `ServerConfig::trusted_proxies`'s
+        // own doc comment for why that's the safe, behavior-preserving
+        // default for every deployment that doesn't explicitly opt in.
+        let trusted_proxies = match get("TRUSTED_PROXY_CIDRS") {
+            Some(v) if !v.trim().is_empty() => v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    s.parse::<IpNet>()
+                        .map_err(|_| ConfigError::InvalidTrustedProxyCidr(s.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => Vec::new(),
+        };
+
         let database_url = get("DATABASE_URL").ok_or(ConfigError::MissingDatabaseUrl)?;
         // Scheme-only check — deliberately not a full connection-string
         // parse (that's `sqlx`'s job, at pool-build time in `main.rs`,
@@ -251,6 +285,7 @@ impl AppConfig {
             server: ServerConfig {
                 bind_addr: SocketAddr::new(host, port),
                 log_filter,
+                trusted_proxies,
             },
             database: DatabaseConfig {
                 url: Secret::new(database_url),
@@ -276,6 +311,13 @@ impl AppConfig {
 pub enum ConfigError {
     InvalidHost(String),
     InvalidPort(String),
+    /// Production Hardening, Finding H3: `TRUSTED_PROXY_CIDRS` was set but
+    /// one of its comma-separated entries isn't a valid CIDR (e.g.
+    /// `192.168.1.1` with no `/prefix`, or a malformed address). Carries
+    /// the offending entry — unlike the secret-adjacent variants below,
+    /// nothing here can ever be a credential, so echoing it back is safe
+    /// and helps an operator find their typo.
+    InvalidTrustedProxyCidr(String),
     MissingDatabaseUrl,
     /// No message payload, deliberately — unlike `HOST`/`PORT` (never
     /// secret), an invalid `DATABASE_URL` may still contain a real
@@ -309,6 +351,10 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidPort(v) => {
                 write!(f, "invalid PORT value {v:?} (expected a number 0-65535)")
             }
+            ConfigError::InvalidTrustedProxyCidr(v) => write!(
+                f,
+                "invalid TRUSTED_PROXY_CIDRS entry {v:?} (expected CIDR notation, e.g. 127.0.0.1/32)"
+            ),
             ConfigError::MissingDatabaseUrl => {
                 write!(
                     f,
@@ -394,6 +440,111 @@ mod tests {
         let config =
             AppConfig::from_vars(vars(&[("RUST_LOG", "debug"), ("DATABASE_URL", DB_URL)])).unwrap();
         assert_eq!(config.server.log_filter, "debug");
+    }
+
+    // ── Trusted proxies (Production Hardening, Finding H3) ───────────────
+
+    #[test]
+    fn trusted_proxies_defaults_to_empty_when_unset() {
+        // The behavior-preserving default: no `TRUSTED_PROXY_CIDRS` at all
+        // means no peer is ever trusted, so every existing deployment that
+        // hasn't set this variable is unaffected by this finding's fix.
+        let config = AppConfig::from_vars(vars(&[("DATABASE_URL", DB_URL)])).unwrap();
+        assert!(config.server.trusted_proxies.is_empty());
+    }
+
+    #[test]
+    fn trusted_proxies_defaults_to_empty_when_set_to_an_empty_string() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("TRUSTED_PROXY_CIDRS", ""),
+        ]))
+        .unwrap();
+        assert!(config.server.trusted_proxies.is_empty());
+    }
+
+    #[test]
+    fn a_single_trusted_proxy_cidr_is_parsed() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ]))
+        .unwrap();
+        assert_eq!(config.server.trusted_proxies.len(), 1);
+        assert!(config.server.trusted_proxies[0].contains(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn multiple_comma_separated_trusted_proxy_cidrs_are_all_parsed() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            (
+                "TRUSTED_PROXY_CIDRS",
+                "127.0.0.1/32,172.16.0.0/12,10.0.0.0/8",
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(config.server.trusted_proxies.len(), 3);
+    }
+
+    #[test]
+    fn whitespace_around_trusted_proxy_cidrs_is_tolerated() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("TRUSTED_PROXY_CIDRS", " 127.0.0.1/32 , 10.0.0.0/8 "),
+        ]))
+        .unwrap();
+        assert_eq!(config.server.trusted_proxies.len(), 2);
+    }
+
+    #[test]
+    fn an_ipv6_trusted_proxy_cidr_is_parsed() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("TRUSTED_PROXY_CIDRS", "::1/128"),
+        ]))
+        .unwrap();
+        assert_eq!(config.server.trusted_proxies.len(), 1);
+        assert!(config.server.trusted_proxies[0].contains(&"::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn a_malformed_trusted_proxy_cidr_is_a_config_error_not_a_silent_skip() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("TRUSTED_PROXY_CIDRS", "not-a-cidr"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidTrustedProxyCidr("not-a-cidr".to_string())
+        );
+    }
+
+    #[test]
+    fn a_cidr_missing_its_prefix_length_is_a_config_error() {
+        // A bare IP with no `/prefix` is exactly the kind of mistake this
+        // must reject rather than silently treating as a /32 or /128 —
+        // being explicit here is what keeps an operator's intent visible.
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("TRUSTED_PROXY_CIDRS", "192.168.1.1"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidTrustedProxyCidr("192.168.1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn one_valid_and_one_malformed_trusted_proxy_cidr_is_still_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32,garbage"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidTrustedProxyCidr("garbage".to_string())
+        );
     }
 
     #[test]
