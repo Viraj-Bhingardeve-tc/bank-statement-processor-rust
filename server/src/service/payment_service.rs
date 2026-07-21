@@ -855,9 +855,23 @@ impl PaymentService {
             // so are unreachable here.
             _ => return Ok(false),
         };
+        // Includes `local_payment.id`, not just Razorpay's own reported
+        // `(status, id)` — this key must identify "this local row's
+        // transition to this status," not merely "a Razorpay payment
+        // reporting this status under this id." Without the local id, two
+        // reconciliation passes that each discover a *different* local
+        // payment row but happen to observe the same upstream `(status,
+        // id)` pair would share one idempotency-ledger entry: whichever
+        // claims it first silently blocks the other's real update — the
+        // loser's row never actually transitions, yet `reconcile_one`
+        // (having no way to tell "applied" from "already claimed" apart at
+        // this call site) still reports it as healed. Scoping the key to
+        // the resolved local row keeps two independent rows from ever
+        // contending for the same claim, so each genuinely gets healed
+        // once and reports a stable, idempotent result on every repeat run.
         let event_id = format!(
-            "reconcile:{}:{}",
-            razorpay_payment.status, razorpay_payment.id
+            "reconcile:{}:{}:{}",
+            local_payment.id, razorpay_payment.status, razorpay_payment.id
         );
         let payload = RazorpayWebhookPayload {
             event: event_type.to_string(),
