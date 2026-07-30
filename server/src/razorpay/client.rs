@@ -12,10 +12,14 @@
 //! design document itself cites for choosing a hosted-page approach at
 //! all). The Razorpay product that actually produces a hosted URL for a
 //! one-time payment is **Payment Links** (`POST /v1/payment_links`); this
-//! client uses that for `lifetime` and the real Subscriptions API
-//! (`POST /v1/subscriptions`, whose response includes a genuine
-//! `short_url`) for `monthly`/`yearly`. The `RazorpayClient` trait itself
-//! stays product-agnostic (`create_checkout` → `{checkout_url,
+//! client uses that for `lifetime`/`trial` and, in production (a live
+//! key), the real Subscriptions API (`POST /v1/subscriptions`, whose
+//! response includes a genuine `short_url`) for `monthly`/`yearly`. Under
+//! a *test-mode* key (`is_test_mode_key`), `monthly`/`yearly` fall back to
+//! the same Payment Links call instead — a one-time test-mode charge, not
+//! a recurring one, purely so local development/testing never needs a
+//! Razorpay-dashboard-provisioned Plan id. The `RazorpayClient` trait
+//! itself stays product-agnostic (`create_checkout` → `{checkout_url,
 //! provider_ref}`) precisely so this internal detail can be corrected
 //! without touching `service::payment_service` or its tests. **Exact
 //! Razorpay request/response field names here are written against
@@ -100,9 +104,10 @@ impl std::error::Error for RazorpayError {}
 #[derive(Debug, Clone)]
 pub struct CreateCheckoutRequest {
     pub plan_type: PlanType,
-    /// Smallest currency unit (paise) — only used for the `lifetime`
-    /// (Payment Links) path; Subscriptions pricing lives on the
-    /// Razorpay-side Plan itself.
+    /// Smallest currency unit (paise) — used for every Payment Links call
+    /// (`lifetime`/`trial` always, `monthly`/`yearly` under a test-mode
+    /// key — see `is_test_mode_key`); ignored by a real Subscriptions
+    /// call, whose pricing lives on the Razorpay-side Plan itself.
     pub amount_minor: i64,
     pub currency: String,
     /// Our own reference string (e.g. `"sub_42"`), passed through so a
@@ -225,6 +230,21 @@ impl HttpRazorpayClient {
     }
 }
 
+/// Razorpay's own key-id convention: every test-mode credential starts
+/// with `rzp_test_`, every live one with `rzp_live_`. Used only to let
+/// `monthly`/`yearly` checkout sessions skip the Subscriptions API (and
+/// its Plan-id provisioning requirement) in local/test environments —
+/// gating on the key itself, rather than a separate config flag, means
+/// there is no knob that could be left flipped on in a real production
+/// `.env`: a live key can never take this branch. Production
+/// `monthly`/`yearly` billing still goes through real Razorpay
+/// Subscriptions (genuine recurring charges), unaffected — only the
+/// Payment Links substitute below is test-mode-only, since Payment Links
+/// are a single one-time charge, not a recurring one.
+fn is_test_mode_key(key_id: &str) -> bool {
+    key_id.starts_with("rzp_test_")
+}
+
 /// Builds the underlying HTTP client with bounded connect/request
 /// timeouts — factored out of `HttpRazorpayClient::new` so a test can
 /// build one with tiny durations against a local, deliberately-
@@ -289,75 +309,81 @@ impl RazorpayClient for HttpRazorpayClient {
     ) -> Result<CreateCheckoutResponse, RazorpayError> {
         let (key_id, key_secret) = self.credentials()?;
 
-        match req.plan_type {
-            PlanType::Lifetime | PlanType::Trial => {
-                let body = CreatePaymentLinkRequest {
-                    amount: req.amount_minor,
-                    currency: &req.currency,
-                    reference_id: &req.receipt,
-                };
-                let response = self
-                    .http
-                    .post("https://api.razorpay.com/v1/payment_links")
-                    .basic_auth(key_id, Some(key_secret))
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| RazorpayError::Http(e.to_string()))?;
+        // `monthly`/`yearly` normally need a real Subscriptions Plan id
+        // (below) — but under a test-mode key, fall back to the same
+        // Payment Links call `lifetime`/`trial` already use, so local
+        // development/testing never needs one provisioned. See
+        // `is_test_mode_key`'s doc comment for why this can't leak into
+        // production.
+        let use_payment_link = matches!(req.plan_type, PlanType::Lifetime | PlanType::Trial)
+            || is_test_mode_key(key_id);
 
-                if !response.status().is_success() {
-                    return Err(RazorpayError::Http(format!(
-                        "payment_links returned {}",
-                        response.status()
-                    )));
-                }
+        if use_payment_link {
+            let body = CreatePaymentLinkRequest {
+                amount: req.amount_minor,
+                currency: &req.currency,
+                reference_id: &req.receipt,
+            };
+            let response = self
+                .http
+                .post("https://api.razorpay.com/v1/payment_links")
+                .basic_auth(key_id, Some(key_secret))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| RazorpayError::Http(e.to_string()))?;
 
-                let parsed: CreatePaymentLinkResponse = response
-                    .json()
-                    .await
-                    .map_err(|e| RazorpayError::Http(e.to_string()))?;
-
-                Ok(CreateCheckoutResponse {
-                    checkout_url: parsed.short_url,
-                    provider_ref: parsed.id,
-                })
+            if !response.status().is_success() {
+                return Err(RazorpayError::Http(format!(
+                    "payment_links returned {}",
+                    response.status()
+                )));
             }
-            PlanType::Monthly | PlanType::Yearly => {
-                let plan_id = self.plan_id_for(req.plan_type)?;
-                let body = CreateSubscriptionRequest {
-                    plan_id,
-                    total_count: 120, // 10 years of billing cycles — Razorpay requires a bound, not literally unlimited.
-                    customer_notify: 1,
-                    notes: SubscriptionNotes {
-                        receipt: &req.receipt,
-                    },
-                };
-                let response = self
-                    .http
-                    .post("https://api.razorpay.com/v1/subscriptions")
-                    .basic_auth(key_id, Some(key_secret))
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| RazorpayError::Http(e.to_string()))?;
 
-                if !response.status().is_success() {
-                    return Err(RazorpayError::Http(format!(
-                        "subscriptions returned {}",
-                        response.status()
-                    )));
-                }
+            let parsed: CreatePaymentLinkResponse = response
+                .json()
+                .await
+                .map_err(|e| RazorpayError::Http(e.to_string()))?;
 
-                let parsed: CreateSubscriptionResponse = response
-                    .json()
-                    .await
-                    .map_err(|e| RazorpayError::Http(e.to_string()))?;
+            Ok(CreateCheckoutResponse {
+                checkout_url: parsed.short_url,
+                provider_ref: parsed.id,
+            })
+        } else {
+            let plan_id = self.plan_id_for(req.plan_type)?;
+            let body = CreateSubscriptionRequest {
+                plan_id,
+                total_count: 120, // 10 years of billing cycles — Razorpay requires a bound, not literally unlimited.
+                customer_notify: 1,
+                notes: SubscriptionNotes {
+                    receipt: &req.receipt,
+                },
+            };
+            let response = self
+                .http
+                .post("https://api.razorpay.com/v1/subscriptions")
+                .basic_auth(key_id, Some(key_secret))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| RazorpayError::Http(e.to_string()))?;
 
-                Ok(CreateCheckoutResponse {
-                    checkout_url: parsed.short_url,
-                    provider_ref: parsed.id,
-                })
+            if !response.status().is_success() {
+                return Err(RazorpayError::Http(format!(
+                    "subscriptions returned {}",
+                    response.status()
+                )));
             }
+
+            let parsed: CreateSubscriptionResponse = response
+                .json()
+                .await
+                .map_err(|e| RazorpayError::Http(e.to_string()))?;
+
+            Ok(CreateCheckoutResponse {
+                checkout_url: parsed.short_url,
+                provider_ref: parsed.id,
+            })
         }
     }
 
@@ -597,5 +623,24 @@ mod tests {
         assert!(RazorpayError::Http("x".to_string()).is_recoverable());
         assert!(RazorpayError::Transient("x".to_string()).is_recoverable());
         assert!(!RazorpayError::Permanent("x".to_string()).is_recoverable());
+    }
+
+    // ── Test-mode key detection (monthly/yearly Payment Links fallback) ─
+
+    #[test]
+    fn is_test_mode_key_recognizes_the_documented_test_prefix() {
+        assert!(is_test_mode_key("rzp_test_TJMXpLfctQwwSD"));
+    }
+
+    #[test]
+    fn is_test_mode_key_rejects_a_live_key() {
+        assert!(!is_test_mode_key("rzp_live_realkeyid"));
+    }
+
+    #[test]
+    fn is_test_mode_key_rejects_a_key_that_merely_contains_the_test_substring() {
+        // Must be a *prefix* match — a live-shaped key that happens to
+        // contain "rzp_test_" elsewhere must not be mistaken for one.
+        assert!(!is_test_mode_key("rzp_live_containing_rzp_test_inside"));
     }
 }

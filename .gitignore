@@ -5,3 +5,4 @@
 *.db.bak
 *.db.migrating
 .env
+docker-compose.override.yml

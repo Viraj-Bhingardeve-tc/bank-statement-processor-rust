@@ -74,7 +74,26 @@ export component LoginScreen inherits Rectangle {
             if !root.license-blocked : VerticalBox {
             padding: 0px;
             spacing: 0px;
-            init => { email-ti.focus(); }
+            // Deferred one event-loop tick via Timer rather than focused
+            // directly from `init`: this VerticalBox is itself lazily
+            // instantiated (the `if` above), sometimes from inside an
+            // in-progress geometry/layout computation (e.g. the first
+            // pointer event over the login screen) — focusing synchronously
+            // there re-enters that same in-progress layout-cache property
+            // (via TextInput::focus_event's IME-positioning geometry
+            // lookup) and Slint's cycle detector panics with "Recursion
+            // detected". Firing from a Timer callback runs in a fresh,
+            // unnested call stack once layout has settled, so the focus
+            // grab (and its geometry lookup) sees a fully-resolved property
+            // instead of one still being computed.
+            autofocus-timer := Timer {
+                interval: 1ms;
+                running: true;
+                triggered => {
+                    self.running = false;
+                    email-ti.focus();
+                }
+            }
 
             // ── Email group ───────────────────────────────────────────────────
             Text {
