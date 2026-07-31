@@ -313,10 +313,28 @@ impl AppConfig {
             return Err(ConfigError::IncompleteRazorpayCredentials);
         }
 
+        // Zero is rejected, not just "any valid u64": `reconciliation::spawn`
+        // feeds this straight into `tokio::time::interval`, which panics
+        // outright on a zero-duration period ("`period` must be non-zero.",
+        // confirmed directly against this crate's pinned tokio version).
+        // That spawn is a detached background task whose `JoinHandle`
+        // `main.rs` never awaits, so a zero value here would silently and
+        // permanently disable the reconciliation backstop at startup — a
+        // raw, unstructured panic line on stderr that bypasses this
+        // process's `tracing`-based JSON logging entirely, not the loud,
+        // structured `ConfigError` every other invalid value here already
+        // gets. Rejected at the one place that already fails startup loudly
+        // instead.
         let reconciliation_interval_secs = match get("RECONCILIATION_INTERVAL_SECS") {
-            Some(v) => v
-                .parse::<u64>()
-                .map_err(|_| ConfigError::InvalidReconciliationInterval(v))?,
+            Some(v) => {
+                let parsed = v
+                    .parse::<u64>()
+                    .map_err(|_| ConfigError::InvalidReconciliationInterval(v.clone()))?;
+                if parsed == 0 {
+                    return Err(ConfigError::InvalidReconciliationInterval(v));
+                }
+                parsed
+            }
             None => 15 * 60,
         };
         let reconciliation_batch_size = match get("RECONCILIATION_BATCH_SIZE") {
@@ -334,11 +352,20 @@ impl AppConfig {
 
         // Production Hardening, Finding H4: see `RateLimitConfig`'s own doc
         // comment for what this actually controls (the cleanup sweep
-        // interval, not a standalone per-key idle threshold) and why.
+        // interval, not a standalone per-key idle threshold) and why. Same
+        // zero-rejection reasoning as `reconciliation_interval_secs` above —
+        // `rate_limit_cleanup::spawn` feeds this into the same panicking
+        // `tokio::time::interval` call, and is just as un-awaited.
         let rate_limit_entry_ttl_secs = match get("RATE_LIMIT_ENTRY_TTL_SECONDS") {
-            Some(v) => v
-                .parse::<u64>()
-                .map_err(|_| ConfigError::InvalidRateLimitEntryTtl(v))?,
+            Some(v) => {
+                let parsed = v
+                    .parse::<u64>()
+                    .map_err(|_| ConfigError::InvalidRateLimitEntryTtl(v.clone()))?;
+                if parsed == 0 {
+                    return Err(ConfigError::InvalidRateLimitEntryTtl(v));
+                }
+                parsed
+            }
             None => 900,
         };
 
@@ -446,7 +473,8 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::InvalidReconciliationInterval(v) => write!(
                 f,
-                "invalid RECONCILIATION_INTERVAL_SECS value {v:?} (expected a non-negative number of seconds)"
+                "invalid RECONCILIATION_INTERVAL_SECS value {v:?} (expected a positive, non-zero \
+                 number of seconds — zero would crash the reconciliation scheduler at startup)"
             ),
             ConfigError::InvalidReconciliationBatchSize(v) => write!(
                 f,
@@ -458,7 +486,8 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::InvalidRateLimitEntryTtl(v) => write!(
                 f,
-                "invalid RATE_LIMIT_ENTRY_TTL_SECONDS value {v:?} (expected a non-negative number of seconds)"
+                "invalid RATE_LIMIT_ENTRY_TTL_SECONDS value {v:?} (expected a positive, non-zero \
+                 number of seconds — zero would crash the rate-limiter cleanup scheduler at startup)"
             ),
         }
     }
@@ -863,6 +892,26 @@ mod tests {
         );
     }
 
+    /// A zero interval parses as a valid `u64` but must still be rejected:
+    /// `reconciliation::spawn` feeds this straight into `tokio::time::
+    /// interval`, which panics outright on a zero-duration period. Since
+    /// that spawn is a detached background task nothing ever awaits, an
+    /// unvalidated zero here would silently and permanently disable the
+    /// reconciliation backstop at startup with nothing but an unstructured
+    /// panic line on stderr — not the loud, structured `ConfigError` every
+    /// other invalid value here already gets.
+    #[test]
+    fn a_zero_reconciliation_interval_is_a_config_error_not_a_silent_scheduler_panic() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RECONCILIATION_INTERVAL_SECS", "0"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidReconciliationInterval("0".to_string())
+        );
+    }
+
     #[test]
     fn invalid_reconciliation_batch_size_is_a_config_error() {
         let result = AppConfig::from_vars(vars(&[
@@ -918,18 +967,25 @@ mod tests {
         );
     }
 
+    /// A zero TTL parses as a valid `u64` but must still be rejected, for
+    /// the same reason as `a_zero_reconciliation_interval_is_a_config_error_
+    /// not_a_silent_scheduler_panic` above: `rate_limit_cleanup::spawn`
+    /// feeds this into the same panicking `tokio::time::interval` call, on
+    /// an equally un-awaited background task — confirmed empirically
+    /// (`tokio::time::interval(Duration::from_secs(0))` panics with
+    /// `` `period` must be non-zero. ``), not assumed. This used to be
+    /// accepted as "a valid non-negative integer"; that was the exact gap
+    /// that let a zero value reach the panicking call unvalidated.
     #[test]
-    fn a_zero_rate_limit_entry_ttl_is_accepted_as_a_valid_non_negative_integer() {
-        // Not a sensible production value (it'd sweep on every tick), but
-        // `u64` parsing has no reason to special-case zero as invalid —
-        // an operator who sets this is responsible for the consequences,
-        // same as any other tuning knob here.
-        let config = AppConfig::from_vars(vars(&[
+    fn a_zero_rate_limit_entry_ttl_is_a_config_error_not_a_silent_scheduler_panic() {
+        let result = AppConfig::from_vars(vars(&[
             ("DATABASE_URL", DB_URL),
             ("RATE_LIMIT_ENTRY_TTL_SECONDS", "0"),
-        ]))
-        .unwrap();
-        assert_eq!(config.rate_limit.entry_ttl_secs, 0);
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidRateLimitEntryTtl("0".to_string())
+        );
     }
 
     #[test]
