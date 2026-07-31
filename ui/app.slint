@@ -1,4 +1,10 @@
 // app.slint — Root window. Switches between LoginScreen and MainScreen.
+//
+// Purely structural/wiring file — every property and callback below is read
+// or set by Rust (`src/main.rs`), so this file's own visual footprint is
+// just the Window itself; LoginScreen/MainScreen each fully cover it and
+// own their own presentation. The 2026 fintech-palette refresh (see
+// login.slint's header) only touches the one cosmetic line below.
 
 import { LoginScreen } from "login.slint";
 import { MainScreen, TxnRow, BatchFileRow, SummaryListRow } from "main_screen.slint";
@@ -10,6 +16,7 @@ export component AppWindow inherits Window {
     preferred-height: 860px;
     min-width:        1280px;
     min-height:       720px;
+    background:       #F8FAFC;
 
     // ── Auth state ────────────────────────────────────────────────────────────
     in-out property <bool>   logged-in:        false;

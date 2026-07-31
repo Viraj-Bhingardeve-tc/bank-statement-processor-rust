@@ -1,11 +1,321 @@
 // login.slint — Monthly-password login screen.
-// Pixel-perfect match to login.html:
-//   card: 380×auto, padding 36px 40px 32px, border-radius 10px, shadow 0 8px 32px rgba(0,0,0,.28)
-//   brand → 28px gap → divider → 24px gap → form groups (label 5px → input, 16px between groups)
-//   button: full-width, font-size 14px, font-weight 600, padding 10px (→ height ~44px), border-radius 5px
-//   footer note: margin-top 22px, font-size 11px, color #90A4AE
+//
+// Visual design system (2026 refresh — premium fintech look, Stripe/Linear/
+// Fluent-inspired): soft blue page gradient, floating white card with a
+// large soft shadow, generous whitespace, rounded-10px inputs/buttons, and
+// a small blue "shield" brand mark. This file only changes presentation —
+// every `in`/`in-out` property and `callback` on `LoginScreen` below has the
+// exact same name, type, and direction as before, so `app.slint`'s wiring
+// to Rust needs zero changes.
+//
+// Palette (kept as named literals inline rather than a global, since this
+// is the only file that needs it):
+//   primary #2563EB · primary-hover #1D4ED8 · text #0F172A · secondary text
+//   #64748B · muted text #94A3B8 · page background #F8FAFC · card #FFFFFF ·
+//   border #E2E8F0 · error #B91C1C on #FEF2F2 · warning #92400E on #FFFBEB.
+//
+// Payment page (2026 pricing-card refresh): the "Choose Your Plan" flow
+// reachable from the normal login form now opens a wide, dedicated pricing
+// page with three plan cards (Monthly/Yearly/Lifetime) instead of a small
+// tab strip — see the `if root.show-subscribe` branch near the bottom.
+// The license-blocked recovery screen keeps its previous compact
+// tab-based `SubscribeSection` untouched (still inside the narrow 480px
+// card), since that flow needs to stay small and low-risk for a user who
+// is already stuck without a working license.
 
 import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+// ── Reusable building blocks (private to this file) ────────────────────────
+
+// A labelled text field: uppercase micro-label, 44px rounded input, focus
+// ring via border-color, placeholder shown when empty & unfocused. Used for
+// every text input on this screen so they all look and behave identically.
+component LabeledInput inherits VerticalLayout {
+    spacing: 6px;
+    in property <string>  field-label:     "";
+    in property <string>  placeholder-text: "";
+    in-out property <string> value:        "";
+    in property <bool>    is-password:      false;
+    in property <bool>    field-enabled:    true;
+    in property <string>  accessible-name:  "";
+    callback accepted();
+
+    public function focus-input() {
+        ti.focus();
+    }
+
+    Text {
+        text: root.field-label;
+        font-size: 11px; font-weight: 600; letter-spacing: 0.6px;
+        color: #64748B;
+    }
+    box := Rectangle {
+        height: 44px;
+        border-radius: 10px;
+        background: root.field-enabled ? #FFFFFF : #F8FAFC;
+        border-width: ti.has-focus ? 2px : 1px;
+        border-color: ti.has-focus ? #2563EB : #E2E8F0;
+
+        if root.value == "" && !ti.has-focus : Text {
+            x: 16px; width: parent.width - 32px; height: parent.height;
+            text: root.placeholder-text;
+            font-size: 14px; color: #94A3B8;
+            vertical-alignment: center; overflow: elide;
+        }
+        ti := TextInput {
+            x: 16px; width: parent.width - 32px; height: parent.height;
+            font-size: 14px; color: #0F172A;
+            vertical-alignment: center;
+            input-type: root.is-password ? password : text;
+            enabled: root.field-enabled;
+            text <=> root.value;
+            accessible-label: root.accessible-name;
+            accepted => { root.accepted(); }
+        }
+    }
+}
+
+// Full-width primary action button with real hover/press/disabled states
+// (TouchArea's has-hover/pressed), matching the Stripe/Linear "solid button"
+// look rather than a flat web-form submit.
+component PrimaryButton inherits Rectangle {
+    in property <string> label:          "";
+    in property <bool>   button-enabled: true;
+    callback clicked();
+
+    height: 46px;
+    border-radius: 10px;
+    background: !root.button-enabled ? #93C5FD
+        : ta.pressed  ? #1E40AF
+        : ta.has-hover ? #1D4ED8
+        : #2563EB;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.button-enabled;
+
+    ta := TouchArea {
+        enabled: root.button-enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.label;
+        font-size: 15px; font-weight: 600; color: #FFFFFF;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// The "Subscribe Now" (Phase 4M auto-checkout) block used by the compact,
+// license-blocked recovery flow: plan picker tabs + account password +
+// submit button + status line.
+component SubscribeSection inherits VerticalLayout {
+    spacing: 0px;
+    in property <string>     email:           "";
+    in-out property <string> account-password: "";
+    in-out property <string> plan-type:        "monthly";
+    in property <bool>       in-progress:      false;
+    in property <string>     status-text:      "";
+    callback go(string);
+
+    Text {
+        text: "SUBSCRIBE NOW"; font-size: 11px; font-weight: 600;
+        color: #64748B; letter-spacing: 0.6px;
+    }
+    Rectangle { height: 10px; }
+
+    plan-row := HorizontalBox {
+        height: 36px;
+        padding: 0px;
+        spacing: 8px;
+
+        Rectangle {
+            height: 36px; border-radius: 8px;
+            background: root.plan-type == "monthly" ? #2563EB : #FFFFFF;
+            border-width: 1px;
+            border-color: root.plan-type == "monthly" ? #2563EB : (ta-m.has-hover ? #93C5FD : #E2E8F0);
+            ta-m := TouchArea {
+                enabled: !root.in-progress;
+                mouse-cursor: pointer;
+                clicked => { root.plan-type = "monthly"; }
+            }
+            Text {
+                text: "Monthly"; font-size: 13px; font-weight: 600;
+                color: root.plan-type == "monthly" ? #FFFFFF : #334155;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            height: 36px; border-radius: 8px;
+            background: root.plan-type == "yearly" ? #2563EB : #FFFFFF;
+            border-width: 1px;
+            border-color: root.plan-type == "yearly" ? #2563EB : (ta-y.has-hover ? #93C5FD : #E2E8F0);
+            ta-y := TouchArea {
+                enabled: !root.in-progress;
+                mouse-cursor: pointer;
+                clicked => { root.plan-type = "yearly"; }
+            }
+            Text {
+                text: "Yearly"; font-size: 13px; font-weight: 600;
+                color: root.plan-type == "yearly" ? #FFFFFF : #334155;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            height: 36px; border-radius: 8px;
+            background: root.plan-type == "lifetime" ? #2563EB : #FFFFFF;
+            border-width: 1px;
+            border-color: root.plan-type == "lifetime" ? #2563EB : (ta-l.has-hover ? #93C5FD : #E2E8F0);
+            ta-l := TouchArea {
+                enabled: !root.in-progress;
+                mouse-cursor: pointer;
+                clicked => { root.plan-type = "lifetime"; }
+            }
+            Text {
+                text: "Lifetime"; font-size: 13px; font-weight: 600;
+                color: root.plan-type == "lifetime" ? #FFFFFF : #334155;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+    }
+    Rectangle { height: 16px; }
+
+    pwd-field := LabeledInput {
+        field-label: "ACCOUNT PASSWORD";
+        placeholder-text: "Your account password";
+        is-password: true;
+        field-enabled: !root.in-progress;
+        accessible-name: "Account password";
+        value <=> root.account-password;
+        accepted => { root.go(root.email); }
+    }
+    Rectangle { height: 16px; }
+
+    PrimaryButton {
+        label: root.in-progress ? "Working…" : "Subscribe Now";
+        button-enabled: !root.in-progress;
+        clicked => { root.go(root.email); }
+    }
+
+    if root.status-text != "" : Rectangle { height: 14px; }
+    if root.status-text != "" : Text {
+        text: root.status-text;
+        font-size: 12px; color: #334155;
+        horizontal-alignment: center; wrap: word-wrap;
+    }
+}
+
+// A single pricing-page plan card (Monthly / Yearly / Lifetime). Purely
+// presentational + a `choose()` callback — the caller decides what that
+// means (sets the shared `subscribe-plan-type`), so this component owns no
+// business state of its own.
+component PricingCard inherits Rectangle {
+    in property <string> plan-name:   "";
+    in property <string> price:       "";
+    in property <string> price-sub:   "";
+    in property <string> feature-1:   "";
+    in property <string> feature-2:   "";
+    in property <string> badge-text:  "";
+    in property <color>  accent:         #2563EB;
+    in property <color>  accent-hover:   #1D4ED8;
+    in property <color>  accent-pressed: #1E40AF;
+    in property <string> button-label: "Choose";
+    in property <bool>   highlighted:  false;
+    in property <bool>   selected:     false;
+    in property <bool>   card-enabled: true;
+    callback choose();
+
+    border-radius: 18px;
+    background: #FFFFFF;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? root.accent : #E2E8F0;
+    drop-shadow-blur:     root.highlighted ? 32px : 18px;
+    drop-shadow-color:    #0F172A1F;
+    drop-shadow-offset-y: root.highlighted ? 14px : 8px;
+
+    VerticalBox {
+        padding-top:    root.highlighted ? 32px : 28px;
+        padding-left:   24px;
+        padding-right:  24px;
+        padding-bottom: 24px;
+        spacing: 0px;
+
+        if root.badge-text != "" : Rectangle {
+            height: 22px;
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                width: 132px; height: 22px;
+                border-radius: 11px;
+                background: root.accent;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: root.badge-text;
+                    font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: #FFFFFF;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+            }
+        }
+        if root.badge-text != "" : Rectangle { height: 14px; }
+
+        Text {
+            text: root.plan-name;
+            font-size: 15px; font-weight: 700; color: #0F172A;
+            horizontal-alignment: center;
+        }
+        Rectangle { height: 12px; }
+        Text {
+            text: root.price;
+            font-size: 32px; font-weight: 800; color: #0F172A;
+            horizontal-alignment: center;
+        }
+        Rectangle { height: 4px; }
+        Text {
+            text: root.price-sub;
+            font-size: 12px; color: #64748B;
+            horizontal-alignment: center;
+        }
+        Rectangle { height: 20px; }
+        Rectangle { height: 1px; background: #E2E8F0; }
+        Rectangle { height: 18px; }
+
+        Text {
+            text: root.feature-1;
+            font-size: 13px; color: #334155;
+            horizontal-alignment: center;
+        }
+        Rectangle { height: 10px; }
+        Text {
+            text: root.feature-2;
+            font-size: 13px; color: #334155;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        Rectangle { height: 18px; }
+        btn := Rectangle {
+            height: 42px; border-radius: 10px;
+            background: !root.card-enabled ? #CBD5E1
+                : ta.pressed   ? root.accent-pressed
+                : ta.has-hover ? root.accent-hover
+                : root.accent;
+            accessible-role: button;
+            accessible-label: root.button-label;
+            accessible-enabled: root.card-enabled;
+            ta := TouchArea {
+                enabled: root.card-enabled;
+                mouse-cursor: pointer;
+                clicked => { root.choose(); }
+            }
+            Text {
+                text: root.button-label;
+                font-size: 13px; font-weight: 700; color: #FFFFFF;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ── Screen ───────────────────────────────────────────────────────────────
 
 export component LoginScreen inherits Rectangle {
     in property <string>  error-message: "";
@@ -49,45 +359,88 @@ export component LoginScreen inherits Rectangle {
     // already in scope here.
     callback subscribe(string);
 
-    background: #1565C0;
+    // ── Local, presentation-only UI state ─────────────────────────────────────
+    // Neither of these is forwarded to Rust — they only decide what this
+    // screen currently shows. `show-subscribe` opens the wide pricing page
+    // below (reachable from the normal login form's "Choose Your Plan"
+    // link) without needing a new callback. `remember-me` is a purely
+    // decorative checkbox — there is no "remember me" feature in the
+    // backend (monthly password + license gate only), so this
+    // intentionally does nothing beyond its own visual state until such a
+    // feature exists.
+    property <bool> show-subscribe: false;
+    property <bool> remember-me:    false;
 
-    card := Rectangle {
-        width:         380px;
+    background: @linear-gradient(160deg, #EAF2FF 0%, #F8FAFC 55%, #F1F5F9 100%);
+
+    // ── Login form / license-recovery card (480px, unchanged footprint) ───────
+    if !root.show-subscribe : card := Rectangle {
+        width:         480px;
         x:             (parent.width  - self.width)  / 2;
         y:             (parent.height - self.height) / 2;
         background:    #FFFFFF;
-        border-radius: 10px;
-        drop-shadow-blur:     32px;
-        drop-shadow-color:    #00000047;
+        border-radius: 20px;
+        drop-shadow-blur:     44px;
+        drop-shadow-color:    #0F172A24;
         drop-shadow-offset-x: 0px;
-        drop-shadow-offset-y: 8px;
+        drop-shadow-offset-y: 18px;
 
         VerticalBox {
-            padding-top:    36px;
-            padding-left:   40px;
-            padding-right:  40px;
-            padding-bottom: 32px;
+            padding-top:    44px;
+            padding-left:   48px;
+            padding-right:  48px;
+            padding-bottom: 36px;
             spacing: 0px;
 
-            // ── Brand (centered, name 20/800, sub 12/400) ─────────────────────
+            // ── Brand mark: rounded blue badge with a white shield + check ────
+            logo-row := Rectangle {
+                height: 72px;
+                logo-badge := Rectangle {
+                    width: 72px; height: 72px;
+                    x: (parent.width - self.width) / 2;
+                    border-radius: 20px;
+                    background: @linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
+                    drop-shadow-blur:     20px;
+                    drop-shadow-color:    #2563EB40;
+                    drop-shadow-offset-y: 8px;
+
+                    Path {
+                        width: 34px; height: 34px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        viewbox-width: 24; viewbox-height: 24;
+                        fill: #FFFFFF;
+                        commands: "M12 1.5 L4.5 4.5 V11 C4.5 16.2 7.8 20.4 12 22.5 C16.2 20.4 19.5 16.2 19.5 11 V4.5 Z";
+                    }
+                    Path {
+                        width: 15px; height: 15px;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2 + 2px;
+                        viewbox-width: 24; viewbox-height: 24;
+                        stroke: #2563EB;
+                        stroke-width: 3px;
+                        commands: "M7 12.5 L10.5 16 L17 8.5";
+                    }
+                }
+            }
+            Rectangle { height: 20px; }
+
             Text {
                 text: "A S Havaldar";
-                font-size: 20px; font-weight: 800; color: #0D47A1;
-                letter-spacing: 0.3px; horizontal-alignment: center;
+                font-size: 16px; font-weight: 700; color: #0F172A;
+                letter-spacing: 0.2px; horizontal-alignment: center;
             }
-            Rectangle { height: 3px; }   // margin-top:3px on brand-sub
+            Rectangle { height: 4px; }
             Text {
                 text: "Bank Statement Processor";
-                font-size: 12px; color: #546E7A;
+                font-size: 12px; color: #64748B;
                 horizontal-alignment: center;
             }
-            Rectangle { height: 25px; }  // brand margin-bottom:28px total (3+25)
+            Rectangle { height: 24px; }
+            Rectangle { height: 1px; background: #E2E8F0; }
+            Rectangle { height: 28px; }
 
-            // ── Divider + gap ─────────────────────────────────────────────────
-            Rectangle { height: 1px; background: #BBDEFB; }
-            Rectangle { height: 24px; }  // margin: 0 0 24px
-
-            // ── Password login form (hidden while license-blocked) ─────────────
+            // ── Normal login form (hidden while license-blocked) ────────────
             if !root.license-blocked : VerticalBox {
             padding: 0px;
             spacing: 0px;
@@ -108,103 +461,147 @@ export component LoginScreen inherits Rectangle {
                 running: true;
                 triggered => {
                     self.running = false;
-                    email-ti.focus();
+                    email-field.focus-input();
                 }
             }
 
-            // ── Email group ───────────────────────────────────────────────────
             Text {
-                text: "WORK EMAIL"; font-size: 11px; font-weight: 600;
-                color: #37474F; letter-spacing: 0.5px;
+                text: "Welcome Back";
+                font-size: 26px; font-weight: 700; color: #0F172A;
+                horizontal-alignment: center;
             }
-            Rectangle { height: 5px; }
-            email-box := Rectangle {
-                height: 36px; border-radius: 5px;
-                border-width: 1px; border-color: email-ti.has-focus ? #1565C0 : #90CAF9;
-                background: #FFFFFF;
-                // Placeholder — visible when empty and not focused
-                if root.email-val == "" && !email-ti.has-focus : Text {
-                    x: 13px; width: parent.width - 26px; height: parent.height;
-                    text: "yourname@company.com";
-                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
-                }
-                email-ti := TextInput {
-                    x: 12px; width: parent.width - 24px; height: parent.height;
-                    font-size: 13px; color: #0A1929;
-                    vertical-alignment: center;
-                    enabled: !root.is-loading && !root.is-closing;
-                    text <=> root.email-val;
-                    accessible-label: "Work email";
-                    accepted => { pwd-ti.focus(); }
-                }
+            Rectangle { height: 6px; }
+            Text {
+                text: "Sign in to continue";
+                font-size: 14px; color: #64748B;
+                horizontal-alignment: center;
             }
-            Rectangle { height: 16px; }
+            Rectangle { height: 32px; }
 
-            // ── Password group ────────────────────────────────────────────────
-            Text {
-                text: "THIS MONTH'S PASSWORD"; font-size: 11px; font-weight: 600;
-                color: #37474F; letter-spacing: 0.5px;
+            // ── Email ──────────────────────────────────────────────────────
+            email-field := LabeledInput {
+                field-label: "EMAIL";
+                placeholder-text: "yourname@company.com";
+                field-enabled: !root.is-loading && !root.is-closing;
+                accessible-name: "Work email";
+                value <=> root.email-val;
+                accepted => { pwd-field.focus-input(); }
             }
-            Rectangle { height: 5px; }
-            pwd-box := Rectangle {
-                height: 36px; border-radius: 5px;
-                border-width: 1px; border-color: pwd-ti.has-focus ? #1565C0 : #90CAF9;
-                background: #FFFFFF;
-                // Placeholder — visible when empty and not focused
-                if root.pwd-val == "" && !pwd-ti.has-focus : Text {
-                    x: 13px; width: parent.width - 26px; height: parent.height;
-                    text: "XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX";
-                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
-                }
-                pwd-ti := TextInput {
-                    x: 12px; width: parent.width - 24px; height: parent.height;
-                    font-size: 13px; color: #0A1929;
-                    vertical-alignment: center;
-                    input-type: password;
-                    enabled: !root.is-loading && !root.is-closing;
-                    text <=> root.pwd-val;
-                    accessible-label: "This month's password";
-                    accepted => {
-                        if root.email-val != "" && root.pwd-val != "" && !root.is-closing {
-                            root.attempt-login(root.email-val, root.pwd-val);
-                        }
+            Rectangle { height: 18px; }
+
+            // ── Password (this month's rotating password) ────────────────────
+            pwd-field := LabeledInput {
+                field-label: "PASSWORD";
+                placeholder-text: "XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX";
+                is-password: true;
+                field-enabled: !root.is-loading && !root.is-closing;
+                accessible-name: "This month's password";
+                value <=> root.pwd-val;
+                accepted => {
+                    if root.email-val != "" && root.pwd-val != "" && !root.is-closing {
+                        root.attempt-login(root.email-val, root.pwd-val);
                     }
                 }
             }
-            Rectangle { height: 4px; }  // margin-top:4px on .btn-login
+            Rectangle { height: 5px; }
+            Text {
+                text: "Valid for the current calendar month only";
+                font-size: 11px; color: #94A3B8;
+                horizontal-alignment: left;
+            }
+            Rectangle { height: 18px; }
 
-            // ── Sign In button — full-width, 14px/600, #1565C0, radius 5px ───
-            // Original: padding:10px both sides + font-size:14px ≈ 40px height
+            // ── Remember me / Forgot password row ─────────────────────────────
             Rectangle {
-                height:        40px;
-                background:    (root.is-loading || root.is-closing) ? #90CAF9 : #1565C0;
-                border-radius: 5px;
-                accessible-role: button;
-                accessible-label: root.is-closing ? "Closing" : (root.is-loading ? "Verifying" : "Sign In");
-                accessible-enabled: !root.is-loading && !root.is-closing;
-                TouchArea {
-                    enabled: !root.is-loading && !root.is-closing;
-                    mouse-cursor: pointer;
-                    clicked => { root.attempt-login(root.email-val, root.pwd-val); }
+                height: 20px;
+                remember-box := Rectangle {
+                    x: 0px; y: (parent.height - 16px) / 2;
+                    width: 16px; height: 16px;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: root.remember-me ? #2563EB : #CBD5E1;
+                    background: root.remember-me ? #2563EB : #FFFFFF;
+                    accessible-role: checkbox;
+                    accessible-checkable: true;
+                    accessible-checked: root.remember-me;
+                    accessible-label: "Remember me";
+                    if root.remember-me : Path {
+                        width: 10px; height: 10px;
+                        x: (parent.width  - self.width)  / 2;
+                        y: (parent.height - self.height) / 2;
+                        viewbox-width: 24; viewbox-height: 24;
+                        stroke: #FFFFFF; stroke-width: 4px;
+                        commands: "M4 12.5 L9.5 18 L20 6.5";
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.remember-me = !root.remember-me; }
+                    }
                 }
                 Text {
-                    text: root.is-closing ? "Closing…" : (root.is-loading ? "Verifying…" : "Sign In");
-                    font-size: 14px; font-weight: 600; color: #FFFFFF;
-                    horizontal-alignment: center; vertical-alignment: center;
+                    x: 24px; width: 140px; height: parent.height;
+                    text: "Remember me";
+                    font-size: 13px; color: #334155;
+                    vertical-alignment: center;
+                }
+                // No backend "forgot password" flow exists yet (there is no
+                // per-user account password to reset from this screen —
+                // only the monthly rotating password and the license-key
+                // flow below). Kept purely as a visual affordance for now.
+                fp-text := Text {
+                    x: parent.width - self.width; width: 130px; height: parent.height;
+                    text: "Forgot Password?";
+                    font-size: 13px; font-weight: 600; color: #2563EB;
+                    horizontal-alignment: right; vertical-alignment: center;
+                }
+                TouchArea {
+                    x: fp-text.x; y: fp-text.y; width: fp-text.width; height: fp-text.height;
+                    mouse-cursor: pointer;
+                    clicked => { }
                 }
             }
+            Rectangle { height: 24px; }
 
-            // ── Error (margin-top:14px, padding 9px 12px) ────────────────────
+            PrimaryButton {
+                label: root.is-closing ? "Closing…" : (root.is-loading ? "Verifying…" : "Login");
+                button-enabled: !root.is-loading && !root.is-closing;
+                clicked => { root.attempt-login(root.email-val, root.pwd-val); }
+            }
+
+            // ── Error banner ───────────────────────────────────────────────────
             if root.error-message != "" : Rectangle { height: 14px; }
             if root.error-message != "" : Rectangle {
-                height: 40px; background: #FFEBEE;
-                border-radius: 5px; border-width: 1px; border-color: #FFCDD2;
+                height: 40px; background: #FEF2F2;
+                border-radius: 10px; border-width: 1px; border-color: #FECACA;
                 Text {
                     x: 12px; width: parent.width - 24px; height: parent.height;
                     text: root.error-message;
-                    color: #B71C1C; font-size: 12px;
+                    color: #B91C1C; font-size: 12px;
                     horizontal-alignment: center; vertical-alignment: center;
                     wrap: word-wrap;
+                }
+            }
+
+            // ── Need a subscription? ───────────────────────────────────────────
+            Rectangle { height: 22px; }
+            Rectangle {
+                height: 20px;
+                HorizontalBox {
+                    alignment: center;
+                    padding: 0px;
+                    spacing: 4px;
+                    Text {
+                        text: "Need a subscription?";
+                        font-size: 13px; color: #64748B;
+                    }
+                    Text {
+                        text: "Choose Your Plan";
+                        font-size: 13px; font-weight: 600; color: #2563EB;
+                    }
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.show-subscribe = true; }
                 }
             }
             } // if !root.license-blocked
@@ -214,207 +611,237 @@ export component LoginScreen inherits Rectangle {
             // activated license is missing, expired, revoked, or has failed
             // offline-grace validation — reuses the same license-key input
             // and activation callback the Settings screen's license section
-            // already provides.
+            // already provides. Kept compact/tab-based (unchanged from the
+            // previous revision) — this recovery screen intentionally stays
+            // small rather than adopting the wide pricing page below.
             if root.license-blocked : VerticalBox {
             padding: 0px;
             spacing: 0px;
 
-            Text {
-                text: "LICENSE REQUIRED"; font-size: 11px; font-weight: 600;
-                color: #37474F; letter-spacing: 0.5px;
-            }
-            Rectangle { height: 5px; }
             Rectangle {
-                height: 40px; background: #FFF3E0;
-                border-radius: 5px; border-width: 1px; border-color: #FFCC80;
+                height: 48px; background: #FFFBEB;
+                border-radius: 10px; border-width: 1px; border-color: #FDE68A;
                 Text {
-                    x: 12px; width: parent.width - 24px; height: parent.height;
+                    x: 14px; width: parent.width - 28px; height: parent.height;
                     text: root.license-status-text == "" ? "A valid license is required to continue." : root.license-status-text;
-                    color: #E65100; font-size: 12px;
+                    color: #92400E; font-size: 12px;
                     horizontal-alignment: center; vertical-alignment: center;
                     wrap: word-wrap;
                 }
             }
+            Rectangle { height: 20px; }
+
+            license-key-field := LabeledInput {
+                field-label: "LICENSE KEY";
+                placeholder-text: "XXXX-XXXX-XXXX-XXXX";
+                accessible-name: "License key";
+                value <=> root.license-key-input;
+                accepted => { root.license-activate(); }
+            }
             Rectangle { height: 16px; }
 
-            Text {
-                text: "LICENSE KEY"; font-size: 11px; font-weight: 600;
-                color: #37474F; letter-spacing: 0.5px;
-            }
-            Rectangle { height: 5px; }
-            license-key-box := Rectangle {
-                height: 36px; border-radius: 5px;
-                border-width: 1px; border-color: license-key-ti.has-focus ? #1565C0 : #90CAF9;
-                background: #FFFFFF;
-                if root.license-key-input == "" && !license-key-ti.has-focus : Text {
-                    x: 13px; width: parent.width - 26px; height: parent.height;
-                    text: "XXXX-XXXX-XXXX-XXXX";
-                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
-                }
-                license-key-ti := TextInput {
-                    x: 12px; width: parent.width - 24px; height: parent.height;
-                    font-size: 13px; color: #0A1929;
-                    vertical-alignment: center;
-                    text <=> root.license-key-input;
-                    accessible-label: "License key";
-                    accepted => { root.license-activate(); }
-                }
-            }
-            Rectangle { height: 4px; }
-
-            Rectangle {
-                height:        40px;
-                background:    #1565C0;
-                border-radius: 5px;
-                accessible-role: button;
-                accessible-label: "Activate license";
-                TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.license-activate(); }
-                }
-                Text {
-                    text: "Activate";
-                    font-size: 14px; font-weight: 600; color: #FFFFFF;
-                    horizontal-alignment: center; vertical-alignment: center;
-                }
+            PrimaryButton {
+                label: "Activate License";
+                clicked => { root.license-activate(); }
             }
 
             if root.license-activate-result != "" : Rectangle { height: 14px; }
             if root.license-activate-result != "" : Text {
                 text: root.license-activate-result;
-                font-size: 12px; color: #37474F;
+                font-size: 12px; color: #334155;
                 horizontal-alignment: center; wrap: word-wrap;
             }
 
             // ── Subscribe Now (Phase 4M auto-checkout) ───────────────────────
+            Rectangle { height: 28px; }
+            Rectangle { height: 1px; background: #E2E8F0; }
             Rectangle { height: 20px; }
-            Rectangle { height: 1px; background: #BBDEFB; }
-            Rectangle { height: 16px; }
 
-            Text {
-                text: "SUBSCRIBE NOW"; font-size: 11px; font-weight: 600;
-                color: #37474F; letter-spacing: 0.5px;
-            }
-            Rectangle { height: 8px; }
-
-            HorizontalBox {
-                // Explicit height: HorizontalBox otherwise defaults to
-                // vertical-stretch: 1 inside this VerticalBox, consuming
-                // all leftover space (growing with window height) instead
-                // of sizing to its 32px chip children — pushing everything
-                // below it (the account-password field/button) out of view.
-                height: 32px;
-                padding: 0px;
-                spacing: 8px;
-                Rectangle {
-                    height: 32px; border-radius: 5px;
-                    background: root.subscribe-plan-type == "monthly" ? #1565C0 : #FFFFFF;
-                    border-width: 1px; border-color: #90CAF9;
-                    TouchArea {
-                        enabled: !root.subscribe-in-progress;
-                        mouse-cursor: pointer;
-                        clicked => { root.subscribe-plan-type = "monthly"; }
-                    }
-                    Text {
-                        text: "Monthly"; font-size: 12px; font-weight: 600;
-                        color: root.subscribe-plan-type == "monthly" ? #FFFFFF : #1565C0;
-                        horizontal-alignment: center; vertical-alignment: center;
-                    }
-                }
-                Rectangle {
-                    height: 32px; border-radius: 5px;
-                    background: root.subscribe-plan-type == "yearly" ? #1565C0 : #FFFFFF;
-                    border-width: 1px; border-color: #90CAF9;
-                    TouchArea {
-                        enabled: !root.subscribe-in-progress;
-                        mouse-cursor: pointer;
-                        clicked => { root.subscribe-plan-type = "yearly"; }
-                    }
-                    Text {
-                        text: "Yearly"; font-size: 12px; font-weight: 600;
-                        color: root.subscribe-plan-type == "yearly" ? #FFFFFF : #1565C0;
-                        horizontal-alignment: center; vertical-alignment: center;
-                    }
-                }
-                Rectangle {
-                    height: 32px; border-radius: 5px;
-                    background: root.subscribe-plan-type == "lifetime" ? #1565C0 : #FFFFFF;
-                    border-width: 1px; border-color: #90CAF9;
-                    TouchArea {
-                        enabled: !root.subscribe-in-progress;
-                        mouse-cursor: pointer;
-                        clicked => { root.subscribe-plan-type = "lifetime"; }
-                    }
-                    Text {
-                        text: "Lifetime"; font-size: 12px; font-weight: 600;
-                        color: root.subscribe-plan-type == "lifetime" ? #FFFFFF : #1565C0;
-                        horizontal-alignment: center; vertical-alignment: center;
-                    }
-                }
-            }
-            Rectangle { height: 16px; }
-
-            Text {
-                text: "ACCOUNT PASSWORD"; font-size: 11px; font-weight: 600;
-                color: #37474F; letter-spacing: 0.5px;
-            }
-            Rectangle { height: 5px; }
-            Rectangle {
-                height: 36px; border-radius: 5px;
-                border-width: 1px; border-color: subscribe-pwd-ti.has-focus ? #1565C0 : #90CAF9;
-                background: #FFFFFF;
-                if root.subscribe-account-password == "" && !subscribe-pwd-ti.has-focus : Text {
-                    x: 13px; width: parent.width - 26px; height: parent.height;
-                    text: "Your account password";
-                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
-                }
-                subscribe-pwd-ti := TextInput {
-                    x: 12px; width: parent.width - 24px; height: parent.height;
-                    font-size: 13px; color: #0A1929;
-                    vertical-alignment: center;
-                    input-type: password;
-                    enabled: !root.subscribe-in-progress;
-                    text <=> root.subscribe-account-password;
-                    accessible-label: "Account password";
-                    accepted => { root.subscribe(root.email-val); }
-                }
-            }
-            Rectangle { height: 4px; }
-
-            Rectangle {
-                height:        40px;
-                background:    root.subscribe-in-progress ? #90CAF9 : #1565C0;
-                border-radius: 5px;
-                accessible-role: button;
-                accessible-label: "Subscribe Now";
-                accessible-enabled: !root.subscribe-in-progress;
-                TouchArea {
-                    enabled: !root.subscribe-in-progress;
-                    mouse-cursor: pointer;
-                    clicked => { root.subscribe(root.email-val); }
-                }
-                Text {
-                    text: root.subscribe-in-progress ? "Working…" : "Subscribe Now";
-                    font-size: 14px; font-weight: 600; color: #FFFFFF;
-                    horizontal-alignment: center; vertical-alignment: center;
-                }
-            }
-
-            if root.subscribe-status-text != "" : Rectangle { height: 14px; }
-            if root.subscribe-status-text != "" : Text {
-                text: root.subscribe-status-text;
-                font-size: 12px; color: #37474F;
-                horizontal-alignment: center; wrap: word-wrap;
+            SubscribeSection {
+                email: root.email-val;
+                account-password <=> root.subscribe-account-password;
+                plan-type         <=> root.subscribe-plan-type;
+                in-progress:  root.subscribe-in-progress;
+                status-text:  root.subscribe-status-text;
+                go(e) => { root.subscribe(e); }
             }
             } // if root.license-blocked
 
-            // ── Footer note (margin-top:22px) ─────────────────────────────────
-            Rectangle { height: 22px; }
+            // ── Footer ─────────────────────────────────────────────────────────
+            Rectangle { height: 32px; }
             Text {
                 text: root.license-blocked
                     ? "Need a license? Contact your administrator or renew your subscription."
                     : "Password is valid for this month only.\nContact your administrator for access.";
-                font-size: 11px; color: #90A4AE;
+                font-size: 11px; color: #94A3B8;
+                horizontal-alignment: center; wrap: word-wrap;
+            }
+            Rectangle { height: 16px; }
+            Text {
+                text: "Secure  •  Fast  •  Reliable";
+                font-size: 11px; font-weight: 600; letter-spacing: 0.4px; color: #64748B;
+                horizontal-alignment: center;
+            }
+            Rectangle { height: 8px; }
+            Text {
+                text: "© 2025 A S Havaldar";
+                font-size: 11px; color: #94A3B8;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    // ── Payment page: "Choose Your Plan" (wide pricing cards) ─────────────────
+    if root.show-subscribe : pricing-panel := Rectangle {
+        width:         min(1040px, parent.width - 96px);
+        x:             (parent.width  - self.width)  / 2;
+        y:             (parent.height - self.height) / 2;
+        background:    #FFFFFF;
+        border-radius: 24px;
+        drop-shadow-blur:     48px;
+        drop-shadow-color:    #0F172A24;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: 20px;
+
+        VerticalBox {
+            padding-top:    40px;
+            padding-left:   48px;
+            padding-right:  48px;
+            padding-bottom: 36px;
+            spacing: 0px;
+
+            Rectangle {
+                height: 18px;
+                Text {
+                    height: parent.height;
+                    text: "← Back to login";
+                    font-size: 13px; font-weight: 600; color: #2563EB;
+                    horizontal-alignment: left; vertical-alignment: center;
+                }
+                TouchArea {
+                    width: 130px; height: parent.height;
+                    mouse-cursor: pointer;
+                    clicked => { root.show-subscribe = false; }
+                }
+            }
+            Rectangle { height: 24px; }
+
+            Text {
+                text: "Choose Your Plan";
+                font-size: 26px; font-weight: 700; color: #0F172A;
+                horizontal-alignment: center;
+            }
+            Rectangle { height: 8px; }
+            Text {
+                text: "Select the perfect subscription for your business.";
+                font-size: 14px; color: #64748B;
+                horizontal-alignment: center;
+            }
+            Rectangle { height: 32px; }
+
+            // ── Three pricing cards ──────────────────────────────────────────
+            pricing-grid := Rectangle {
+                height: 322px;
+
+                monthly-card := PricingCard {
+                    x: 0px; y: 21px;
+                    width: (parent.width - 48px) / 3; height: 280px;
+                    plan-name: "Monthly";
+                    price:     "₹499";
+                    price-sub: "per month";
+                    feature-1: "✓ Updates";
+                    feature-2: "✓ Support";
+                    accent:         #2563EB;
+                    accent-hover:   #1D4ED8;
+                    accent-pressed: #1E40AF;
+                    button-label: "Choose";
+                    selected: root.subscribe-plan-type == "monthly";
+                    card-enabled: !root.subscribe-in-progress;
+                    choose => { root.subscribe-plan-type = "monthly"; }
+                }
+                yearly-card := PricingCard {
+                    x: monthly-card.width + 24px; y: 0px;
+                    width: (parent.width - 48px) / 3; height: 322px;
+                    badge-text: "MOST POPULAR";
+                    plan-name: "Yearly";
+                    price:     "₹3999";
+                    price-sub: "Save 30%";
+                    feature-1: "✓ Everything";
+                    feature-2: "✓ Priority Support";
+                    accent:         #16A34A;
+                    accent-hover:   #15803D;
+                    accent-pressed: #166534;
+                    button-label: "Choose";
+                    highlighted: true;
+                    selected: root.subscribe-plan-type == "yearly";
+                    card-enabled: !root.subscribe-in-progress;
+                    choose => { root.subscribe-plan-type = "yearly"; }
+                }
+                lifetime-card := PricingCard {
+                    x: monthly-card.width * 2 + 48px; y: 21px;
+                    width: (parent.width - 48px) / 3; height: 280px;
+                    plan-name: "Lifetime";
+                    price:     "₹9999";
+                    price-sub: "One Time Payment";
+                    feature-1: "✓ Lifetime Updates";
+                    feature-2: "✓ Lifetime Support";
+                    accent:         #F97316;
+                    accent-hover:   #EA580C;
+                    accent-pressed: #C2410C;
+                    button-label: "Buy Now";
+                    selected: root.subscribe-plan-type == "lifetime";
+                    card-enabled: !root.subscribe-in-progress;
+                    choose => { root.subscribe-plan-type = "lifetime"; }
+                }
+            }
+            Rectangle { height: 32px; }
+
+            // ── Shared account-password + final confirm step ─────────────────
+            Rectangle {
+                width: 420px;
+                x: (parent.width - self.width) / 2;
+
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+
+                    checkout-pwd-field := LabeledInput {
+                        field-label: "ACCOUNT PASSWORD";
+                        placeholder-text: "Your account password";
+                        is-password: true;
+                        field-enabled: !root.subscribe-in-progress;
+                        accessible-name: "Account password";
+                        value <=> root.subscribe-account-password;
+                        accepted => { root.subscribe(root.email-val); }
+                    }
+                    Rectangle { height: 16px; }
+
+                    PrimaryButton {
+                        label: root.subscribe-in-progress ? "Working…" : "Continue to Payment";
+                        button-enabled: !root.subscribe-in-progress;
+                        clicked => { root.subscribe(root.email-val); }
+                    }
+
+                    if root.subscribe-status-text != "" : Rectangle { height: 14px; }
+                    if root.subscribe-status-text != "" : Text {
+                        text: root.subscribe-status-text;
+                        font-size: 12px; color: #334155;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+            }
+            Rectangle { height: 28px; }
+
+            // ── Secure payment note ───────────────────────────────────────────
+            Text {
+                text: "Secure Payment";
+                font-size: 13px; font-weight: 700; color: #0F172A;
+                horizontal-alignment: center;
+            }
+            Rectangle { height: 4px; }
+            Text {
+                text: "Your payment is protected using industry-standard encryption.";
+                font-size: 12px; color: #64748B;
                 horizontal-alignment: center; wrap: word-wrap;
             }
         }
