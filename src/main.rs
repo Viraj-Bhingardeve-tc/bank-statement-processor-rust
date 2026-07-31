@@ -4815,6 +4815,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let email = email.to_string();
                 let password = h.get_subscribe_account_password().to_string();
                 let plan_type = h.get_subscribe_plan_type().to_string();
+                // The pricing panel's email field is `root.email-val` —
+                // shared with the normal login form, but reachable with it
+                // still empty (a fresh user who clicked "Choose Your Plan"
+                // without typing an email first). Checked before the
+                // password so an empty-email attempt never reaches
+                // `license_client.login` at all, where it would otherwise
+                // surface as an opaque "Sign-in failed: InvalidCredentials"
+                // with no indication the email field was the actual problem.
+                if email.trim().is_empty() {
+                    h.set_subscribe_status_text(SharedString::from(
+                        "Enter your account email first.",
+                    ));
+                    return;
+                }
                 if password.trim().is_empty() {
                     h.set_subscribe_status_text(SharedString::from(
                         "Enter your account password first.",
