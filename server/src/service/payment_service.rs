@@ -970,17 +970,22 @@ impl From<RepositoryError> for PaymentOperationError {
     }
 }
 
-/// **Placeholder pricing** — not sourced from any confirmed business
-/// input, purely so `create_checkout_session` has a concrete amount to
-/// send Razorpay. Revisit before any real launch (a config-driven price
-/// map, matching `PHASE4_DESIGN.md` §2's plan-id mapping treatment, is the
-/// natural next step once real prices exist).
+/// The one source of truth for what `create_checkout_session` actually
+/// charges via Razorpay — must stay in sync with the prices displayed in
+/// `ui/login.slint`'s pricing cards (₹499 / ₹3999 / ₹9999), since a Razorpay
+/// Payment Link (always used for `lifetime`, and for `monthly`/`yearly`
+/// under a test-mode key — see `razorpay::client::HttpRazorpayClient::
+/// create_checkout`'s `use_payment_link`) enforces the exact amount
+/// requested here. A config-driven price map (matching `PHASE4_DESIGN.md`
+/// §2's plan-id mapping treatment) is the natural next step if prices ever
+/// need to vary without a redeploy; until then, this is the only place
+/// either side of the checkout flow gets a price from.
 fn plan_amount_minor(plan: PlanType) -> i64 {
     match plan {
         PlanType::Trial => 0,
         PlanType::Monthly => 49_900,
-        PlanType::Yearly => 499_900,
-        PlanType::Lifetime => 1_999_900,
+        PlanType::Yearly => 399_900,
+        PlanType::Lifetime => 999_900,
     }
 }
 
