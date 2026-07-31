@@ -426,13 +426,20 @@ mod tests {
         ) -> Result<ValidateLicenseResponse, ApiError> {
             self.validate_license(req)
         }
-        fn logout(&self) -> Result<(), ApiError> {
+        fn logout(&self, _session_token: &str) -> Result<(), ApiError> {
             Ok(())
         }
-        fn get_subscription(&self) -> Result<SubscriptionSummary, ApiError> {
+        fn get_subscription(&self, _session_token: &str) -> Result<SubscriptionSummary, ApiError> {
             Err(ApiError::NoServerConfigured)
         }
         fn heartbeat(&self, _req: &HeartbeatRequest) -> Result<HeartbeatResponse, ApiError> {
+            Err(ApiError::NoServerConfigured)
+        }
+        fn create_checkout_session(
+            &self,
+            _session_token: &str,
+            _req: &CreateCheckoutSessionRequest,
+        ) -> Result<CreateCheckoutSessionResponse, ApiError> {
             Err(ApiError::NoServerConfigured)
         }
     }
@@ -907,10 +914,17 @@ mod tests {
             ) -> Result<ValidateLicenseResponse, ApiError> {
                 self.validate_license(req)
             }
-            fn logout(&self) -> Result<(), ApiError> {
+            fn logout(&self, _session_token: &str) -> Result<(), ApiError> {
                 Err(ApiError::NetworkError("connection refused".to_string()))
             }
-            fn get_subscription(&self) -> Result<SubscriptionSummary, ApiError> {
+            fn get_subscription(&self, _session_token: &str) -> Result<SubscriptionSummary, ApiError> {
+                Err(ApiError::NetworkError("connection refused".to_string()))
+            }
+            fn create_checkout_session(
+                &self,
+                _session_token: &str,
+                _req: &CreateCheckoutSessionRequest,
+            ) -> Result<CreateCheckoutSessionResponse, ApiError> {
                 Err(ApiError::NetworkError("connection refused".to_string()))
             }
             fn heartbeat(&self, _: &HeartbeatRequest) -> Result<HeartbeatResponse, ApiError> {

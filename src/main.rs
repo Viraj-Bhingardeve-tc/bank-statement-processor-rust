@@ -4797,6 +4797,218 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        // ── Subscribe (Phase 4M auto-checkout) ──────────────────────────────
+        // Login (real account credentials, separate from the monthly
+        // password) → create a Razorpay checkout session → open it in the
+        // system browser → poll until the license is issued → activate,
+        // reusing the exact same `license::activate`/`enforce` two-step
+        // `on_do_license_activate` above already uses (and its
+        // `LicenseActivateOutcome` match arms verbatim) — this handler's
+        // only job is to turn a successful checkout into a `license_key`
+        // string, never a second activation code path.
+        {
+            let handle = app.as_weak();
+            let db_ref = db_conn.clone();
+            let license_client = license_client.clone();
+            app.on_do_subscribe(move |email: SharedString| {
+                let h = match handle.upgrade() { Some(h) => h, None => return };
+                let email = email.to_string();
+                let password = h.get_subscribe_account_password().to_string();
+                let plan_type = h.get_subscribe_plan_type().to_string();
+                if password.trim().is_empty() {
+                    h.set_subscribe_status_text(SharedString::from(
+                        "Enter your account password first.",
+                    ));
+                    return;
+                }
+
+                h.set_subscribe_in_progress(true);
+                h.set_subscribe_status_text(SharedString::from("Signing in…"));
+
+                let handle_for_result = handle.clone();
+                let db_ref = db_ref.clone();
+                let license_client = license_client.clone();
+                std::thread::spawn(move || {
+                    let update_status = |text: String| {
+                        let handle_for_result = handle_for_result.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(h) = handle_for_result.upgrade() {
+                                h.set_subscribe_status_text(SharedString::from(text.as_str()));
+                            }
+                        });
+                    };
+
+                    let login_result = license_client.login(&license::client::LoginRequest {
+                        email,
+                        password,
+                    });
+                    let session_token = match login_result {
+                        Ok(resp) => resp.session_token,
+                        Err(e) => {
+                            update_status(format!("Sign-in failed: {e:?}"));
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(h) = handle_for_result.upgrade() {
+                                    h.set_subscribe_in_progress(false);
+                                }
+                            });
+                            return;
+                        }
+                    };
+
+                    update_status("Creating checkout session…".to_string());
+                    let checkout = license_client.create_checkout_session(
+                        &session_token,
+                        &license::client::CreateCheckoutSessionRequest { plan_type },
+                    );
+                    let checkout = match checkout {
+                        Ok(c) => c,
+                        Err(e) => {
+                            update_status(format!("Could not start checkout: {e:?}"));
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(h) = handle_for_result.upgrade() {
+                                    h.set_subscribe_in_progress(false);
+                                }
+                            });
+                            return;
+                        }
+                    };
+
+                    if let Err(e) = open::that(&checkout.checkout_url) {
+                        log::warn!("[license] failed to auto-open checkout URL: {e}");
+                        update_status(format!(
+                            "Open this link to complete payment: {}",
+                            checkout.checkout_url
+                        ));
+                    } else {
+                        update_status(
+                            "Waiting for payment confirmation — complete checkout in your browser…"
+                                .to_string(),
+                        );
+                    }
+
+                    // Poll until the license is issued (or we time out) —
+                    // see `main.rs`'s module-level doc comment on
+                    // `build_license_client` for the shared background-
+                    // thread/`invoke_from_event_loop` convention this
+                    // follows.
+                    let poll_interval = std::time::Duration::from_secs(3);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+                    let mut found_key: Option<String> = None;
+                    while std::time::Instant::now() < deadline {
+                        std::thread::sleep(poll_interval);
+                        match license_client.get_subscription(&session_token) {
+                            Ok(summary) => {
+                                if let Some(license) = summary
+                                    .licenses
+                                    .iter()
+                                    .find(|l| l.status == "active")
+                                {
+                                    found_key = Some(license.license_key.clone());
+                                    break;
+                                }
+                                // Any other status (pending_payment, active
+                                // with no license row yet) — keep waiting.
+                            }
+                            Err(license::ApiError::Unauthorized)
+                            | Err(license::ApiError::InvalidCredentials) => {
+                                update_status(
+                                    "Session expired — try Subscribe again.".to_string(),
+                                );
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(h) = handle_for_result.upgrade() {
+                                        h.set_subscribe_in_progress(false);
+                                    }
+                                });
+                                return;
+                            }
+                            // Conservative: any other error (network blip,
+                            // transient 5xx) keeps waiting — the bounded
+                            // deadline above is what keeps this safe.
+                            Err(_) => {}
+                        }
+                    }
+
+                    let Some(license_key) = found_key else {
+                        update_status(
+                            "Timed out waiting for payment confirmation. If you completed \
+                             payment, paste your license key below and click Activate."
+                                .to_string(),
+                        );
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(h) = handle_for_result.upgrade() {
+                                h.set_subscribe_in_progress(false);
+                            }
+                        });
+                        return;
+                    };
+
+                    update_status("Payment confirmed — activating your license…".to_string());
+                    let db = db_ref.lock().unwrap();
+                    let outcome = match db.as_ref() {
+                        None => LicenseActivateOutcome::NoDatabase,
+                        Some(conn) => {
+                            match license::activate(conn, license_client.as_ref(), &license_key) {
+                                Ok(status) => match license::enforce(conn, license_client.as_ref()) {
+                                    license::EnforcementOutcome::Allowed => {
+                                        let record = license::storage::load_local_license(conn)
+                                            .ok()
+                                            .flatten();
+                                        LicenseActivateOutcome::Activated {
+                                            status_text: license::describe(status, record.as_ref()),
+                                        }
+                                    }
+                                    license::EnforcementOutcome::Blocked { reason, .. } => {
+                                        LicenseActivateOutcome::ActivatedButBlocked { reason }
+                                    }
+                                },
+                                Err(license::ApiError::NoServerConfigured) => {
+                                    LicenseActivateOutcome::NoServer
+                                }
+                                Err(e) => LicenseActivateOutcome::Failed(format!("{e:?}")),
+                            }
+                        }
+                    };
+                    drop(db);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(h) = handle_for_result.upgrade() else { return };
+                        h.set_subscribe_in_progress(false);
+                        match outcome {
+                            LicenseActivateOutcome::Activated { status_text } => {
+                                h.set_subscribe_status_text(SharedString::from(
+                                    "License activated successfully.",
+                                ));
+                                h.set_license_status_text(SharedString::from(status_text.as_str()));
+                                h.set_logged_in(true);
+                                h.set_license_blocked(false);
+                            }
+                            LicenseActivateOutcome::ActivatedButBlocked { reason } => {
+                                h.set_subscribe_status_text(SharedString::from(
+                                    "License activated successfully.",
+                                ));
+                                h.set_license_status_text(SharedString::from(reason.as_str()));
+                            }
+                            LicenseActivateOutcome::NoDatabase => {
+                                h.set_subscribe_status_text(SharedString::from(
+                                    "Activation unavailable — database is not open.",
+                                ));
+                            }
+                            LicenseActivateOutcome::NoServer => {
+                                h.set_subscribe_status_text(SharedString::from(
+                                    "No licensing server is configured — set LICENSE_SERVER_URL and restart.",
+                                ));
+                            }
+                            LicenseActivateOutcome::Failed(e) => {
+                                log::warn!("[license] auto-activation after checkout failed: {e}");
+                                h.set_subscribe_status_text(SharedString::from(
+                                    format!("Activation failed: {e}").as_str(),
+                                ));
+                            }
+                        }
+                    });
+                });
+            });
+        }
+
         // ── Clear Logs ────────────────────────────────────────────────────────
         {
             let handle = app.as_weak();

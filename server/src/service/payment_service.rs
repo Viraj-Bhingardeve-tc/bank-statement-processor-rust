@@ -1365,6 +1365,13 @@ mod tests {
             unimplemented!("not exercised by these tests")
         }
 
+        async fn find_latest_by_user(
+            &self,
+            _user_id: i64,
+        ) -> Result<Option<Subscription>, RepositoryError> {
+            unimplemented!("not exercised by these tests")
+        }
+
         async fn insert(
             &self,
             new_subscription: NewSubscription,

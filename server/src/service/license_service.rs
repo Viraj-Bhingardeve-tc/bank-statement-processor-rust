@@ -488,11 +488,11 @@ impl LicenseService {
     ) -> Result<SubscriptionSummaryOutcome, LicenseOperationError> {
         let subscription = self
             .subscription_repository
-            .find_active_by_user(user_id)
+            .find_latest_by_user(user_id)
             .await?
             .ok_or_else(|| {
                 LicenseOperationError::Repository(RepositoryError::InvalidData(format!(
-                    "user {user_id} has no active subscription"
+                    "user {user_id} has no subscription"
                 )))
             })?;
 
@@ -512,6 +512,7 @@ impl LicenseService {
                 status: license.status,
                 devices_active,
                 max_devices: license.max_devices,
+                license_key: license.license_key,
             });
         }
 
@@ -559,6 +560,7 @@ pub struct LicenseSummaryOutcome {
     pub status: LicenseRecordStatus,
     pub devices_active: i64,
     pub max_devices: i32,
+    pub license_key: String,
 }
 
 #[derive(Debug)]
@@ -871,6 +873,19 @@ mod tests {
                 .unwrap()
                 .iter()
                 .find(|s| s.user_id == user_id && s.status == SubscriptionStatus::Active)
+                .cloned())
+        }
+
+        async fn find_latest_by_user(
+            &self,
+            user_id: i64,
+        ) -> Result<Option<Subscription>, RepositoryError> {
+            Ok(self
+                .subscriptions
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|s| s.user_id == user_id)
                 .cloned())
         }
 
@@ -1618,6 +1633,25 @@ mod tests {
         assert_eq!(outcome.licenses[0].status, LicenseRecordStatus::Active);
         assert_eq!(outcome.licenses[0].devices_active, 1);
         assert_eq!(outcome.licenses[0].max_devices, 3);
+        assert_eq!(outcome.licenses[0].license_key, "TEST-KEY");
+    }
+
+    /// Phase 4M (auto-checkout): a desktop client polling right after
+    /// starting checkout must get a clean, current status back — not the
+    /// error meant for "this user has never had a subscription at all."
+    #[tokio::test]
+    async fn subscription_summary_for_a_user_with_a_pending_payment_subscription_returns_it_without_erroring(
+    ) {
+        let mut pending = sample_subscription();
+        pending.status = SubscriptionStatus::PendingPayment;
+        let service = service_with(vec![], vec![], vec![pending]);
+
+        let outcome = service.subscription_summary(100).await.unwrap();
+        assert_eq!(outcome.subscription.status, SubscriptionStatus::PendingPayment);
+        assert!(
+            outcome.licenses.is_empty(),
+            "no license exists yet before payment completes"
+        );
     }
 
     #[tokio::test]

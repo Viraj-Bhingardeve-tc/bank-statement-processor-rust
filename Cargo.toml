@@ -32,6 +32,9 @@ slint = { version = "1.7", optional = true }
 # ── Native file dialog (Phase 4) ─────────────────────────────────────────────
 rfd = { version = "0.15", optional = true }
 
+# ── System browser launch (Phase 4M — auto-checkout) ─────────────────────────
+open = { version = "5", optional = true }
+
 # ── Database ─────────────────────────────────────────────────────────────────
 # bundled-sqlcipher = statically-compiled SQLCipher (encrypted SQLite), linked
 # dynamically against an existing OpenSSL libcrypto found via OPENSSL_DIR (see
@@ -100,7 +103,7 @@ rand    = "0.10.1"
 # "slint-ui" gates the entire Slint + window subsystem.
 # Use `--no-default-features` to run parser unit tests without compiling Slint.
 default      = ["slint-ui", "ai"]
-slint-ui     = ["dep:slint", "dep:slint-build", "dep:rfd"]
+slint-ui     = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open"]
 ai           = ["dep:reqwest"]
 excel-export = ["dep:umya-spreadsheet"]
 # Swaps `credential_store::store()` to the in-memory test backend even in a

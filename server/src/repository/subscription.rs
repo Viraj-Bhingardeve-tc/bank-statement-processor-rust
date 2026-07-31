@@ -18,6 +18,18 @@ pub trait SubscriptionRepository: Send + Sync {
         &self,
         user_id: i64,
     ) -> Result<Option<Subscription>, RepositoryError>;
+    /// Most recent subscription for a user regardless of status — unlike
+    /// `find_active_by_user`, this also returns e.g. a `pending_payment`
+    /// row (a checkout session was created but payment hasn't completed
+    /// yet) or the most recent `cancelled`/`expired` one if that's all a
+    /// user has. `GET /subscription` (`LicenseService::subscription_summary`)
+    /// uses this so a caller checking in right after starting checkout gets
+    /// a real, current status back instead of an error meant for "this
+    /// user has never had a subscription at all."
+    async fn find_latest_by_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<Subscription>, RepositoryError>;
     /// `POST /create-checkout-session` — a new row per checkout attempt,
     /// never a mutation of a past one (see `NewSubscription`'s doc
     /// comment).
@@ -99,6 +111,22 @@ impl SubscriptionRepository for PgSubscriptionRepository {
         let row = sqlx::query_as::<_, SubscriptionRow>(
             "SELECT id, user_id, plan_type, status, started_at, current_period_end, auto_renew, created_at, updated_at \
              FROM subscriptions WHERE user_id = $1 AND status = 'active' \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(Subscription::try_from).transpose()
+    }
+
+    async fn find_latest_by_user(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<Subscription>, RepositoryError> {
+        let row = sqlx::query_as::<_, SubscriptionRow>(
+            "SELECT id, user_id, plan_type, status, started_at, current_period_end, auto_renew, created_at, updated_at \
+             FROM subscriptions WHERE user_id = $1 \
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(user_id)

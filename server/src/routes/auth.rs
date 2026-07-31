@@ -144,6 +144,7 @@ async fn subscription(
                 status: l.status.as_str().to_string(),
                 devices_active: l.devices_active,
                 max_devices: i64::from(l.max_devices),
+                license_key: l.license_key,
             })
             .collect(),
     }))

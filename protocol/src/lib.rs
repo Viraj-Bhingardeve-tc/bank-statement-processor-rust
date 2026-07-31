@@ -134,6 +134,13 @@ pub struct LicenseSummary {
     pub status: String,
     pub devices_active: i64,
     pub max_devices: i64,
+    /// The actual `/activate-license`-shaped key string, e.g.
+    /// `"XXXX-XXXX-XXXX-XXXX"`. Added so a desktop client that has just
+    /// completed a checkout can discover its own license key from `GET
+    /// /subscription` (an authenticated, account-scoped read of a license
+    /// the caller already owns) and self-activate, instead of requiring
+    /// the key to be manually copied from elsewhere.
+    pub license_key: String,
 }
 
 /// `POST /deactivate-license` — additive beyond the original 7 endpoints
@@ -287,6 +294,7 @@ mod tests {
                 status: "active".to_string(),
                 devices_active: 1,
                 max_devices: 1,
+                license_key: "XXXX-XXXX-XXXX-XXXX".to_string(),
             }],
         });
     }
@@ -308,6 +316,7 @@ mod tests {
                 status: "active".to_string(),
                 devices_active: 1,
                 max_devices: 1,
+                license_key: "XXXX-XXXX-XXXX-XXXX".to_string(),
             }],
         })
         .unwrap();
@@ -321,7 +330,7 @@ mod tests {
                 "current_period_end": "2027-07-09T00:00:00Z",
                 "auto_renew": true,
                 "licenses": [
-                    { "license_id": "lic_456", "status": "active", "devices_active": 1, "max_devices": 1 }
+                    { "license_id": "lic_456", "status": "active", "devices_active": 1, "max_devices": 1, "license_key": "XXXX-XXXX-XXXX-XXXX" }
                 ]
             })
         );

@@ -294,6 +294,12 @@ export component AppWindow inherits Window {
     in-out property <string> license-status-text:      "";
     in-out property <string> license-key-input:        "";
     in-out property <string> license-activate-result:  "";
+    // Auto-checkout (Phase 4M)
+    callback do-subscribe(string);
+    in-out property <string> subscribe-account-password: "";
+    in-out property <string> subscribe-plan-type:         "monthly";
+    in-out property <bool>   subscribe-in-progress:        false;
+    in-out property <string> subscribe-status-text:        "";
 
     // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
@@ -307,6 +313,11 @@ export component AppWindow inherits Window {
         license-key-input      <=> root.license-key-input;
         license-activate-result:  root.license-activate-result;
         license-activate       => { root.do-license-activate(); }
+        subscribe-account-password <=> root.subscribe-account-password;
+        subscribe-plan-type         <=> root.subscribe-plan-type;
+        subscribe-in-progress:         root.subscribe-in-progress;
+        subscribe-status-text:         root.subscribe-status-text;
+        subscribe(email)             => { root.do-subscribe(email); }
     }
 
     // ── Main screen ───────────────────────────────────────────────────────────

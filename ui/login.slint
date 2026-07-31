@@ -5,7 +5,7 @@
 //   button: full-width, font-size 14px, font-weight 600, padding 10px (→ height ~44px), border-radius 5px
 //   footer note: margin-top 22px, font-size 11px, color #90A4AE
 
-import { VerticalBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 
 export component LoginScreen inherits Rectangle {
     in property <string>  error-message: "";
@@ -31,6 +31,23 @@ export component LoginScreen inherits Rectangle {
     in-out property <string> license-key-input:        "";
     in property <string>     license-activate-result:  "";
     callback license-activate();
+
+    // ── Auto-checkout (Phase 4M) ───────────────────────────────────────────────
+    // Lets a user with no license yet pay via Razorpay checkout instead of
+    // needing an already-known key to paste above — the account email is
+    // reused from `email-val` (already captured by the monthly-password
+    // login that must have succeeded to reach this screen at all); only
+    // the real account password is asked for separately, since it's a
+    // different credential than the monthly password.
+    in-out property <string> subscribe-account-password: "";
+    in-out property <string> subscribe-plan-type:         "monthly";
+    in property <bool>       subscribe-in-progress:        false;
+    in property <string>     subscribe-status-text:        "";
+    // Takes the account email explicitly (same reasoning as
+    // `attempt-login(string, string)` above) rather than requiring
+    // `email-val` to be separately exposed up to `AppWindow` — it's
+    // already in scope here.
+    callback subscribe(string);
 
     background: #1565C0;
 
@@ -265,6 +282,127 @@ export component LoginScreen inherits Rectangle {
             if root.license-activate-result != "" : Rectangle { height: 14px; }
             if root.license-activate-result != "" : Text {
                 text: root.license-activate-result;
+                font-size: 12px; color: #37474F;
+                horizontal-alignment: center; wrap: word-wrap;
+            }
+
+            // ── Subscribe Now (Phase 4M auto-checkout) ───────────────────────
+            Rectangle { height: 20px; }
+            Rectangle { height: 1px; background: #BBDEFB; }
+            Rectangle { height: 16px; }
+
+            Text {
+                text: "SUBSCRIBE NOW"; font-size: 11px; font-weight: 600;
+                color: #37474F; letter-spacing: 0.5px;
+            }
+            Rectangle { height: 8px; }
+
+            HorizontalBox {
+                // Explicit height: HorizontalBox otherwise defaults to
+                // vertical-stretch: 1 inside this VerticalBox, consuming
+                // all leftover space (growing with window height) instead
+                // of sizing to its 32px chip children — pushing everything
+                // below it (the account-password field/button) out of view.
+                height: 32px;
+                padding: 0px;
+                spacing: 8px;
+                Rectangle {
+                    height: 32px; border-radius: 5px;
+                    background: root.subscribe-plan-type == "monthly" ? #1565C0 : #FFFFFF;
+                    border-width: 1px; border-color: #90CAF9;
+                    TouchArea {
+                        enabled: !root.subscribe-in-progress;
+                        mouse-cursor: pointer;
+                        clicked => { root.subscribe-plan-type = "monthly"; }
+                    }
+                    Text {
+                        text: "Monthly"; font-size: 12px; font-weight: 600;
+                        color: root.subscribe-plan-type == "monthly" ? #FFFFFF : #1565C0;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    height: 32px; border-radius: 5px;
+                    background: root.subscribe-plan-type == "yearly" ? #1565C0 : #FFFFFF;
+                    border-width: 1px; border-color: #90CAF9;
+                    TouchArea {
+                        enabled: !root.subscribe-in-progress;
+                        mouse-cursor: pointer;
+                        clicked => { root.subscribe-plan-type = "yearly"; }
+                    }
+                    Text {
+                        text: "Yearly"; font-size: 12px; font-weight: 600;
+                        color: root.subscribe-plan-type == "yearly" ? #FFFFFF : #1565C0;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    height: 32px; border-radius: 5px;
+                    background: root.subscribe-plan-type == "lifetime" ? #1565C0 : #FFFFFF;
+                    border-width: 1px; border-color: #90CAF9;
+                    TouchArea {
+                        enabled: !root.subscribe-in-progress;
+                        mouse-cursor: pointer;
+                        clicked => { root.subscribe-plan-type = "lifetime"; }
+                    }
+                    Text {
+                        text: "Lifetime"; font-size: 12px; font-weight: 600;
+                        color: root.subscribe-plan-type == "lifetime" ? #FFFFFF : #1565C0;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+            }
+            Rectangle { height: 16px; }
+
+            Text {
+                text: "ACCOUNT PASSWORD"; font-size: 11px; font-weight: 600;
+                color: #37474F; letter-spacing: 0.5px;
+            }
+            Rectangle { height: 5px; }
+            Rectangle {
+                height: 36px; border-radius: 5px;
+                border-width: 1px; border-color: subscribe-pwd-ti.has-focus ? #1565C0 : #90CAF9;
+                background: #FFFFFF;
+                if root.subscribe-account-password == "" && !subscribe-pwd-ti.has-focus : Text {
+                    x: 13px; width: parent.width - 26px; height: parent.height;
+                    text: "Your account password";
+                    font-size: 13px; color: #AAAAAA; vertical-alignment: center; overflow: elide;
+                }
+                subscribe-pwd-ti := TextInput {
+                    x: 12px; width: parent.width - 24px; height: parent.height;
+                    font-size: 13px; color: #0A1929;
+                    vertical-alignment: center;
+                    input-type: password;
+                    enabled: !root.subscribe-in-progress;
+                    text <=> root.subscribe-account-password;
+                    accessible-label: "Account password";
+                    accepted => { root.subscribe(root.email-val); }
+                }
+            }
+            Rectangle { height: 4px; }
+
+            Rectangle {
+                height:        40px;
+                background:    root.subscribe-in-progress ? #90CAF9 : #1565C0;
+                border-radius: 5px;
+                accessible-role: button;
+                accessible-label: "Subscribe Now";
+                accessible-enabled: !root.subscribe-in-progress;
+                TouchArea {
+                    enabled: !root.subscribe-in-progress;
+                    mouse-cursor: pointer;
+                    clicked => { root.subscribe(root.email-val); }
+                }
+                Text {
+                    text: root.subscribe-in-progress ? "Working…" : "Subscribe Now";
+                    font-size: 14px; font-weight: 600; color: #FFFFFF;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+            }
+
+            if root.subscribe-status-text != "" : Rectangle { height: 14px; }
+            if root.subscribe-status-text != "" : Text {
+                text: root.subscribe-status-text;
                 font-size: 12px; color: #37474F;
                 horizontal-alignment: center; wrap: word-wrap;
             }
