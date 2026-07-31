@@ -2067,18 +2067,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if ok {
                     log::info!("Login successful for {}", email);
                     h.set_login_error("".into());
-                    // Phase 4K.3 startup enforcement gate — the only place
-                    // `logged_in` is ever set `true` (see this phase's
-                    // audit: every path into the full application goes
-                    // through this one callback), so gating here alone
-                    // closes every bypass. `license::enforce` may need a
-                    // network round trip (`HttpLicenseClient`), so it's
-                    // backgrounded off the UI thread — same
-                    // `thread::spawn` + `invoke_from_event_loop` pattern
-                    // the periodic revalidation timer already uses below —
-                    // rather than blocking the whole UI for however long
-                    // that takes. `login_loading` now spans the network
-                    // wait instead of just the (instant) password check.
+                    // Phase 4K.3 startup enforcement gate. `logged_in` is
+                    // set `true` from three call sites in this file — this
+                    // one, `on_do_license_activate` (the license-blocked
+                    // recovery form), and `on_do_subscribe` (Phase 4M
+                    // auto-checkout) — never from just this one. The actual
+                    // invariant every one of them upholds is narrower but
+                    // still closes every bypass: none of the three ever sets
+                    // `logged_in = true` except immediately after its own,
+                    // independent `license::enforce` call has returned
+                    // `Allowed` — so auditing "does this path call
+                    // `enforce` before granting access" at each of the
+                    // three sites is what actually matters, not counting
+                    // call sites. `license::enforce` may need a network
+                    // round trip (`HttpLicenseClient`), so it's backgrounded
+                    // off the UI thread — same `thread::spawn` +
+                    // `invoke_from_event_loop` pattern the periodic
+                    // revalidation timer already uses below — rather than
+                    // blocking the whole UI for however long that takes.
+                    // `login_loading` now spans the network wait instead of
+                    // just the (instant) password check.
                     h.set_login_loading(true);
                     let handle_for_result = handle.clone();
                     let db_ref = db_ref.clone();
