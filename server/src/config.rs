@@ -291,10 +291,24 @@ impl AppConfig {
         if !database_url.starts_with("postgres://") && !database_url.starts_with("postgresql://") {
             return Err(ConfigError::InvalidDatabaseUrl);
         }
+        // Zero is rejected, not just "any valid u32": `db::build_pool` feeds
+        // this straight into `PgPoolOptions::max_connections`, and a pool
+        // capped at zero real connections never fails at startup (`connect_lazy`
+        // doesn't touch the network) — instead every later DB-touching request
+        // blocks for `acquire_timeout` (5s, `db.rs`) and then fails with
+        // `PoolTimedOut`, a confusing runtime symptom with no clear link back
+        // to the actual misconfiguration. Rejected here instead, at the one
+        // place that already fails startup loudly with a specific message.
         let database_max_connections = match get("DATABASE_MAX_CONNECTIONS") {
-            Some(v) => v
-                .parse::<u32>()
-                .map_err(|_| ConfigError::InvalidDatabaseMaxConnections(v))?,
+            Some(v) => {
+                let parsed = v
+                    .parse::<u32>()
+                    .map_err(|_| ConfigError::InvalidDatabaseMaxConnections(v.clone()))?;
+                if parsed == 0 {
+                    return Err(ConfigError::InvalidDatabaseMaxConnections(v));
+                }
+                parsed
+            }
             None => 5,
         };
 
@@ -756,6 +770,26 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             ConfigError::InvalidDatabaseMaxConnections("not-a-number".to_string())
+        );
+    }
+
+    /// A zero pool size parses as a valid `u32` but must still be rejected:
+    /// `PgPoolOptions::max_connections(0)` never fails at startup
+    /// (`connect_lazy` doesn't touch the network), but every later
+    /// DB-touching request would silently block for `acquire_timeout` and
+    /// then fail with `PoolTimedOut` — a confusing runtime symptom, not the
+    /// loud, specific `ConfigError` every other invalid value here already
+    /// gets. Same reasoning as `RECONCILIATION_INTERVAL_SECS`/
+    /// `RATE_LIMIT_ENTRY_TTL_SECONDS`'s own zero-rejection.
+    #[test]
+    fn zero_database_max_connections_is_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("DATABASE_MAX_CONNECTIONS", "0"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::InvalidDatabaseMaxConnections("0".to_string())
         );
     }
 
