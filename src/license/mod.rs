@@ -198,17 +198,24 @@ pub fn check_status(conn: &Connection, api: &dyn LicenseApiClient) -> LicenseSta
             // Fail-closed guard, independent of `derive_offline_status`'s
             // own grace-period arithmetic (unchanged, still the only thing
             // that computes ActiveOfflineGrace/GracePeriodExpired for
-            // every other status): a cached `status == "revoked"` must
-            // never resolve to ActiveOfflineGrace, even if the write that
-            // `enforce()`'s revocation handling normally performs
-            // (`clear_local_activation`, which nulls `license_id` so this
-            // branch would never even be reached) failed to persist. A
-            // fresh `last_validated_at` from the very check that reported
-            // "revoked" would otherwise read as "well within grace" here —
-            // this is the one exception `derive_offline_status` itself
-            // still knows nothing about, by design (see that function's
-            // doc comment: it's deliberately pure, time-only arithmetic).
-            let status = if record.status == "revoked" {
+            // every other status): a cached `status` of `"revoked"` or
+            // `"suspended"` must never resolve to ActiveOfflineGrace, even
+            // if the write that `enforce()`'s revocation handling normally
+            // performs (`clear_local_activation`, which nulls `license_id`
+            // so this branch would never even be reached) failed to
+            // persist. A fresh `last_validated_at` from the very check
+            // that reported "revoked"/"suspended" would otherwise read as
+            // "well within grace" here — this is the one exception
+            // `derive_offline_status` itself still knows nothing about, by
+            // design (see that function's doc comment: it's deliberately
+            // pure, time-only arithmetic). `"suspended"` is included
+            // alongside `"revoked"` (audit finding, 2026-08-05): both are
+            // statuses the server explicitly reported as not-licensed
+            // (`LicenseStatus::is_licensed()` is false for both), so an
+            // offline grace period re-granting access on top of a known
+            // "suspended" result would be the same fail-open gap the
+            // revoked-only version of this check already closes.
+            let status = if record.status == "revoked" || record.status == "suspended" {
                 LicenseStatus::GracePeriodExpired
             } else {
                 validation::derive_offline_status(
@@ -781,6 +788,35 @@ mod tests {
             status,
             LicenseStatus::GracePeriodExpired,
             "a cached revoked status must never resolve to ActiveOfflineGrace, regardless of how recent last_validated_at is"
+        );
+        assert!(!status.is_licensed());
+    }
+
+    #[test]
+    fn check_status_never_grants_offline_grace_to_a_cached_suspended_status() {
+        // Same gap as the revoked test above, for "suspended" (audit
+        // finding, 2026-08-05): a payment-issue suspension the server
+        // reported moments ago must not be re-opened into ActiveOfflineGrace
+        // just because the client then goes offline.
+        let conn = open_migrated();
+        storage::save_local_license(
+            &conn,
+            &storage::LocalLicenseRecord {
+                license_id: Some("lic_1".to_string()),
+                status: "suspended".to_string(),
+                last_validated_at: Some(Utc::now()),
+                grace_period_days: 7,
+                highest_seen_clock: Some(Utc::now()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let status = check_status(&conn, &OfflineClient);
+        assert_eq!(
+            status,
+            LicenseStatus::GracePeriodExpired,
+            "a cached suspended status must never resolve to ActiveOfflineGrace, regardless of how recent last_validated_at is"
         );
         assert!(!status.is_licensed());
     }

@@ -50,13 +50,26 @@ slint::include_modules!();
 /// the same honest "nothing to call" behavior this module has always had,
 /// now just reachable from a real deployment that hasn't set the variable
 /// yet, not only from a build with no HTTP client compiled in at all.
+///
+/// `HttpLicenseClient::new` can fail (e.g. a malformed proxy environment
+/// variable on the user's machine) — that's treated the same as an unset
+/// `LICENSE_SERVER_URL`, falling back to `OfflineClient` with a logged
+/// error, rather than crashing the whole app at startup over a licensing
+/// HTTP client that can't be built.
 fn build_license_client() -> Arc<dyn license::LicenseApiClient + Send + Sync> {
     #[cfg(feature = "ai")]
     {
         if let Ok(url) = std::env::var("LICENSE_SERVER_URL") {
             let url = url.trim();
             if !url.is_empty() {
-                return Arc::new(license::HttpLicenseClient::new(url));
+                match license::HttpLicenseClient::new(url) {
+                    Ok(client) => return Arc::new(client),
+                    Err(e) => {
+                        log::error!(
+                            "[license] failed to build HTTP client for LICENSE_SERVER_URL={url:?}: {e}; falling back to offline mode"
+                        );
+                    }
+                }
             }
         }
     }
@@ -4757,7 +4770,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(license::ApiError::NoServerConfigured) => {
                                 LicenseActivateOutcome::NoServer
                             }
-                            Err(e) => LicenseActivateOutcome::Failed(format!("{e:?}")),
+                            Err(e) => LicenseActivateOutcome::Failed(format!("{e}")),
                         },
                     };
                     drop(db);
@@ -4867,7 +4880,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let session_token = match login_result {
                         Ok(resp) => resp.session_token,
                         Err(e) => {
-                            update_status(format!("Sign-in failed: {e:?}"));
+                            update_status(format!("Sign-in failed: {e}"));
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(h) = handle_for_result.upgrade() {
                                     h.set_subscribe_in_progress(false);
@@ -4885,7 +4898,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let checkout = match checkout {
                         Ok(c) => c,
                         Err(e) => {
-                            update_status(format!("Could not start checkout: {e:?}"));
+                            update_status(format!("Could not start checkout: {e}"));
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(h) = handle_for_result.upgrade() {
                                     h.set_subscribe_in_progress(false);
@@ -4986,7 +4999,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(license::ApiError::NoServerConfigured) => {
                                     LicenseActivateOutcome::NoServer
                                 }
-                                Err(e) => LicenseActivateOutcome::Failed(format!("{e:?}")),
+                                Err(e) => LicenseActivateOutcome::Failed(format!("{e}")),
                             }
                         }
                     };

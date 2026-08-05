@@ -35,6 +35,64 @@ pub enum ApiError {
     ServerError(String),
 }
 
+/// Human-readable text for end-user-facing UI (Settings license status,
+/// activation/sign-in/checkout failure messages). `main.rs` used to surface
+/// `{e:?}` (the Rust `Debug` form, e.g. `"LicenseNotFound"`) directly to
+/// users; this is the friendly equivalent, matching the tone
+/// `license::describe`'s `LicenseStatus` messages already use.
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::NoServerConfigured => {
+                write!(
+                    f,
+                    "No licensing server is configured — set LICENSE_SERVER_URL and restart."
+                )
+            }
+            ApiError::InvalidCredentials => write!(f, "Incorrect email or password."),
+            ApiError::Unauthorized => write!(f, "Your session has expired. Please try again."),
+            ApiError::LicenseNotFound => {
+                write!(f, "That license key was not found. Check it and try again.")
+            }
+            ApiError::DeviceNotActivated => {
+                write!(f, "This device is not activated for that license.")
+            }
+            ApiError::DeviceLimitReached => write!(
+                f,
+                "This license has reached its device limit. Deactivate another device first."
+            ),
+            ApiError::LicenseExpired => {
+                write!(
+                    f,
+                    "This license has expired. Renew your subscription to continue."
+                )
+            }
+            ApiError::LicenseRevoked => {
+                write!(f, "This license has been revoked. Contact support.")
+            }
+            ApiError::LicenseSuspended => {
+                write!(
+                    f,
+                    "This license is suspended (e.g. a payment issue). Contact support."
+                )
+            }
+            ApiError::RateLimited => {
+                write!(f, "Too many attempts. Please wait a moment and try again.")
+            }
+            ApiError::NetworkError(_) => {
+                write!(
+                    f,
+                    "Could not reach the licensing server. Check your internet connection."
+                )
+            }
+            ApiError::ServerError(_) => write!(
+                f,
+                "The licensing server had a problem. Please try again shortly."
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivateLicenseRequest {
     pub license_key: String,
@@ -248,16 +306,24 @@ impl HttpLicenseClient {
     /// `build_license_client` for where this comes from (the
     /// `LICENSE_SERVER_URL` environment variable) and why an unset value
     /// means `OfflineClient` is used instead of this type at all.
-    pub fn new(base_url: &str) -> Self {
+    ///
+    /// Returns `Err` rather than panicking if the underlying HTTP client
+    /// can't be built (e.g. a malformed `HTTP_PROXY`/`NO_PROXY` environment
+    /// variable on the user's machine — `reqwest` reads these
+    /// automatically, so this is a real, if rare, end-user-triggerable
+    /// condition, not a can't-happen invariant). `build_license_client`
+    /// falls back to `OfflineClient` on `Err` instead of crashing the whole
+    /// app at startup.
+    pub fn new(base_url: &str) -> Result<Self, ApiError> {
         let http = reqwest::blocking::Client::builder()
             .connect_timeout(Self::CONNECT_TIMEOUT)
             .timeout(Self::REQUEST_TIMEOUT)
             .build()
-            .expect("failed to build the license-server HTTP client");
-        HttpLicenseClient {
+            .map_err(|e| ApiError::ServerError(format!("failed to build HTTP client: {e}")))?;
+        Ok(HttpLicenseClient {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
-        }
+        })
     }
 
     fn post<Req: Serialize, Resp: for<'de> Deserialize<'de>>(
@@ -540,7 +606,7 @@ mod tests {
     #[cfg(feature = "ai")]
     #[test]
     fn http_license_client_strips_a_trailing_slash_from_the_base_url() {
-        let client = HttpLicenseClient::new("https://license.example.com/");
+        let client = HttpLicenseClient::new("https://license.example.com/").unwrap();
         assert_eq!(client.base_url, "https://license.example.com");
     }
 
@@ -618,7 +684,7 @@ mod tests {
         let (base_url, rx) = respond_once(
             r#"{"session_token":"tok-abc","user_id":"usr_1","expires_at":"2026-08-09T00:00:00Z"}"#,
         );
-        let client = HttpLicenseClient::new(&base_url);
+        let client = HttpLicenseClient::new(&base_url).unwrap();
 
         let resp = client
             .login(&LoginRequest {
@@ -643,7 +709,7 @@ mod tests {
                 "licenses":[{"license_id":"lic_1","status":"active","devices_active":1,
                              "max_devices":1,"license_key":"XXXX-XXXX-XXXX-XXXX"}]}"#,
         );
-        let client = HttpLicenseClient::new(&base_url);
+        let client = HttpLicenseClient::new(&base_url).unwrap();
 
         let resp = client.get_subscription("tok-123").unwrap();
 
@@ -665,7 +731,7 @@ mod tests {
         let (base_url, rx) = respond_once(
             r#"{"checkout_url":"https://rzp.io/rzp/abc","provider_ref":"plink_1"}"#,
         );
-        let client = HttpLicenseClient::new(&base_url);
+        let client = HttpLicenseClient::new(&base_url).unwrap();
 
         let resp = client
             .create_checkout_session(
