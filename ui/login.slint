@@ -115,6 +115,9 @@ component SubscribeSection inherits VerticalLayout {
     in-out property <string> plan-type:        "monthly";
     in property <bool>       in-progress:      false;
     in property <string>     status-text:      "";
+    // 0 = neutral, 1 = success, 2 = error (audit fix, 2026-08-05) — see
+    // LoginScreen's subscribe-status-kind doc comment.
+    in property <int>        status-kind:      0;
     callback go(string);
 
     Text {
@@ -199,7 +202,9 @@ component SubscribeSection inherits VerticalLayout {
     if root.status-text != "" : Rectangle { height: 14px; }
     if root.status-text != "" : Text {
         text: root.status-text;
-        font-size: 12px; color: #334155;
+        font-size: 12px;
+        color: root.status-kind == 1 ? #15803D : root.status-kind == 2 ? #B91C1C : #334155;
+        font-weight: root.status-kind == 0 ? 400 : 600;
         horizontal-alignment: center; wrap: word-wrap;
     }
 }
@@ -340,7 +345,15 @@ export component LoginScreen inherits Rectangle {
     in property <string>     license-status-text:      "";
     in-out property <string> license-key-input:        "";
     in property <string>     license-activate-result:  "";
+    // 0 = neutral, 1 = success, 2 = error (audit fix, 2026-08-05).
+    in property <int>        license-activate-result-kind: 0;
     callback license-activate();
+    // Re-checks the already-activated license without needing a key
+    // retyped — recovers a transient network blip / expired offline-grace
+    // window, or a subscription fixed server-side, neither of which needs
+    // a fresh key (audit fix, 2026-08-05 — see main.rs's
+    // on_do_license_refresh doc comment).
+    callback license-refresh();
 
     // ── Auto-checkout (Phase 4M) ───────────────────────────────────────────────
     // Lets a user with no license yet pay via Razorpay checkout instead of
@@ -353,6 +366,10 @@ export component LoginScreen inherits Rectangle {
     in-out property <string> subscribe-plan-type:         "monthly";
     in property <bool>       subscribe-in-progress:        false;
     in property <string>     subscribe-status-text:        "";
+    // 0 = neutral, 1 = success, 2 = error (audit fix, 2026-08-05) — lets
+    // the "Payment success"/"Payment failure" status line look distinct
+    // instead of both rendering as the same plain gray text.
+    in property <int>        subscribe-status-kind:        0;
     // Takes the account email explicitly (same reasoning as
     // `attempt-login(string, string)` above) rather than requiring
     // `email-val` to be separately exposed up to `AppWindow` — it's
@@ -368,7 +385,11 @@ export component LoginScreen inherits Rectangle {
     // backend (monthly password + license gate only), so this
     // intentionally does nothing beyond its own visual state until such a
     // feature exists.
-    property <bool> show-subscribe: false;
+    // `in-out` (audit fix, 2026-08-05, "Upgrade flow"): was internal-only;
+    // now also settable from `app.slint` (`show-subscribe-page`) so an
+    // already-logged-in user's "Change Plan" action can land directly on
+    // this pricing page instead of the plain password form.
+    in-out property <bool> show-subscribe: false;
     property <bool> remember-me:    false;
 
     background: @linear-gradient(160deg, #EAF2FF 0%, #F8FAFC 55%, #F1F5F9 100%);
@@ -644,11 +665,33 @@ export component LoginScreen inherits Rectangle {
                 label: "Activate License";
                 clicked => { root.license-activate(); }
             }
+            Rectangle { height: 10px; }
+
+            // Recovers a transient network blip / expired offline-grace
+            // window, or a subscription just fixed/renewed server-side,
+            // without needing the license key re-typed (audit fix,
+            // 2026-08-05 — see main.rs's on_do_license_refresh).
+            Rectangle {
+                height: 18px;
+                Text {
+                    height: parent.height;
+                    text: "Already subscribed? Refresh Status";
+                    font-size: 12px; font-weight: 600; color: #2563EB;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.license-refresh(); }
+                }
+            }
 
             if root.license-activate-result != "" : Rectangle { height: 14px; }
             if root.license-activate-result != "" : Text {
                 text: root.license-activate-result;
-                font-size: 12px; color: #334155;
+                font-size: 12px;
+                color: root.license-activate-result-kind == 1 ? #15803D
+                    : root.license-activate-result-kind == 2 ? #B91C1C : #334155;
+                font-weight: root.license-activate-result-kind == 0 ? 400 : 600;
                 horizontal-alignment: center; wrap: word-wrap;
             }
 
@@ -663,6 +706,7 @@ export component LoginScreen inherits Rectangle {
                 plan-type         <=> root.subscribe-plan-type;
                 in-progress:  root.subscribe-in-progress;
                 status-text:  root.subscribe-status-text;
+                status-kind:  root.subscribe-status-kind;
                 go(e) => { root.subscribe(e); }
             }
             } // if root.license-blocked
@@ -847,7 +891,10 @@ export component LoginScreen inherits Rectangle {
                     if root.subscribe-status-text != "" : Rectangle { height: 14px; }
                     if root.subscribe-status-text != "" : Text {
                         text: root.subscribe-status-text;
-                        font-size: 12px; color: #334155;
+                        font-size: 12px;
+                        color: root.subscribe-status-kind == 1 ? #15803D
+                            : root.subscribe-status-kind == 2 ? #B91C1C : #334155;
+                        font-weight: root.subscribe-status-kind == 0 ? 400 : 600;
                         horizontal-alignment: center; wrap: word-wrap;
                     }
                 }

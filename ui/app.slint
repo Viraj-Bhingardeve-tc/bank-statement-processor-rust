@@ -31,6 +31,14 @@ export component AppWindow inherits Window {
     // shows the license-key form (below) instead of the password form
     // while this is true.
     in-out property <bool>   license-blocked:  false;
+    // Audit fix (2026-08-05, "Upgrade flow"): lets an already-logged-in
+    // user reach the pricing/checkout page reachable from LoginScreen
+    // without needing to already be blocked — see `change-plan` on the
+    // MainScreen instantiation below, which sets this alongside dropping
+    // `logged-in` back to false. Two-way bound to LoginScreen's own
+    // `show-subscribe` below so both directions of the "← Back to login"
+    // link stay in sync.
+    in-out property <bool>   show-subscribe-page: false;
 
     // ── File / bank status (set by Rust after parse) ──────────────────────────
     in property <string> status-bank: "";
@@ -283,6 +291,10 @@ export component AppWindow inherits Window {
     callback do-clear-logs();
     // License activation (Phase 3A)
     callback do-license-activate();
+    // License refresh (audit fix, 2026-08-05): re-checks the already-
+    // cached license without requiring the user to re-type their key —
+    // see main.rs's on_do_license_refresh doc comment.
+    callback do-license-refresh();
     // Rules backup / restore
     callback do-backup-rules();
     callback do-restore-rules();
@@ -301,12 +313,21 @@ export component AppWindow inherits Window {
     in-out property <string> license-status-text:      "";
     in-out property <string> license-key-input:        "";
     in-out property <string> license-activate-result:  "";
+    // 0 = neutral (in progress / informational), 1 = success, 2 = error —
+    // audit fix (2026-08-05) so the license-activate/refresh result line
+    // can be styled distinctly instead of always looking the same
+    // regardless of outcome.
+    in-out property <int>    license-activate-result-kind: 0;
     // Auto-checkout (Phase 4M)
     callback do-subscribe(string);
     in-out property <string> subscribe-account-password: "";
     in-out property <string> subscribe-plan-type:         "monthly";
     in-out property <bool>   subscribe-in-progress:        false;
     in-out property <string> subscribe-status-text:        "";
+    // Same 0/1/2 convention as license-activate-result-kind above (audit
+    // fix, 2026-08-05) — lets the "Payment success"/"Payment failure"
+    // status line actually look different depending on which one it is.
+    in-out property <int>    subscribe-status-kind:         0;
 
     // ── Login screen ──────────────────────────────────────────────────────────
     if !root.logged-in : LoginScreen {
@@ -319,12 +340,16 @@ export component AppWindow inherits Window {
         license-status-text:      root.license-status-text;
         license-key-input      <=> root.license-key-input;
         license-activate-result:  root.license-activate-result;
+        license-activate-result-kind: root.license-activate-result-kind;
         license-activate       => { root.do-license-activate(); }
+        license-refresh        => { root.do-license-refresh(); }
         subscribe-account-password <=> root.subscribe-account-password;
         subscribe-plan-type         <=> root.subscribe-plan-type;
         subscribe-in-progress:         root.subscribe-in-progress;
         subscribe-status-text:         root.subscribe-status-text;
+        subscribe-status-kind:         root.subscribe-status-kind;
         subscribe(email)             => { root.do-subscribe(email); }
+        show-subscribe          <=> root.show-subscribe-page;
     }
 
     // ── Main screen ───────────────────────────────────────────────────────────
@@ -490,6 +515,16 @@ export component AppWindow inherits Window {
         request-delete-txn-confirm(i) => { root.do-request-delete-txn-confirm(i); }
 
         logout              => { root.logged-in = false; root.login-error = ""; }
+        // Audit fix (2026-08-05, "Upgrade flow"): reuses the exact same
+        // pricing/checkout page LoginScreen already shows a not-yet-
+        // licensed user (`show-subscribe`/`SubscribeSection`/`do-subscribe`
+        // above) rather than building a second copy of it inside
+        // MainScreen — dropping back to the login gate is a one-line
+        // consequence of that reuse, not a separate design choice; the
+        // real account credentials `do-subscribe` needs are unrelated to
+        // the monthly password anyway (see login.slint's `subscribe`
+        // callback doc comment).
+        change-plan         => { root.logged-in = false; root.show-subscribe-page = true; }
         load-file           => { root.do-load-file();           }
         batch-folder        => { root.do-batch-folder();        }
         new-client          => { return root.do-new-client();   }
@@ -546,6 +581,7 @@ export component AppWindow inherits Window {
         restore-rules      => { root.do-restore-rules();     }
         delete-rule(i)     => { root.do-delete-rule(i);      }
         license-activate   => { root.do-license-activate();  }
+        license-refresh    => { root.do-license-refresh();   }
         dedup-enabled            <=> root.dedup-enabled;
         settings-narr-enabled    <=> root.settings-narr-enabled;
         settings-narr-title-case <=> root.settings-narr-title-case;
@@ -559,5 +595,6 @@ export component AppWindow inherits Window {
         license-status-text      <=> root.license-status-text;
         license-key-input        <=> root.license-key-input;
         license-activate-result  <=> root.license-activate-result;
+        license-activate-result-kind <=> root.license-activate-result-kind;
     }
 }

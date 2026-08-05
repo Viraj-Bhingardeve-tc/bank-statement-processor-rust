@@ -902,7 +902,18 @@ export component MainScreen inherits Rectangle {
     in-out property <string> license-status-text:    "";
     in-out property <string> license-key-input:      "";
     in-out property <string> license-activate-result:"";
+    // 0 = neutral, 1 = success, 2 = error (audit fix, 2026-08-05) — see
+    // login.slint's matching property for the full rationale.
+    in-out property <int>    license-activate-result-kind: 0;
     callback license-activate();
+    // Re-checks the already-activated license without a key retyped
+    // (audit fix, 2026-08-05 — see main.rs's on_do_license_refresh).
+    callback license-refresh();
+    // Reuses LoginScreen's pricing/checkout page for a logged-in user who
+    // wants to switch plans (audit fix, 2026-08-05, "Upgrade flow") — see
+    // app.slint's `change-plan` handler for why this drops back to the
+    // login gate rather than duplicating the pricing UI here.
+    callback change-plan();
 
     // ── MAIN LAYOUT ───────────────────────────────────────────────────────────
     VerticalLayout {
@@ -1757,6 +1768,24 @@ export component MainScreen inherits Rectangle {
                 FootBtn { text: "Settings";      enabled: true; clicked => { root.modal-state = "settings";     } }
 
                 Rectangle { horizontal-stretch: 1; }
+
+                // Audit fix (2026-08-05): "logout" was already wired
+                // end-to-end (app.slint forwards it to logged-in = false)
+                // but nothing in the UI ever invoked it — there was no way
+                // to sign out short of quitting the app. Routed through
+                // the existing confirm modal like Reset Dedupe/Clear Logs
+                // above, since it's a "leave your place" action worth a
+                // confirmation, not a destructive one.
+                FootBtn {
+                    text: "Logout"; enabled: true; bg: #546E7A; border-clr: #546E7A; fg: #FFFFFF;
+                    clicked => {
+                        root.confirm-title = "Logout";
+                        root.confirm-message = "Sign out and return to the login screen?";
+                        root.confirm-action = "logout";
+                        root.confirm-payload = -1;
+                        root.modal-state = "confirm";
+                    }
+                }
             }
         }
     }
@@ -1842,14 +1871,26 @@ export component MainScreen inherits Rectangle {
                 MFtr {
                     MBtn {
                         text: "Yes, Continue"; bg: #C62828; clicked => {
-                            if (root.confirm-action == "reset-dedupe") { root.reset-dedupe(); }
-                            else if (root.confirm-action == "clear-logs") { root.clear-logs(); }
-                            else if (root.confirm-action == "delete-txn") { root.delete-txn(root.confirm-payload); }
-                            else if (root.confirm-action == "delete-rule") { root.delete-rule(root.confirm-payload); }
-                            else if (root.confirm-action == "delete-import") { root.delete-import(root.confirm-payload); }
-                            else if (root.confirm-action == "reload-import") { root.reload-import(root.confirm-payload); }
-                            root.confirm-action = "";
-                            root.modal-state = "";
+                            if (root.confirm-action == "logout") {
+                                // Reset this modal's own state first, then
+                                // fire logout last — it's the only
+                                // confirm-action that tears down MainScreen
+                                // itself (app.slint's `logged-in = false`),
+                                // so nothing should run against `root`
+                                // afterward (audit fix, 2026-08-05).
+                                root.confirm-action = "";
+                                root.modal-state = "";
+                                root.logout();
+                            } else {
+                                if (root.confirm-action == "reset-dedupe") { root.reset-dedupe(); }
+                                else if (root.confirm-action == "clear-logs") { root.clear-logs(); }
+                                else if (root.confirm-action == "delete-txn") { root.delete-txn(root.confirm-payload); }
+                                else if (root.confirm-action == "delete-rule") { root.delete-rule(root.confirm-payload); }
+                                else if (root.confirm-action == "delete-import") { root.delete-import(root.confirm-payload); }
+                                else if (root.confirm-action == "reload-import") { root.reload-import(root.confirm-payload); }
+                                root.confirm-action = "";
+                                root.modal-state = "";
+                            }
                         }
                     }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.confirm-action = ""; root.modal-state = ""; } }
@@ -2094,9 +2135,38 @@ export component MainScreen inherits Rectangle {
                                 Text { text: "Activate"; font-size: 11px; color: white;
                                        horizontal-alignment: center; vertical-alignment: center; }
                             }
+                            // Re-checks the already-activated license
+                            // without needing a key retyped (audit fix,
+                            // 2026-08-05, "Subscription refresh" — see
+                            // main.rs's on_do_license_refresh).
+                            Rectangle {
+                                height: 30px; width: 120px;
+                                background: #546E7A; border-radius: 4px;
+                                accessible-role: button;
+                                accessible-label: "Refresh Status";
+                                TouchArea { clicked => { root.license-refresh(); } }
+                                Text { text: "Refresh Status"; font-size: 11px; color: white;
+                                       horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            // Reuses LoginScreen's pricing/checkout page
+                            // (audit fix, 2026-08-05, "Upgrade flow") — see
+                            // app.slint's `change-plan` handler.
+                            Rectangle {
+                                height: 30px; width: 110px;
+                                background: #FFFFFF; border-radius: 4px;
+                                border-width: 1px; border-color: #1565C0;
+                                accessible-role: button;
+                                accessible-label: "Change Plan";
+                                TouchArea { clicked => { root.change-plan(); } }
+                                Text { text: "Change Plan"; font-size: 11px; color: #1565C0;
+                                       horizontal-alignment: center; vertical-alignment: center; }
+                            }
                         }
                         if root.license-activate-result != "" : Text {
-                            text: root.license-activate-result; font-size: 11px; color: #546E7A;
+                            text: root.license-activate-result; font-size: 11px;
+                            color: root.license-activate-result-kind == 1 ? #2E7D32
+                                : root.license-activate-result-kind == 2 ? #C62828 : #546E7A;
+                            font-weight: root.license-activate-result-kind == 0 ? 400 : 700;
                             wrap: word-wrap; width: 640px;
                         }
                     }

@@ -4729,6 +4729,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let key = key.trim().to_string();
                 if key.is_empty() {
                     h.set_license_activate_result(SharedString::from("Enter a license key first."));
+                    h.set_license_activate_result_kind(0);
                     return;
                 }
 
@@ -4781,6 +4782,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 h.set_license_activate_result(SharedString::from(
                                     "License activated successfully.",
                                 ));
+                                h.set_license_activate_result_kind(1);
                                 h.set_license_key_input(SharedString::from(""));
                                 h.set_license_status_text(SharedString::from(status_text.as_str()));
                                 h.set_logged_in(true);
@@ -4788,8 +4790,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             LicenseActivateOutcome::ActivatedButBlocked { reason } => {
                                 h.set_license_activate_result(SharedString::from(
-                                    "License activated successfully.",
+                                    "License key accepted, but access is still blocked — see status below.",
                                 ));
+                                h.set_license_activate_result_kind(2);
                                 h.set_license_key_input(SharedString::from(""));
                                 h.set_license_status_text(SharedString::from(reason.as_str()));
                             }
@@ -4797,6 +4800,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 h.set_license_activate_result(SharedString::from(
                                     "Activation unavailable — database is not open.",
                                 ));
+                                h.set_license_activate_result_kind(2);
                             }
                             LicenseActivateOutcome::NoServer => {
                                 log::info!(
@@ -4805,13 +4809,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 h.set_license_activate_result(SharedString::from(
                                     "No licensing server is configured — set LICENSE_SERVER_URL and restart.",
                                 ));
+                                h.set_license_activate_result_kind(2);
                             }
                             LicenseActivateOutcome::Failed(e) => {
                                 log::warn!("[license] activation failed: {e}");
                                 h.set_license_activate_result(SharedString::from(
                                     format!("Activation failed: {e}").as_str(),
                                 ));
+                                h.set_license_activate_result_kind(2);
                             }
+                        }
+                    });
+                });
+            });
+        }
+
+        // ── License Refresh (audit fix, 2026-08-05, "Subscription refresh") ────
+        // Re-runs `license::enforce` against the already-locally-cached
+        // license — no key re-entry required. Recovers two cases
+        // `on_do_license_activate` above cannot without the user having
+        // their key on hand: (1) a transient network blip or an offline-
+        // grace window that has since reconnected, and (2) a subscription
+        // fixed/renewed server-side (e.g. a declined card retried) while
+        // this installation was showing "blocked" — both leave the local
+        // `license_id` intact (only a server-confirmed *revocation*
+        // clears it, per `enforce`'s own doc comment), so a plain re-check
+        // is all that's needed. Reachable from the same two places as
+        // `on_do_license_activate`: the Settings screen's License section,
+        // and the license-blocked recovery form on LoginScreen.
+        {
+            let handle = app.as_weak();
+            let db_ref = db_conn.clone();
+            let license_client = license_client.clone();
+            app.on_do_license_refresh(move || {
+                let handle_for_result = handle.clone();
+                let db_ref = db_ref.clone();
+                let license_client = license_client.clone();
+                std::thread::spawn(move || {
+                    let db = db_ref.lock().unwrap();
+                    let outcome = match db.as_ref() {
+                        None => LicenseActivateOutcome::NoDatabase,
+                        Some(conn) => match license::enforce(conn, license_client.as_ref()) {
+                            license::EnforcementOutcome::Allowed => {
+                                // A second `check_status` call here (on top
+                                // of the one already inside `enforce`) is a
+                                // deliberate, small duplication — this
+                                // handler is a manually-triggered, low-
+                                // frequency action, and reusing
+                                // `license::describe` for a precise status
+                                // line (distinguishing plain Active from
+                                // ActiveOfflineGrace) is worth the second
+                                // round trip rather than duplicating
+                                // `enforce`'s own Allowed/Blocked decision
+                                // logic here.
+                                let status = license::check_status(conn, license_client.as_ref());
+                                let record =
+                                    license::storage::load_local_license(conn).ok().flatten();
+                                LicenseActivateOutcome::Activated {
+                                    status_text: license::describe(status, record.as_ref()),
+                                }
+                            }
+                            license::EnforcementOutcome::Blocked { reason, .. } => {
+                                LicenseActivateOutcome::ActivatedButBlocked { reason }
+                            }
+                        },
+                    };
+                    drop(db);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(h) = handle_for_result.upgrade() else { return };
+                        match outcome {
+                            LicenseActivateOutcome::Activated { status_text } => {
+                                h.set_license_activate_result(SharedString::from(
+                                    "Status refreshed — license is active.",
+                                ));
+                                h.set_license_activate_result_kind(1);
+                                h.set_license_status_text(SharedString::from(status_text.as_str()));
+                                h.set_logged_in(true);
+                                h.set_license_blocked(false);
+                            }
+                            LicenseActivateOutcome::ActivatedButBlocked { reason } => {
+                                h.set_license_activate_result(SharedString::from(
+                                    "Status refreshed — still not licensed.",
+                                ));
+                                h.set_license_activate_result_kind(2);
+                                h.set_license_status_text(SharedString::from(reason.as_str()));
+                            }
+                            LicenseActivateOutcome::NoDatabase => {
+                                h.set_license_activate_result(SharedString::from(
+                                    "Refresh unavailable — database is not open.",
+                                ));
+                                h.set_license_activate_result_kind(2);
+                            }
+                            // enforce() never returns these two — kept only
+                            // so this match stays exhaustive against the
+                            // shared enum without a wildcard arm hiding a
+                            // future new variant.
+                            LicenseActivateOutcome::NoServer => {}
+                            LicenseActivateOutcome::Failed(_) => {}
                         }
                     });
                 });
@@ -4848,27 +4942,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     h.set_subscribe_status_text(SharedString::from(
                         "Enter your account email first.",
                     ));
+                    h.set_subscribe_status_kind(0);
                     return;
                 }
                 if password.trim().is_empty() {
                     h.set_subscribe_status_text(SharedString::from(
                         "Enter your account password first.",
                     ));
+                    h.set_subscribe_status_kind(0);
                     return;
                 }
 
                 h.set_subscribe_in_progress(true);
                 h.set_subscribe_status_text(SharedString::from("Signing in…"));
+                h.set_subscribe_status_kind(0);
 
                 let handle_for_result = handle.clone();
                 let db_ref = db_ref.clone();
                 let license_client = license_client.clone();
                 std::thread::spawn(move || {
-                    let update_status = |text: String| {
+                    // `kind`: 0 = neutral/in-progress, 1 = success, 2 =
+                    // error — audit fix (2026-08-05, "Payment success/
+                    // failure screen") so the status line drawn from this
+                    // is visually distinguishable, not just by wording.
+                    let update_status = |text: String, kind: i32| {
                         let handle_for_result = handle_for_result.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(h) = handle_for_result.upgrade() {
                                 h.set_subscribe_status_text(SharedString::from(text.as_str()));
+                                h.set_subscribe_status_kind(kind);
                             }
                         });
                     };
@@ -4880,7 +4982,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let session_token = match login_result {
                         Ok(resp) => resp.session_token,
                         Err(e) => {
-                            update_status(format!("Sign-in failed: {e}"));
+                            update_status(format!("Sign-in failed: {e}"), 2);
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(h) = handle_for_result.upgrade() {
                                     h.set_subscribe_in_progress(false);
@@ -4890,7 +4992,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                    update_status("Creating checkout session…".to_string());
+                    update_status("Creating checkout session…".to_string(), 0);
                     let checkout = license_client.create_checkout_session(
                         &session_token,
                         &license::client::CreateCheckoutSessionRequest { plan_type },
@@ -4898,7 +5000,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let checkout = match checkout {
                         Ok(c) => c,
                         Err(e) => {
-                            update_status(format!("Could not start checkout: {e}"));
+                            update_status(format!("Could not start checkout: {e}"), 2);
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(h) = handle_for_result.upgrade() {
                                     h.set_subscribe_in_progress(false);
@@ -4910,14 +5012,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if let Err(e) = open::that(&checkout.checkout_url) {
                         log::warn!("[license] failed to auto-open checkout URL: {e}");
-                        update_status(format!(
-                            "Open this link to complete payment: {}",
-                            checkout.checkout_url
-                        ));
+                        update_status(
+                            format!(
+                                "Open this link to complete payment: {}",
+                                checkout.checkout_url
+                            ),
+                            0,
+                        );
                     } else {
                         update_status(
                             "Waiting for payment confirmation — complete checkout in your browser…"
                                 .to_string(),
+                            0,
                         );
                     }
 
@@ -4948,6 +5054,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             | Err(license::ApiError::InvalidCredentials) => {
                                 update_status(
                                     "Session expired — try Subscribe again.".to_string(),
+                                    2,
                                 );
                                 let _ = slint::invoke_from_event_loop(move || {
                                     if let Some(h) = handle_for_result.upgrade() {
@@ -4968,6 +5075,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Timed out waiting for payment confirmation. If you completed \
                              payment, paste your license key below and click Activate."
                                 .to_string(),
+                            2,
                         );
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(h) = handle_for_result.upgrade() {
@@ -4977,7 +5085,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     };
 
-                    update_status("Payment confirmed — activating your license…".to_string());
+                    update_status("Payment confirmed — activating your license…".to_string(), 0);
                     let db = db_ref.lock().unwrap();
                     let outcome = match db.as_ref() {
                         None => LicenseActivateOutcome::NoDatabase,
@@ -5012,31 +5120,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 h.set_subscribe_status_text(SharedString::from(
                                     "License activated successfully.",
                                 ));
+                                h.set_subscribe_status_kind(1);
                                 h.set_license_status_text(SharedString::from(status_text.as_str()));
                                 h.set_logged_in(true);
                                 h.set_license_blocked(false);
                             }
                             LicenseActivateOutcome::ActivatedButBlocked { reason } => {
                                 h.set_subscribe_status_text(SharedString::from(
-                                    "License activated successfully.",
+                                    "License key accepted, but access is still blocked — see status below.",
                                 ));
+                                h.set_subscribe_status_kind(2);
                                 h.set_license_status_text(SharedString::from(reason.as_str()));
                             }
                             LicenseActivateOutcome::NoDatabase => {
                                 h.set_subscribe_status_text(SharedString::from(
                                     "Activation unavailable — database is not open.",
                                 ));
+                                h.set_subscribe_status_kind(2);
                             }
                             LicenseActivateOutcome::NoServer => {
                                 h.set_subscribe_status_text(SharedString::from(
                                     "No licensing server is configured — set LICENSE_SERVER_URL and restart.",
                                 ));
+                                h.set_subscribe_status_kind(2);
                             }
                             LicenseActivateOutcome::Failed(e) => {
                                 log::warn!("[license] auto-activation after checkout failed: {e}");
                                 h.set_subscribe_status_text(SharedString::from(
                                     format!("Activation failed: {e}").as_str(),
                                 ));
+                                h.set_subscribe_status_kind(2);
                             }
                         }
                     });
