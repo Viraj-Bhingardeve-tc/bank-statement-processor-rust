@@ -1918,6 +1918,14 @@ fn log_level_filter(level: &str) -> log::LevelFilter {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Same directory as the database below — computed first so the logger
+    // (immediately after) can also use it; `db_path` itself is still
+    // computed separately further down since it needs its own filename.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
     // env_logger's own internal filter is fixed for the life of the process
     // once `.init()` runs, so it's built permissive ("debug") here — actual
     // verbosity is controlled entirely afterwards via `log::set_max_level`,
@@ -1926,17 +1934,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // any time. That's what lets the Settings screen's "Log Level" actually
     // take effect immediately, in both directions, without a restart. An
     // explicit `RUST_LOG` env var still overrides this, same as before.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    let mut log_builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"));
+    // Release build verification finding (2026-08-06): `#[cfg_attr(not(debug_assertions),
+    // windows_subsystem = "windows")]` above means a release build has no
+    // console attached when launched normally (double-clicked, or from a
+    // shortcut) — env_logger's default stderr target is silently discarded
+    // in that case, so a production user hitting a license/network/DB
+    // error leaves zero diagnostic trail; debug builds are unaffected
+    // (they keep the console, same as before). Redirected to a file next
+    // to the database instead. Falls back to the (still-discarded, no
+    // worse than before) stderr target if the file can't be created, e.g.
+    // a read-only install directory.
+    #[cfg(not(debug_assertions))]
+    {
+        let log_path = exe_dir.join("bsp.log");
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(f) => {
+                log_builder.target(env_logger::Target::Pipe(Box::new(f)));
+            }
+            Err(e) => {
+                eprintln!("[log] could not open {log_path:?} for logging, falling back to stderr (likely discarded, no console attached): {e}");
+            }
+        }
+    }
+    log_builder.init();
     log::set_max_level(log::LevelFilter::Info); // matches the previous fixed default until Settings load below
 
     log::info!("Bank Statement Processor starting…");
 
-    let db_path = {
-        let mut p = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        p.pop();
-        p.push("bsp_data.db");
-        p
-    };
+    let db_path = exe_dir.join("bsp_data.db");
     // Captured so the UI can surface a startup DB failure to the user below,
     // instead of it being visible only in the log (the previous behavior —
     // the app would silently run in a no-database mode with no on-screen
