@@ -80,6 +80,52 @@ running config), both of which survive `docker compose down` (without `-v`) and 
 recreation — so redeploys don't re-trigger issuance or risk hitting Let's Encrypt's rate limits.
 Watch first-boot issuance with `docker compose logs -f caddy`.
 
+### Razorpay production setup
+
+Steps 3/9 of "First deployment" above get `server/.env`'s Razorpay variables *present*; this is
+what makes them *correct* for a live, paying-customer deployment. Do this after `license-server`
+is reachable over HTTPS (step 8) but before advertising checkout to real customers.
+
+1. **Switch to live API keys.** In the Razorpay dashboard, generate a live key pair (Settings →
+   API Keys → Generate Live Key) — `rzp_live_...` — and set `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`
+   in `server/.env` to it. Test-mode keys (`rzp_test_...`) never charge a real card; a production
+   deployment left on one silently takes no real money while still returning what looks like a
+   successful checkout URL to customers.
+2. **Create the two recurring Plans and set their ids.** `monthly`/`yearly` checkout goes through
+   Razorpay's Subscriptions API under a live key (`server/src/razorpay/client.rs`'s
+   `HttpRazorpayClient::create_checkout` — the Payment-Links fallback that lets local development
+   skip this step **only applies under a test-mode key**), which needs a real, dashboard-created
+   Plan, not just an amount. In the Razorpay dashboard: Subscriptions → Plans → Create Plan, once
+   for the monthly price and once for the yearly price (amounts must match
+   `server/src/service/payment_service.rs`'s `PRICING` table, or the price a customer is charged
+   at Razorpay's checkout won't match what this server records/entitles). Copy each Plan's `plan_...`
+   id into `RAZORPAY_MONTHLY_PLAN_ID`/`RAZORPAY_YEARLY_PLAN_ID`. **Required, not optional, once
+   `RAZORPAY_KEY_ID` is a live key** — `AppConfig::from_vars` refuses to start
+   (`ConfigError::LiveRazorpayKeyMissingPlanIds`) rather than let this surface later as a failed
+   checkout for whichever plan a real customer happens to pick first.
+3. **Register the webhook and set its secret.** In the Razorpay dashboard: Settings → Webhooks →
+   Add New Webhook.
+   - URL: `https://<your-domain>/webhooks/razorpay`.
+   - Secret: generate a strong random value yourself (this is *not* `RAZORPAY_KEY_SECRET` — it's
+     a separate value both you and Razorpay hold, used only to HMAC-sign webhook bodies); set the
+     same value as `RAZORPAY_WEBHOOK_SECRET` in `server/.env`. Until this is set,
+     `POST /webhooks/razorpay` rejects every call outright (`server/src/routes/payment.rs`) rather
+     than accepting an unverifiable one.
+   - Active events — enable at least every event `service::payment_service::process_webhook_event`
+     branches on, since anything else is silently ignored (received, acknowledged, no state
+     change): `payment.captured`, `payment.failed`, `subscription.activated`,
+     `subscription.charged`, `subscription.cancelled`, `subscription.halted`, `refund.created`,
+     `refund.processed`, `payment.dispute.created`, `payment.dispute.closed`.
+4. **Restart and verify.** `docker compose up -d --build --no-deps license-server` to pick up the
+   new `.env` values, then run a real end-to-end purchase (small/refundable, or Razorpay's
+   documented live-mode test path) for each of `monthly`/`yearly`/`lifetime` and confirm: the
+   checkout URL opens, the webhook arrives (`docker compose logs -f license-server` should show
+   "razorpay webhook processed"), and the license activates. This is the one thing automated tests
+   in this repository cannot substitute for — they run against a mocked `RazorpayClient`, never a
+   real Razorpay account (see `server/src/razorpay/client.rs`'s module doc comment).
+5. Reconciliation (`server/src/reconciliation.rs`) and the operator checklist below still apply
+   unchanged in live mode — nothing about switching to live keys/Plans changes their configuration.
+
 ### Restart procedure
 
 ```sh
