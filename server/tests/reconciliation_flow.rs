@@ -255,6 +255,99 @@ async fn reconcile_once_does_not_guess_at_a_payment_with_no_local_record() {
     );
 }
 
+/// Phase 4L.3 (production validation, HIGH) / end-to-end payment testing
+/// pass: the real-Postgres counterpart to `service::payment_service`'s
+/// `reconcile_once_heals_a_refund_no_webhook_ever_arrived_for` unit test —
+/// proves the real `PgPaymentRepository`/`PgLicenseRepository` SQL agrees
+/// that a `refund.*` webhook Razorpay never managed to deliver still gets
+/// healed by the next reconciliation pass, same as `payment.captured`/
+/// `payment.failed` already had integration coverage for above.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn reconcile_once_heals_a_refund_no_webhook_ever_arrived_for() {
+    let pool = connected_pool().await;
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at, current_period_end) \
+         VALUES ($1, 'yearly', 'active', now(), now() + interval '365 days') RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let order_ref = format!("order_{}", Uuid::new_v4());
+    let gateway_payment_id = format!("pay_{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, provider_ref, gateway_payment_id, status) \
+         VALUES ($1, 399900, 'INR', 'razorpay', $2, $3, 'succeeded')",
+    )
+    .bind(subscription_id)
+    .bind(&order_ref)
+    .bind(&gateway_payment_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let license_id: i64 = sqlx::query_scalar(
+        "INSERT INTO licenses (subscription_id, license_key, status, expires_at, max_devices) \
+         VALUES ($1, $2, 'active', now() + interval '365 days', 1) RETURNING id",
+    )
+    .bind(subscription_id)
+    .bind(format!("TEST-RECON-REFUND-{}", Uuid::new_v4()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let service = payment_service_with(
+        pool.clone(),
+        vec![RazorpayPayment {
+            id: gateway_payment_id,
+            order_id: Some(order_ref),
+            status: "refunded".to_string(),
+        }],
+    );
+
+    let summary = service.reconcile_once().await.unwrap();
+    assert_eq!(
+        summary,
+        ReconciliationSummary {
+            checked: 1,
+            healed: 1
+        }
+    );
+
+    let payment_status: String =
+        sqlx::query_scalar("SELECT status FROM payments WHERE subscription_id = $1")
+            .bind(subscription_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(payment_status, "refunded");
+
+    let license_status: String = sqlx::query_scalar("SELECT status FROM licenses WHERE id = $1")
+        .bind(license_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        license_status, "revoked",
+        "reconciliation must revoke the license, same as a real refund.created webhook would"
+    );
+
+    sqlx::query("DELETE FROM licenses WHERE id = $1")
+        .bind(license_id)
+        .execute(&pool)
+        .await
+        .ok();
+    cleanup_user(&pool, user_id).await;
+}
+
 #[tokio::test]
 #[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
 async fn reconcile_once_syncs_a_failed_payment_status_via_the_real_repository() {

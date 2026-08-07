@@ -22,6 +22,18 @@ pub enum RepositoryError {
     /// constraint is ever dropped, not because it's expected to fire in
     /// normal operation.
     DuplicateProviderReference(String),
+    /// End-to-end payment testing pass (Phase 4N): the exact same class of
+    /// bug Finding H2 fixed for `provider_ref`, found to still be present
+    /// for `gateway_payment_id` — `repository::payment::
+    /// PgPaymentRepository::find_by_gateway_payment_id` used to mask a
+    /// collision by silently picking the most recently created matching
+    /// row (`ORDER BY created_at DESC LIMIT 1`) instead of erroring, which
+    /// is exactly the H2 footgun applied to the column
+    /// `refund.*`/`payment.dispute.*` correlation reads. Migration `0009`'s
+    /// partial `UNIQUE` index makes this unreachable against a freshly
+    /// migrated schema, same defense-in-depth reasoning as
+    /// `DuplicateProviderReference` above.
+    DuplicateGatewayPaymentId(String),
 }
 
 impl fmt::Display for RepositoryError {
@@ -33,6 +45,10 @@ impl fmt::Display for RepositoryError {
                 f,
                 "multiple payments rows share provider_ref {provider_ref:?}"
             ),
+            RepositoryError::DuplicateGatewayPaymentId(gateway_payment_id) => write!(
+                f,
+                "multiple payments rows share gateway_payment_id {gateway_payment_id:?}"
+            ),
         }
     }
 }
@@ -43,6 +59,7 @@ impl std::error::Error for RepositoryError {
             RepositoryError::Database(e) => Some(e),
             RepositoryError::InvalidData(_) => None,
             RepositoryError::DuplicateProviderReference(_) => None,
+            RepositoryError::DuplicateGatewayPaymentId(_) => None,
         }
     }
 }
