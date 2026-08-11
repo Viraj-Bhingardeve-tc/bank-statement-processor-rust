@@ -1044,7 +1044,12 @@ pub fn detect_duplicates(txns: &mut [Transaction]) {
     // Pass 2: Reference + amount match
     let mut ref_amt: HashMap<String, bool> = HashMap::new();
     for t in txns.iter_mut() {
-        if t.is_opening_balance || t.dup_flag {
+        // Requirement #10 fix: Pass 1 above already exempts Manual (manually
+        // added) rows from duplicate detection — matching the documented
+        // guarantee that they're "not subject to deduplication" — but Pass 2
+        // was missing the same check, so a manually added row sharing a
+        // reference+amount with an imported one could still get flagged.
+        if t.is_opening_balance || t.dup_flag || matches!(t.status, TransactionStatus::Manual) {
             continue;
         }
         let r = t.reference.trim().to_string();
@@ -1117,6 +1122,147 @@ mod tests {
         t.narration = "ATM CASH WITHDRAWAL".to_string();
         let vt = infer_voucher_type(&t, "ATM CASH WITHDRAWAL");
         assert!(matches!(vt, VoucherType::Contra));
+    }
+
+    // ── detect_duplicates (Requirement #10) ───────────────────────────────────
+
+    fn dup_txn(id: &str, date: &str, narration: &str, debit: Option<f64>, reference: &str) -> Transaction {
+        Transaction {
+            date: date.to_string(),
+            narration: narration.to_string(),
+            reference: reference.to_string(),
+            debit,
+            ..Transaction::new(id)
+        }
+    }
+
+    #[test]
+    fn exact_duplicate_flags_only_the_second_occurrence() {
+        // Same date + narration + debit + credit (Transaction::hash()) →
+        // Pass 1. The first occurrence is the "real" one; only the repeat
+        // is marked, matching a bank statement that accidentally repeats a
+        // row (e.g. a PDF page-overlap parsing artifact).
+        let mut txns = vec![
+            dup_txn("t1", "05/04/2026", "AIRTEL POSTPAID BILL", Some(499.0), ""),
+            dup_txn("t2", "05/04/2026", "AIRTEL POSTPAID BILL", Some(499.0), ""),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(!txns[0].dup_flag, "first occurrence is not itself a duplicate");
+        assert!(txns[1].dup_flag, "second occurrence must be flagged");
+        assert!(txns[1].tags.contains(&"DUP".to_string()));
+    }
+
+    #[test]
+    fn same_reference_and_amount_on_different_dates_is_flagged_by_pass_two() {
+        let mut txns = vec![
+            dup_txn("t1", "01/04/2026", "NEFT PAYMENT", Some(2500.0), "UTR12345"),
+            dup_txn("t2", "01/05/2026", "NEFT PAYMENT RETRY", Some(2500.0), "UTR12345"),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(txns[1].dup_flag, "matching reference + amount must be flagged even with a different date/narration");
+    }
+
+    #[test]
+    fn distinct_transactions_are_never_flagged() {
+        let mut txns = vec![
+            dup_txn("t1", "01/04/2026", "AIRTEL POSTPAID BILL", Some(499.0), "REF1"),
+            dup_txn("t2", "02/04/2026", "SALARY CREDIT", None, "REF2"),
+        ];
+        txns[1].credit = Some(50_000.0);
+        detect_duplicates(&mut txns);
+        assert!(!txns[0].dup_flag);
+        assert!(!txns[1].dup_flag);
+    }
+
+    #[test]
+    fn manual_transaction_is_never_flagged_even_with_a_matching_reference_and_amount() {
+        // PRD guarantee (section 6.12 / main.rs add-txn): manually added
+        // transactions are "not subject to deduplication". Pass 1 already
+        // excluded Manual rows; Pass 2 (reference+amount) previously did not
+        // — this is the regression test for that fix.
+        let mut manual = dup_txn("m1", "10/04/2026", "MANUAL ENTRY", Some(2500.0), "UTR12345");
+        manual.status = TransactionStatus::Manual;
+        let mut txns = vec![
+            manual,
+            dup_txn("t2", "01/05/2026", "NEFT PAYMENT", Some(2500.0), "UTR12345"),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(!txns[0].dup_flag, "the manually added row must never be flagged");
+    }
+
+    #[test]
+    fn manual_transaction_does_not_cause_a_real_transaction_to_be_flagged_either() {
+        // The exemption must be bidirectional: a Manual row must not "claim"
+        // a reference+amount key and cause a later real import to be
+        // incorrectly flagged as a duplicate of it.
+        let mut manual = dup_txn("m1", "10/04/2026", "MANUAL ENTRY", Some(2500.0), "UTR12345");
+        manual.status = TransactionStatus::Manual;
+        let mut txns = vec![
+            manual,
+            dup_txn("t2", "01/05/2026", "NEFT PAYMENT", Some(2500.0), "UTR12345"),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(
+            !txns[1].dup_flag,
+            "a real transaction must not be flagged just because a Manual row shares its reference+amount"
+        );
+    }
+
+    #[test]
+    fn opening_balance_row_is_never_flagged() {
+        let mut txns = vec![
+            Transaction {
+                is_opening_balance: true,
+                balance: Some(10_000.0),
+                ..Transaction::new("ob")
+            },
+            dup_txn("t1", "01/04/2026", "AIRTEL POSTPAID BILL", Some(499.0), ""),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(!txns[0].dup_flag);
+    }
+
+    // ── Requirement #5 (imported vs system-generated data-integrity rule) ────
+
+    #[test]
+    fn classify_one_never_mutates_the_raw_imported_fields() {
+        // Classification may freely set vendor/account_head/txn_type/status/
+        // confidence/tags/classification_source/gst_* — but the fields that
+        // represent the actual imported bank-statement row (date, narration,
+        // reference, debit, credit, balance, bank_name, account_no) must come
+        // out byte-identical, or the black/imported color on those Main
+        // Screen columns would be a lie.
+        let mut t = crate::parser::Transaction::new("test");
+        t.date = "05/04/2024".to_string();
+        t.narration = "UPI/DR/239482300111/AIRTEL POSTPAID/AxisB".to_string();
+        t.reference = "239482300111".to_string();
+        t.debit = Some(499.0);
+        t.credit = None;
+        t.balance = Some(11_204.22);
+        t.bank_name = "Axis Bank".to_string();
+        t.account_no = "1234XXXXXX5678".to_string();
+
+        let (date, narration, reference, debit, credit, balance, bank_name, account_no) = (
+            t.date.clone(),
+            t.narration.clone(),
+            t.reference.clone(),
+            t.debit,
+            t.credit,
+            t.balance,
+            t.bank_name.clone(),
+            t.account_no.clone(),
+        );
+
+        classify_one(&mut t, "Bank Ledger", &[], true, true);
+
+        assert_eq!(t.date, date);
+        assert_eq!(t.narration, narration);
+        assert_eq!(t.reference, reference);
+        assert_eq!(t.debit, debit);
+        assert_eq!(t.credit, credit);
+        assert_eq!(t.balance, balance);
+        assert_eq!(t.bank_name, bank_name);
+        assert_eq!(t.account_no, account_no);
     }
 
     #[test]
