@@ -29,6 +29,12 @@ pub struct TallyOpts {
     pub include_narrations: bool,
     pub include_ob: bool,
     pub skip_low_conf: bool,
+    /// Requirement #10: exclude rows the within-batch duplicate detector
+    /// flagged (`Transaction.dup_flag`) — same opt-in pattern as
+    /// `skip_low_conf`, defaulting to `false` (unchanged prior behavior:
+    /// duplicate-flagged rows were always included with no way to exclude
+    /// them, a real risk of double-posting a voucher in Tally).
+    pub skip_duplicates: bool,
 }
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -42,13 +48,70 @@ fn to_tally_date(s: &str) -> String {
     s.replace(['-', '/'], "")
 }
 
-fn to_iso_date(s: &str) -> String {
+pub fn to_iso_date(s: &str) -> String {
     // DD/MM/YYYY → YYYY-MM-DD
     let p: Vec<&str> = s.split('/').collect();
     if p.len() == 3 && p[2].len() == 4 {
         return format!("{}-{}-{}", p[2], p[1].zfill2(), p[0].zfill2());
     }
     s.to_string()
+}
+
+/// Is `s` a plausible `DD/MM/YYYY` calendar date — 3 numeric parts, a
+/// 4-digit year, month 1-12, day 1-31? (Not a full calendar check — e.g.
+/// 31/02/2026 passes — matching the level of rigor the rest of this parser
+/// already applies to dates; see `to_iso_date` above, which accepts the same
+/// shape without range-checking day/month at all.)
+fn is_plausible_ddmmyyyy(s: &str) -> bool {
+    let p: Vec<&str> = s.split('/').collect();
+    if p.len() != 3 || p[2].len() != 4 {
+        return false;
+    }
+    let dd: Option<u32> = p[0].parse().ok();
+    let mm: Option<u32> = p[1].parse().ok();
+    let yyyy_ok = p[2].parse::<i32>().is_ok();
+    matches!(dd, Some(1..=31)) && matches!(mm, Some(1..=12)) && yyyy_ok
+}
+
+/// Validate and ISO-convert the export dialog's From/To Date fields
+/// (Requirement #9 — used by both the Tally-only "Quick Export" modal and
+/// the multi-format export wizard, so a bad date is rejected identically
+/// everywhere instead of being silently mis-filtered).
+///
+/// An empty field means "no bound on that side" and is always valid. On
+/// success, returns `(from_iso, to_iso)` — each `""` when that side was left
+/// blank — ready to drop straight into `TallyOpts`/`AccountingOpts.date_from`/
+/// `date_to` (via `Some(..)` when non-empty). On failure, returns a message
+/// to show the user; the caller must not proceed with export in that case.
+pub fn validate_and_convert_date_range(from_raw: &str, to_raw: &str) -> Result<(String, String), String> {
+    let from_raw = from_raw.trim();
+    let to_raw = to_raw.trim();
+
+    if !from_raw.is_empty() && !is_plausible_ddmmyyyy(from_raw) {
+        return Err("Invalid From Date — use DD/MM/YYYY".to_string());
+    }
+    if !to_raw.is_empty() && !is_plausible_ddmmyyyy(to_raw) {
+        return Err("Invalid To Date — use DD/MM/YYYY".to_string());
+    }
+
+    let from_iso = if from_raw.is_empty() {
+        String::new()
+    } else {
+        to_iso_date(from_raw)
+    };
+    let to_iso = if to_raw.is_empty() {
+        String::new()
+    } else {
+        to_iso_date(to_raw)
+    };
+
+    // Compare as ISO strings — lexicographic order matches calendar order
+    // for zero-padded YYYY-MM-DD, exactly like `in_range`'s own comparisons.
+    if !from_iso.is_empty() && !to_iso.is_empty() && from_iso.as_str() > to_iso.as_str() {
+        return Err("From Date must be on or before To Date".to_string());
+    }
+
+    Ok((from_iso, to_iso))
 }
 
 trait Zfill2 {
@@ -152,6 +215,7 @@ pub fn generate(txns: &[Transaction], opts: &TallyOpts, opening_bal: Option<f64>
                 true
             }
         })
+        .filter(|t| !opts.skip_duplicates || !t.dup_flag)
         .collect();
 
     let mut out = String::with_capacity(64 * 1024);
@@ -365,6 +429,7 @@ pub fn count_preview(txns: &[Transaction], opts: &TallyOpts) -> TallyPreview {
                 true
             }
         })
+        .filter(|t| !opts.skip_duplicates || !t.dup_flag)
         .collect();
 
     let payment = filtered
@@ -394,5 +459,236 @@ pub fn count_preview(txns: &[Transaction], opts: &TallyOpts) -> TallyPreview {
         gst,
         gst_amount,
         skipped: total_real - filtered.len(),
+    }
+}
+
+// ── Tests (Requirement #9: Tally XML export dialog / period filtering) ────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_and_convert_date_range ───────────────────────────────────────
+
+    #[test]
+    fn both_dates_empty_is_valid_and_means_no_bound() {
+        let (from, to) = validate_and_convert_date_range("", "").unwrap();
+        assert_eq!(from, "");
+        assert_eq!(to, "");
+    }
+
+    #[test]
+    fn valid_dates_convert_to_iso() {
+        let (from, to) = validate_and_convert_date_range("05/01/2026", "01/02/2026").unwrap();
+        assert_eq!(from, "2026-01-05");
+        assert_eq!(to, "2026-02-01");
+    }
+
+    #[test]
+    fn invalid_from_date_is_rejected() {
+        let err = validate_and_convert_date_range("31/13/2026", "01/02/2026").unwrap_err();
+        assert!(err.contains("From Date"), "{}", err);
+    }
+
+    #[test]
+    fn invalid_to_date_is_rejected() {
+        let err = validate_and_convert_date_range("05/01/2026", "not-a-date").unwrap_err();
+        assert!(err.contains("To Date"), "{}", err);
+    }
+
+    #[test]
+    fn garbage_text_in_from_date_is_rejected() {
+        let err = validate_and_convert_date_range("abc", "").unwrap_err();
+        assert!(err.contains("From Date"), "{}", err);
+    }
+
+    #[test]
+    fn from_date_after_to_date_is_rejected() {
+        let err = validate_and_convert_date_range("01/02/2026", "05/01/2026").unwrap_err();
+        assert!(err.contains("on or before"), "{}", err);
+    }
+
+    #[test]
+    fn from_date_equal_to_to_date_is_valid() {
+        // A single-day period must be allowed — not treated as an error.
+        let result = validate_and_convert_date_range("05/01/2026", "05/01/2026");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn only_from_date_set_is_valid() {
+        let (from, to) = validate_and_convert_date_range("05/01/2026", "").unwrap();
+        assert_eq!(from, "2026-01-05");
+        assert_eq!(to, "");
+    }
+
+    // ── Period filtering: the exact scenario from Requirement #9-D ───────────
+    // Imported dates: 01-01-2026, 05-01-2026, 15-01-2026, 01-02-2026, 15-02-2026.
+    // Selected period: From 05-01-2026 To 01-02-2026 (inclusive both ends).
+    // Expected: only 05-01, 15-01, 01-02 are exported; 01-01 and 15-02 are not.
+
+    fn dated_txn(id: &str, date: &str, narration: &str) -> Transaction {
+        Transaction {
+            date: date.to_string(),
+            narration: narration.to_string(),
+            debit: Some(100.0),
+            account_head: "Office Expense".to_string(),
+            vendor: "Vendor".to_string(),
+            txn_type: VoucherType::Payment,
+            ..Transaction::new(id)
+        }
+    }
+
+    fn requirement_9d_sample() -> Vec<Transaction> {
+        vec![
+            dated_txn("t1", "01/01/2026", "BEFORE PERIOD - JAN 1"),
+            dated_txn("t2", "05/01/2026", "ON FROM BOUNDARY - JAN 5"),
+            dated_txn("t3", "15/01/2026", "INSIDE PERIOD - JAN 15"),
+            dated_txn("t4", "01/02/2026", "ON TO BOUNDARY - FEB 1"),
+            dated_txn("t5", "15/02/2026", "AFTER PERIOD - FEB 15"),
+        ]
+    }
+
+    fn period_opts() -> TallyOpts {
+        let (from, to) = validate_and_convert_date_range("05/01/2026", "01/02/2026").unwrap();
+        TallyOpts {
+            company: "Acme Co".to_string(),
+            bank_ledger: "HDFC Bank".to_string(),
+            date_from: Some(from),
+            date_to: Some(to),
+            include_ledgers: false,
+            include_narrations: true,
+            include_ob: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn count_preview_includes_exactly_the_three_in_period_transactions() {
+        let p = count_preview(&requirement_9d_sample(), &period_opts());
+        assert_eq!(p.total, 3, "05-Jan, 15-Jan, and 01-Feb must all be included");
+        assert_eq!(p.skipped, 2, "01-Jan and 15-Feb must be excluded");
+    }
+
+    #[test]
+    fn from_date_boundary_is_inclusive() {
+        let xml = generate(&requirement_9d_sample(), &period_opts(), None);
+        assert!(
+            xml.contains("ON FROM BOUNDARY"),
+            "a transaction dated exactly on From Date must be included:\n{}",
+            xml
+        );
+    }
+
+    #[test]
+    fn to_date_boundary_is_inclusive() {
+        let xml = generate(&requirement_9d_sample(), &period_opts(), None);
+        assert!(
+            xml.contains("ON TO BOUNDARY"),
+            "a transaction dated exactly on To Date must be included:\n{}",
+            xml
+        );
+    }
+
+    #[test]
+    fn transactions_outside_the_selected_period_are_excluded() {
+        let xml = generate(&requirement_9d_sample(), &period_opts(), None);
+        assert!(
+            !xml.contains("BEFORE PERIOD"),
+            "a transaction before From Date must not appear:\n{}",
+            xml
+        );
+        assert!(
+            !xml.contains("AFTER PERIOD"),
+            "a transaction after To Date must not appear:\n{}",
+            xml
+        );
+    }
+
+    #[test]
+    fn transaction_inside_the_period_is_included() {
+        let xml = generate(&requirement_9d_sample(), &period_opts(), None);
+        assert!(xml.contains("INSIDE PERIOD"), "{}", xml);
+    }
+
+    #[test]
+    fn empty_from_to_date_exports_the_full_dataset() {
+        let mut opts = period_opts();
+        opts.date_from = None;
+        opts.date_to = None;
+        let p = count_preview(&requirement_9d_sample(), &opts);
+        assert_eq!(p.total, 5, "with no period selected, nothing should be silently dropped");
+    }
+
+    // ── skip_duplicates (Requirement #10) ─────────────────────────────────────
+
+    #[test]
+    fn duplicate_flagged_rows_are_included_by_default() {
+        // Existing behavior must not change for anyone not opting in.
+        let mut txns = requirement_9d_sample();
+        txns[2].dup_flag = true; // "INSIDE PERIOD" row
+        let xml = generate(&txns, &period_opts(), None);
+        assert!(xml.contains("INSIDE PERIOD"), "default behavior must still include flagged rows:\n{}", xml);
+    }
+
+    #[test]
+    fn skip_duplicates_excludes_flagged_rows_when_enabled() {
+        let mut txns = requirement_9d_sample();
+        txns[2].dup_flag = true; // "INSIDE PERIOD" row
+        let mut opts = period_opts();
+        opts.skip_duplicates = true;
+        let xml = generate(&txns, &opts, None);
+        assert!(!xml.contains("INSIDE PERIOD"), "flagged row must be excluded when skip_duplicates is set:\n{}", xml);
+        // The other two in-period, non-flagged rows are unaffected.
+        assert!(xml.contains("ON FROM BOUNDARY"));
+        assert!(xml.contains("ON TO BOUNDARY"));
+    }
+
+    #[test]
+    fn skip_duplicates_reduces_the_preview_count() {
+        let mut txns = requirement_9d_sample();
+        txns[2].dup_flag = true;
+        let mut opts = period_opts();
+        opts.skip_duplicates = true;
+        let p = count_preview(&txns, &opts);
+        assert_eq!(p.total, 2, "the flagged row must not count toward the export total");
+    }
+
+    // ── Real XML validation (not just "did generate() return a String") ─────
+
+    #[test]
+    fn generated_xml_is_well_formed_and_parses_with_a_real_xml_reader() {
+        let xml = generate(&requirement_9d_sample(), &period_opts(), Some(50_000.0));
+        let mut reader = quick_xml::Reader::from_str(&xml);
+        let mut voucher_opens = 0usize;
+        loop {
+            match reader.read_event() {
+                Ok(quick_xml::events::Event::Eof) => break,
+                Ok(quick_xml::events::Event::Empty(e)) | Ok(quick_xml::events::Event::Start(e)) => {
+                    if e.name().as_ref() == b"VOUCHER" {
+                        voucher_opens += 1;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("generated Tally XML is not well-formed: {} in:\n{}", e, xml),
+            }
+        }
+        assert_eq!(
+            voucher_opens, 3,
+            "exactly the 3 in-period transactions should produce a <VOUCHER> each"
+        );
+    }
+
+    #[test]
+    fn empty_transaction_set_still_produces_well_formed_xml() {
+        let xml = generate(&[], &TallyOpts::default(), None);
+        let mut reader = quick_xml::Reader::from_str(&xml);
+        loop {
+            match reader.read_event() {
+                Ok(quick_xml::events::Event::Eof) => break,
+                Ok(_) => {}
+                Err(e) => panic!("empty-input Tally XML is not well-formed: {}", e),
+            }
+        }
     }
 }
