@@ -743,6 +743,48 @@ pub fn classify(
     GROUP_INDIRECT_EXPENSES.to_string()
 }
 
+// ── Party (Sundry Debtor/Creditor) detection ──────────────────────────────────
+
+/// Requirement "Sundry Debtors / Creditors": automatically identify whether a
+/// party is a customer (Debtor) or a vendor/supplier (Creditor) — from actual
+/// evidence, not from amount or credit/debit direction alone.
+///
+/// A transaction is a *party* ledger — as opposed to an expense/income
+/// category ledger — only when the classifier extracted a vendor/customer
+/// name (`vendor` non-empty) **and** never assigned it a specific account
+/// head (`account_head` empty). That is the exact same "posting ledger fell
+/// back to the vendor name" signal `export::excel::posting_ledger` already
+/// uses (and the Tally XML ledger-master generator in `export::tally`
+/// already keys its own Debtor/Creditor split on) — reused here rather than
+/// re-derived, so the Main Screen and both exporters always agree on which
+/// ledgers are parties.
+///
+/// Once it IS a party ledger, `is_receipt` — the transaction's actual
+/// voucher direction (a Tally "Receipt", as opposed to "Payment" or
+/// "Contra"), not just `credit.is_some()` — decides the side: a customer
+/// paying in is a Sundry Debtor, a vendor being paid is a Sundry Creditor.
+/// Passing the voucher-type signal instead of raw credit/debit keeps a
+/// same-bank ATM withdrawal or self-transfer (classified `Contra`) from
+/// ever being miscast as a party, on the rare chance a name got extracted.
+///
+/// Returns `None` when there's insufficient evidence — either a real account
+/// head was already assigned (an existing Direct/Indirect Income, Bank
+/// Charges, Salary, etc. classification, which must never be overwritten) or
+/// no vendor/customer name was ever extracted — leaving the caller to fall
+/// back to keyword/amount-based classification (`classify`) instead of
+/// force-classifying an unknown party.
+pub fn party_group(account_head: &str, vendor: &str, is_receipt: bool) -> Option<&'static str> {
+    if account_head.trim().is_empty() && !vendor.trim().is_empty() {
+        Some(if is_receipt {
+            GROUP_SUNDRY_DEBTORS
+        } else {
+            GROUP_SUNDRY_CREDITORS
+        })
+    } else {
+        None
+    }
+}
+
 /// Classify a batch of transactions.
 /// Returns a Vec of Tally group strings, one per input triple.
 pub fn classify_batch(
@@ -861,5 +903,50 @@ mod tests {
         // doesn't accidentally reject legitimate single-keyword matches.
         let g = classify("Bank Fee", "processing fee", false, 500.0, None);
         assert_eq!(g, GROUP_INDIRECT_EXPENSES);
+    }
+
+    // ── party_group (Requirement #2: Sundry Debtors / Creditors) ─────────────
+
+    #[test]
+    fn customer_receipt_with_known_vendor_and_no_account_head_is_debtor() {
+        // A small ₹500 receipt from a known customer — no keyword or amount
+        // threshold would catch this under the old amount-only fallback, but
+        // the vendor name alone is enough evidence to call it a Debtor.
+        let g = party_group("", "Ramesh Kumar", true);
+        assert_eq!(g, Some(GROUP_SUNDRY_DEBTORS));
+    }
+
+    #[test]
+    fn vendor_payment_with_known_vendor_and_no_account_head_is_creditor() {
+        let g = party_group("", "ABC Traders", false);
+        assert_eq!(g, Some(GROUP_SUNDRY_CREDITORS));
+    }
+
+    #[test]
+    fn existing_account_head_classification_is_never_overwritten_by_party_group() {
+        // Even though a vendor name is also present, a real account head
+        // (Salary, an Indirect Expense) already won — must not be reclassified.
+        let g = party_group("Salary", "Ramesh Kumar", false);
+        assert_eq!(g, None, "an existing account head classification must survive");
+    }
+
+    #[test]
+    fn credit_with_no_vendor_name_is_not_force_classified_as_debtor() {
+        // Insufficient evidence: no party name was ever extracted, so this
+        // must NOT be blindly stamped Sundry Debtors just because it's a credit.
+        let g = party_group("", "", true);
+        assert_eq!(g, None);
+    }
+
+    #[test]
+    fn debit_with_no_vendor_name_is_not_force_classified_as_creditor() {
+        let g = party_group("", "", false);
+        assert_eq!(g, None);
+    }
+
+    #[test]
+    fn whitespace_only_vendor_is_treated_as_no_evidence() {
+        let g = party_group("", "   ", true);
+        assert_eq!(g, None);
     }
 }

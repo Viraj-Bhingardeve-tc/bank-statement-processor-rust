@@ -186,23 +186,11 @@ fn parse_date_ymd(s: &str) -> Option<(i32, u32, u32)> {
 }
 
 // ── Apply status + date + bank filters to a transaction list ──────────────────
-#[cfg(feature = "slint-ui")]
-fn match_status(t: &parser::Transaction, s: &str) -> bool {
-    match s {
-        "unreviewed" => matches!(t.status, parser::TransactionStatus::Unreviewed),
-        "suspense" => matches!(t.status, parser::TransactionStatus::Suspense),
-        "high" => matches!(t.status, parser::TransactionStatus::Classified) && t.confidence >= 0.7,
-        "duplicates" => t.dup_flag,
-        "gst" => t.tags.iter().any(|g| {
-            let u = g.to_uppercase();
-            u.contains("GST") || u.contains("TAX")
-        }),
-        "needs_review" => analytics::effective_needs_review(t),
-        "credits" => t.credit.is_some() && t.debit.is_none(),
-        "debits" => t.debit.is_some() && t.credit.is_none(),
-        _ => true,
-    }
-}
+// `match_status` itself now lives in `analytics::match_status` (Requirement
+// #4: it's the one predicate every Summary-panel hyperlink and the top
+// filter chips both drive through `filter_statuses`/`on_do_filter_changed`),
+// so it's covered by `cargo test --lib` instead of only being reachable from
+// the bin target.
 
 fn apply_txn_filters<'a>(
     txns: &'a [parser::Transaction],
@@ -219,7 +207,7 @@ fn apply_txn_filters<'a>(
             if statuses.is_empty() {
                 return true;
             }
-            statuses.iter().any(|s| match_status(t, s.as_str()))
+            statuses.iter().any(|s| analytics::match_status(t, s.as_str()))
         })
         .filter(|t| {
             if from.is_empty() && to.is_empty() {
@@ -290,6 +278,41 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
             } else {
                 &t.status.to_string()
             };
+            // Ledger for Posting: same fallback rule already used by the CSV/Tally
+            // exporters (export::excel::posting_ledger) — account head if the
+            // transaction was classified into one, else the vendor/customer name
+            // itself acts as the party ledger, else "Unclassified".
+            let ledger = export::excel::posting_ledger(t);
+            // Expense Head: the Tally income/expense group (e.g. "Indirect
+            // Expenses", "Sundry Creditors") the app's existing classification
+            // engine assigns to this account head — same call used for ledger
+            // auto-seeding elsewhere in this file.
+            //
+            // Requirement #2 (Sundry Debtors/Creditors): a bare party ledger —
+            // a vendor/customer name was extracted but no account head was
+            // ever assigned — is decided from that evidence first (customer
+            // receipt → Debtor, vendor payment → Creditor) via
+            // `tally_group_engine::party_group`, matching what the CSV/Tally
+            // exporters already do. `classify`'s own amount-threshold fallback
+            // only runs when there's no such evidence (an account head is
+            // already set, or no vendor name was ever found), so it never
+            // overwrites a real Direct/Indirect Income, Bank Charges, Salary,
+            // etc. classification.
+            let expense_head = tally_group_engine::party_group(
+                &t.account_head,
+                &t.vendor,
+                matches!(t.txn_type, parser::VoucherType::Receipt),
+            )
+            .map(|g| g.to_string())
+            .unwrap_or_else(|| {
+                tally_group_engine::classify(
+                    &t.account_head,
+                    &t.narration,
+                    t.credit.is_some(),
+                    t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0),
+                    None,
+                )
+            });
             TxnRow {
                 bank_name: SharedString::from(t.bank_name.as_str()),
                 account_no: SharedString::from(t.account_no.as_str()),
@@ -300,8 +323,12 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                 credit: SharedString::from(fmt_cell(t.credit).as_str()),
                 balance: SharedString::from(fmt_cell(t.balance).as_str()),
                 vendor: SharedString::from(t.vendor.as_str()),
-                ledger: SharedString::from(t.account_head.as_str()),
-                expense_head: SharedString::from(""),
+                ledger: SharedString::from(ledger),
+                expense_head: SharedString::from(expense_head.as_str()),
+                classification_type: SharedString::from(analytics::confidence_tier(t.confidence)),
+                classification_basis: SharedString::from(
+                    analytics::classification_basis(t).as_str(),
+                ),
                 status_text: SharedString::from(status_display),
                 tags: SharedString::from(t.tags.join(" ").as_str()),
                 review: SharedString::from(review_text),
@@ -309,6 +336,9 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                 has_gst,
                 has_tax,
                 has_dup_tag: has_dup,
+                // This builder always shows the raw imported narration verbatim
+                // (see `narr` above) — never the cleaned/derived text.
+                narration_is_generated: false,
             }
         })
         .collect()
@@ -588,19 +618,27 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .iter()
         .map(|e| e.amount)
         .fold(0.0f64, f64::max);
+    // Running cumulative percent, purely for the donut chart's arc geometry
+    // (Dashboard redesign) — each segment's start angle, not a new figure.
+    let mut cum_pct: i32 = 0;
     let exp_bars: Vec<DashExpBar> = data
         .expenses
         .iter()
-        .map(|e| DashExpBar {
-            label: SharedString::from(e.label.as_str()),
-            w: (if max_exp > 0.0 {
-                e.amount / max_exp
-            } else {
-                0.0
-            }) as f32,
-            amount_str: SharedString::from(fmt_amt(Some(e.amount)).as_str()),
-            color_idx: e.color_idx,
-            pct: e.pct,
+        .map(|e| {
+            let start_pct = cum_pct;
+            cum_pct += e.pct;
+            DashExpBar {
+                label: SharedString::from(e.label.as_str()),
+                w: (if max_exp > 0.0 {
+                    e.amount / max_exp
+                } else {
+                    0.0
+                }) as f32,
+                amount_str: SharedString::from(fmt_amt(Some(e.amount)).as_str()),
+                color_idx: e.color_idx,
+                pct: e.pct,
+                start_pct,
+            }
         })
         .collect();
     h.set_dash_chart_expenses(slint::ModelRc::new(slint::VecModel::from(exp_bars)));
@@ -624,6 +662,14 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .iter()
         .map(|v| {
             let scale = if max_vendor > 0.0 { max_vendor } else { 1.0 };
+            // Net position and Vendor/Customer label — both derived directly
+            // from the same already-aggregated debit/credit totals above
+            // (Dashboard redesign's "Top Vendors / Customers" table), not a
+            // new calculation: a party we've paid more than they've paid us
+            // reads as a Vendor (net outflow), the reverse as a Customer —
+            // the same credit/debit-dominance signal Requirement #2's
+            // Debtor/Creditor detection already uses.
+            let net = v.credit - v.debit;
             DashVendorBar {
                 label: SharedString::from(v.name.as_str()),
                 debit_w: (v.debit / scale) as f32,
@@ -644,6 +690,9 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
                     }
                     .as_str(),
                 ),
+                net_str: SharedString::from(analytics::fmt_short_pub(net.abs()).as_str()),
+                net_is_positive: net >= 0.0,
+                kind: SharedString::from(if v.credit >= v.debit { "Customer" } else { "Vendor" }),
             }
         })
         .collect();
@@ -702,13 +751,22 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
     }
 
     // ── Classification quality ────────────────────────────────────────────────
+    // Requirement #7 reuses these exact thresholds (analytics::confidence_tier)
+    // for the Main Screen table's per-row classification type, so this panel
+    // and that column always agree.
     let total = real.len() as f64;
-    let hi_cnt = real.iter().filter(|t| t.confidence >= 0.8).count();
+    let hi_cnt = real
+        .iter()
+        .filter(|t| analytics::confidence_tier(t.confidence) == "HIGH")
+        .count();
     let med_cnt = real
         .iter()
-        .filter(|t| t.confidence >= 0.4 && t.confidence < 0.8)
+        .filter(|t| analytics::confidence_tier(t.confidence) == "MEDIUM")
         .count();
-    let lo_cnt = real.iter().filter(|t| t.confidence < 0.4).count();
+    let lo_cnt = real
+        .iter()
+        .filter(|t| analytics::confidence_tier(t.confidence) == "LOW")
+        .count();
     h.set_dash_conf_hi_frac((hi_cnt as f32 / total as f32).min(1.0));
     h.set_dash_conf_med_frac((med_cnt as f32 / total as f32).min(1.0));
     h.set_dash_conf_hi_count(SharedString::from(hi_cnt.to_string().as_str()));
@@ -1138,18 +1196,29 @@ fn apply_parse_result(
             .collect()
     };
 
-    // Compute Tally group for each transaction.
-    let tally_inputs: Vec<(String, String, bool, f64)> = real
+    // Compute Tally group for each transaction. Requirement #2 (Sundry
+    // Debtors/Creditors): try the evidence-based party check first (see
+    // build_txn_rows for the full rationale) and only fall back to
+    // keyword/amount classification when it has nothing to go on. This path
+    // runs right after parsing, before classification, so `vendor`/
+    // `account_head` are typically still blank here and `party_group` is a
+    // no-op — kept in step with build_txn_rows regardless, so behavior stays
+    // identical if this function is ever called on already-classified data
+    // (e.g. a re-import that carries prior classifications forward).
+    let tally_groups: Vec<String> = real
         .iter()
         .enumerate()
         .map(|(idx, t)| {
             let narr = cleaned_narrations[idx].cleaned.clone();
             let is_credit = t.credit.is_some();
             let amount = t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0);
-            (t.account_head.clone(), narr, is_credit, amount)
+            tally_group_engine::party_group(&t.account_head, &t.vendor, is_credit)
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| {
+                    tally_group_engine::classify(&t.account_head, &narr, is_credit, amount, None)
+                })
         })
         .collect();
-    let tally_groups = tally_group_engine::classify_batch(&tally_inputs, None);
 
     // Validate each transaction (port of Electron _validateTransaction).
     let validation: Vec<(bool, String)> = real
@@ -1169,12 +1238,17 @@ fn apply_parse_result(
             // the cleaner is confident — it only affects this display column;
             // vendor suggestion and Tally-group classification below still
             // benefit from the cleaned/party-extracted text either way.
-            let narr: String =
-                if !cfg.narr_preserve && meta.confidence >= 0.4 && !meta.cleaned.is_empty() {
-                    meta.cleaned.chars().take(80).collect()
-                } else {
-                    t.narration.chars().take(80).collect()
-                };
+            // Requirement #5: track whether the cell above actually ends up
+            // showing the cleaned/derived text instead of the raw import, so
+            // the table can color it as system-generated rather than always
+            // treating the Narration column as imported.
+            let narration_is_generated =
+                narration_cleaner::narration_display_is_generated(cfg.narr_preserve, meta);
+            let narr: String = if narration_is_generated {
+                meta.cleaned.chars().take(80).collect()
+            } else {
+                t.narration.chars().take(80).collect()
+            };
             let vendor_display = if t.vendor.is_empty() && !meta.party.is_empty() {
                 meta.party.chars().take(40).collect::<String>()
             } else {
@@ -1224,8 +1298,14 @@ fn apply_parse_result(
                 credit: SharedString::from(fmt_cell(t.credit).as_str()),
                 balance: SharedString::from(fmt_cell(t.balance).as_str()),
                 vendor: SharedString::from(vendor_display.as_str()),
-                ledger: SharedString::from(t.account_head.as_str()),
+                // Same fallback rule as build_txn_rows/export::excel::posting_ledger:
+                // account head if classified, else the vendor name is the ledger.
+                ledger: SharedString::from(export::excel::posting_ledger(t)),
                 expense_head: SharedString::from(tally_group),
+                classification_type: SharedString::from(analytics::confidence_tier(t.confidence)),
+                classification_basis: SharedString::from(
+                    analytics::classification_basis(t).as_str(),
+                ),
                 status_text: SharedString::from(status_display),
                 tags: SharedString::from(t.tags.join(" ").as_str()),
                 review: SharedString::from(review_text),
@@ -1233,6 +1313,7 @@ fn apply_parse_result(
                 has_gst,
                 has_tax,
                 has_dup_tag: has_dup,
+                narration_is_generated,
             }
         })
         .collect();
@@ -1591,6 +1672,59 @@ fn record_batch_failure(bp: &mut ui::BatchProgress, file_name: &str, err_msg: &s
 /// Finalize a batch once every file in `remaining` has been processed —
 /// mirrors what was previously the tail of `on_do_batch_folder` after its loop.
 #[cfg(feature = "slint-ui")]
+/// Push the current session summary + per-file results into the Batch
+/// Monitor modal's Slint model.
+///
+/// Requirement #11 fix: this used to be the private body of
+/// `on_do_batch_monitor`, reachable *only* by clicking the modal's own
+/// "Start Batch" button — which, despite its label, never started a batch
+/// (that's `batch-folder()`/`on_do_batch_folder`); it only ever re-read
+/// whatever `st.batch_file_results` already held. Worse, `finish_batch`
+/// updated that state but never called this, so the table stayed stale/empty
+/// even after a batch completed until the user found and clicked that
+/// mislabeled button. Extracting it lets both `finish_batch` (auto-refresh
+/// on completion) and the modal's now-accurately-labeled "Refresh" button
+/// call the exact same, single row-building logic.
+#[cfg(feature = "slint-ui")]
+fn refresh_batch_monitor_display(h: &AppWindow, st: &ui::AppState) {
+    let import_count = st.import_ids.len();
+    let txn_count = st.transactions.iter().filter(|t| !t.is_opening_balance).count();
+    let classified = st
+        .transactions
+        .iter()
+        .filter(|t| matches!(t.status, parser::TransactionStatus::Classified))
+        .count();
+    let unreviewed = st
+        .transactions
+        .iter()
+        .filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed))
+        .count();
+    let log_msg = ui::batch_session_summary(import_count, txn_count, classified, unreviewed);
+    h.set_batch_log(SharedString::from(log_msg.as_str()));
+
+    let file_rows: Vec<BatchFileRow> = st
+        .batch_file_results
+        .iter()
+        .map(|r| BatchFileRow {
+            file: SharedString::from(r.file.as_str()),
+            bank: SharedString::from(if r.bank.is_empty() { "Unknown" } else { r.bank.as_str() }),
+            account: SharedString::from(r.account.as_str()),
+            period: SharedString::from(r.period.as_str()),
+            txns: r.txns as i32,
+            status: SharedString::from(if r.ok { "OK" } else { "FAIL" }),
+            is_ok: r.ok,
+            err_msg: SharedString::from(r.err_msg.as_str()),
+        })
+        .collect();
+    h.set_batch_file_rows(slint::ModelRc::new(slint::VecModel::from(file_rows)));
+    log::info!(
+        "[BatchMonitor] imports={} txns={} classified={}",
+        import_count,
+        txn_count,
+        classified
+    );
+}
+
 fn finish_batch(
     h: &AppWindow,
     state_ref: &Arc<Mutex<ui::AppState>>,
@@ -1710,6 +1844,16 @@ fn finish_batch(
         st.head_filter = String::new();
         st.import_ids.extend(new_import_ids.iter());
         st.batch_file_results = batch_results;
+    }
+
+    // Requirement #11 fix: the Batch Monitor modal's per-file table previously
+    // never reflected a completed batch until the user manually clicked its
+    // (misleadingly labeled "Start Batch") refresh button — auto-refresh it
+    // here so it's accurate the moment the batch finishes, whether or not the
+    // modal happens to be open right now.
+    {
+        let st = state_ref.lock().unwrap();
+        refresh_batch_monitor_display(h, &st);
     }
 
     push_dashboard(h, &all_txns, first_ob);
@@ -2421,6 +2565,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         paused: false,
                         aborted: false,
                     });
+                    // Requirement #11 fix: clear the previous run's Batch
+                    // Monitor table now, not just at the end — otherwise a
+                    // user who opens the monitor while this new batch is
+                    // still in progress would see stale results from the
+                    // *last* batch and could mistake them for live progress.
+                    st.batch_file_results.clear();
+                    refresh_batch_monitor_display(&h, &st);
                 }
                 h.set_batch_running(true);
                 h.set_batch_paused(false);
@@ -3258,13 +3409,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rebuild_rows(&h, &st);
             });
         }
-        // ── Export Excel (XLSX primary, CSV fallback) ─────────────────────────
+        // ── Export Excel (format follows the extension picked in the save
+        // dialog: .xlsx → export_xlsx, .csv → export_csv) ──────────────────────
+        //
+        // Requirement #8 fix: this handler previously never captured an
+        // AppWindow handle at all, so neither success nor failure ever
+        // reached the user — clicking the button gave no visible feedback
+        // either way (a locked/open file, a permission error, or a genuine
+        // success all looked identical: nothing happened on screen). Every
+        // other export handler in this file (Tally XML, Accounting wizard)
+        // already shows a toast on both outcomes; this now matches that
+        // established pattern instead of inventing a new one.
         {
+            let handle = app.as_weak();
             let state_ref = app_state.clone();
             app.on_do_export_excel(move || {
+                let h = match handle.upgrade() {
+                    Some(h) => h,
+                    None => return,
+                };
                 let st = state_ref.lock().unwrap();
                 if st.transactions.is_empty() {
                     log::warn!("[ExportExcel] No transactions to export");
+                    h.set_toast_msg(SharedString::from("No transactions to export"));
+                    h.set_toast_kind(2);
                     return;
                 }
                 let client_name = if st.client_name.is_empty() {
@@ -3288,8 +3456,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                if ext == "csv" {
-                    match export::excel::export_csv(
+                let result = if ext == "csv" {
+                    export::excel::export_csv(
                         &st.transactions,
                         &client_name,
                         &st.tally_ledger,
@@ -3297,12 +3465,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         st.opening_balance,
                         st.closing_balance,
                         &path,
-                    ) {
-                        Ok(n) => log::info!("[ExportExcel] CSV: {} rows → {:?}", n, path),
-                        Err(e) => log::error!("[ExportExcel] CSV failed: {}", e),
-                    }
+                    )
                 } else {
-                    match export::excel::export_xlsx(
+                    export::excel::export_xlsx(
                         &st.transactions,
                         &client_name,
                         &st.tally_ledger,
@@ -3310,9 +3475,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         st.opening_balance,
                         st.closing_balance,
                         &path,
-                    ) {
-                        Ok(n) => log::info!("[ExportExcel] XLSX: {} rows → {:?}", n, path),
-                        Err(e) => log::error!("[ExportExcel] XLSX failed: {}", e),
+                    )
+                };
+                match result {
+                    Ok(n) => {
+                        log::info!("[ExportExcel] {} rows → {:?}", n, path);
+                        h.set_toast_msg(SharedString::from(
+                            format!("Exported {} transaction(s)", n).as_str(),
+                        ));
+                        h.set_toast_kind(1);
+                    }
+                    Err(e) => {
+                        log::error!("[ExportExcel] failed: {}", e);
+                        h.set_toast_msg(SharedString::from(format!("Export error: {}", e).as_str()));
+                        h.set_toast_kind(2);
                     }
                 }
             });
@@ -3347,8 +3523,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 let gstin = h.get_wiz_gstin().to_string();
-                let from = h.get_wiz_date_from().to_string();
-                let to = h.get_wiz_date_to().to_string();
+                // Requirement #9-D: the From/To fields hold whatever the user
+                // typed (DD/MM/YYYY) — TallyOpts/in_range expect ISO
+                // YYYY-MM-DD and compare it lexicographically, so this must
+                // be validated and converted here, once, via the shared
+                // helper, rather than handed through raw (previously this
+                // conversion was missing entirely, silently corrupting the
+                // period filter).
+                let from_raw = h.get_wiz_date_from().to_string();
+                let to_raw = h.get_wiz_date_to().to_string();
+                let (from, to) = match export::tally::validate_and_convert_date_range(&from_raw, &to_raw) {
+                    Ok(pair) => pair,
+                    Err(msg) => {
+                        log::warn!("[ExportTally] {}", msg);
+                        h.set_toast_msg(SharedString::from(msg.as_str()));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                };
                 let opts = export::tally::TallyOpts {
                     company: client_name.clone(),
                     gstin,
@@ -3361,7 +3553,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_narrations: h.get_wiz_opt_narr(),
                     include_ob: h.get_wiz_opt_ob(),
                     skip_low_conf: h.get_wiz_opt_skip_low(),
+                    skip_duplicates: h.get_wiz_opt_skip_dup(),
                 };
+                // Requirement #9-F.6: never hand back a silent, empty export.
+                if export::tally::count_preview(&st.transactions, &opts).total == 0 {
+                    log::warn!("[ExportTally] no transactions in the selected period");
+                    h.set_toast_msg(SharedString::from(
+                        "No transactions fall within the selected period/filters",
+                    ));
+                    h.set_toast_kind(2);
+                    return;
+                }
                 let xml = export::tally::generate(&st.transactions, &opts, st.opening_balance);
                 let suggested = format!("TallyExport_{}.xml", client_name.replace(' ', "_"));
                 let path = match rfd::FileDialog::new()
@@ -3400,6 +3602,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let st = state_ref.lock().unwrap();
                 if st.transactions.is_empty() {
                     log::warn!("[ExportAccounting] No transactions to export");
+                    h.set_toast_msg(SharedString::from("No transactions to export"));
+                    h.set_toast_kind(2);
                     return;
                 }
                 // Wizard fields are now exposed on AppWindow via in-out bindings;
@@ -3407,8 +3611,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let sw_idx = h.get_wiz_sw_idx();
                 let company = h.get_wiz_company().to_string();
                 let gstin = h.get_wiz_gstin().to_string();
-                let from = h.get_wiz_date_from().to_string();
-                let to = h.get_wiz_date_to().to_string();
+                // Requirement #9-D: validate + ISO-convert before this reaches
+                // AccountingOpts — see the identical fix/comment in
+                // on_do_export_tally above.
+                let from_raw = h.get_wiz_date_from().to_string();
+                let to_raw = h.get_wiz_date_to().to_string();
+                let (from, to) = match export::tally::validate_and_convert_date_range(&from_raw, &to_raw) {
+                    Ok(pair) => pair,
+                    Err(msg) => {
+                        log::warn!("[ExportAccounting] {}", msg);
+                        h.set_toast_msg(SharedString::from(msg.as_str()));
+                        h.set_toast_kind(2);
+                        return;
+                    }
+                };
 
                 const FY_OPTS: [&str; 4] = ["2024-25", "2023-24", "2022-23", "2021-22"];
                 const STATE_OPTS: [&str; 9] =
@@ -3425,13 +3641,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .to_string();
 
                 let software = export::accounting::Software::from_idx(sw_idx);
+                let resolved_company = if company.is_empty() {
+                    st.client_name.clone()
+                } else {
+                    company
+                };
+                // Requirement #9-F.1: same guard on_do_export_tally already
+                // has — falling back to the selected client's name is fine,
+                // but if neither is set there's genuinely nothing to put in
+                // the exported file's company field.
+                if resolved_company.trim().is_empty() {
+                    log::warn!("[ExportAccounting] company name is empty");
+                    h.set_toast_msg(SharedString::from("Enter a company name"));
+                    h.set_toast_kind(2);
+                    return;
+                }
                 let opts = export::accounting::AccountingOpts {
                     software,
-                    company: if company.is_empty() {
-                        st.client_name.clone()
-                    } else {
-                        company
-                    },
+                    company: resolved_company,
                     gstin,
                     fy,
                     state_code,
@@ -3445,6 +3672,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_narrations: h.get_wiz_opt_narr(),
                     only_classified: h.get_wiz_opt_classified(),
                     skip_low_conf: h.get_wiz_opt_skip_low(),
+                    skip_duplicates: h.get_wiz_opt_skip_dup(),
                 };
 
                 let validation = export::accounting::validate(&st.transactions, &opts);
@@ -3464,6 +3692,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let content =
                     export::accounting::generate(&st.transactions, &opts, st.opening_balance);
+                let n = export::accounting::filtered_count(&st.transactions, &opts);
                 let ext = software.ext();
                 let label = software.label();
                 let suggested = format!(
@@ -3480,9 +3709,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(p) => p,
                     None => return,
                 };
+                // Requirement #9-G.4/G.5: this previously never showed a
+                // toast on either outcome (same gap fixed for Export to
+                // Excel in Requirement #8) — now matches that established
+                // success/failure pattern.
                 match std::fs::write(&path, content.as_bytes()) {
-                    Ok(_) => log::info!("[ExportAccounting] {} written to {:?}", label, path),
-                    Err(e) => log::error!("[ExportAccounting] write failed: {}", e),
+                    Ok(_) => {
+                        log::info!("[ExportAccounting] {} written to {:?}", label, path);
+                        h.set_toast_msg(SharedString::from(
+                            format!("Exported {} transaction(s) for {}", n, label).as_str(),
+                        ));
+                        h.set_toast_kind(1);
+                    }
+                    Err(e) => {
+                        log::error!("[ExportAccounting] write failed: {}", e);
+                        h.set_toast_msg(SharedString::from(format!("Export error: {}", e).as_str()));
+                        h.set_toast_kind(2);
+                    }
                 }
             });
         }
@@ -3505,8 +3748,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let sw_idx = h.get_wiz_sw_idx();
                 let company = h.get_wiz_company().to_string();
                 let gstin = h.get_wiz_gstin().to_string();
-                let from = h.get_wiz_date_from().to_string();
-                let to = h.get_wiz_date_to().to_string();
+                // Requirement #9-D: validate + ISO-convert here too, so the
+                // preview the user sees before clicking Generate reflects
+                // the exact same (correctly) filtered period Generate will
+                // actually export — previously the preview suffered from
+                // the same broken raw-string comparison bug.
+                let from_raw = h.get_wiz_date_from().to_string();
+                let to_raw = h.get_wiz_date_to().to_string();
+                let (from, to) = match export::tally::validate_and_convert_date_range(&from_raw, &to_raw) {
+                    Ok(pair) => pair,
+                    Err(msg) => {
+                        h.set_export_preview_text(SharedString::from(msg.as_str()));
+                        h.set_wiz_can_export(false);
+                        return;
+                    }
+                };
 
                 const FY_OPTS: [&str; 4] = ["2024-25", "2023-24", "2022-23", "2021-22"];
                 const STATE_OPTS: [&str; 9] =
@@ -3543,6 +3799,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_narrations: h.get_wiz_opt_narr(),
                     only_classified: h.get_wiz_opt_classified(),
                     skip_low_conf: h.get_wiz_opt_skip_low(),
+                    skip_duplicates: h.get_wiz_opt_skip_dup(),
                 };
 
                 let validation = export::accounting::validate(&st.transactions, &opts);
@@ -3550,6 +3807,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let tally_opts = export::tally::TallyOpts {
                     only_classified: opts.only_classified,
                     skip_low_conf: opts.skip_low_conf,
+                    skip_duplicates: opts.skip_duplicates,
                     date_from: opts.date_from.clone(),
                     date_to: opts.date_to.clone(),
                     ..Default::default()
@@ -4245,35 +4503,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.on_do_batch_monitor(move || {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 let st = state_ref.lock().unwrap();
-                let import_count = st.import_ids.len();
-                let txn_count = st.transactions.iter().filter(|t| !t.is_opening_balance).count();
-                let classified = st.transactions.iter()
-                    .filter(|t| matches!(t.status, parser::TransactionStatus::Classified)).count();
-                let unreviewed = st.transactions.iter()
-                    .filter(|t| matches!(t.status, parser::TransactionStatus::Unreviewed)).count();
-                let log_msg = if txn_count == 0 {
-                    String::new()
-                } else {
-                    format!(
-                        "Session: {} import(s)  |  {} transactions  |  {} classified  |  {} unreviewed",
-                        import_count, txn_count, classified, unreviewed
-                    )
-                };
-                h.set_batch_log(SharedString::from(log_msg.as_str()));
-
-                // Build per-file rows model
-                let file_rows: Vec<BatchFileRow> = st.batch_file_results.iter().map(|r| BatchFileRow {
-                    file:    SharedString::from(r.file.as_str()),
-                    bank:    SharedString::from(if r.bank.is_empty() { "Unknown" } else { r.bank.as_str() }),
-                    account: SharedString::from(r.account.as_str()),
-                    period:  SharedString::from(r.period.as_str()),
-                    txns:    r.txns as i32,
-                    status:  SharedString::from(if r.ok { "OK" } else { "FAIL" }),
-                    is_ok:   r.ok,
-                    err_msg: SharedString::from(r.err_msg.as_str()),
-                }).collect();
-                h.set_batch_file_rows(slint::ModelRc::new(slint::VecModel::from(file_rows)));
-                log::info!("[BatchMonitor] imports={} txns={} classified={}", import_count, txn_count, classified);
+                refresh_batch_monitor_display(&h, &st);
             });
         }
 
@@ -5687,7 +5917,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     st.filter_statuses
                         .iter()
-                        .any(|s| match_status(t, s.as_str()))
+                        .any(|s| analytics::match_status(t, s.as_str()))
                 };
                 if !pass {
                     continue;
@@ -6281,6 +6511,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        // ── Dashboard redesign: period-preset lookup ────────────────────────────
+        // A pure lookup (no state mutation) backing the new Period Filter
+        // Bar's Today/This Month/Last Month/Current FY/Prev FY chips —
+        // reuses the exact same preset_range() helper on_do_date_preset
+        // already uses for the Transactions tab, just returning the answer
+        // instead of also mutating the Transactions filter/rebuilding rows.
+        {
+            app.on_do_dash_date_preset(move |preset| -> DashPresetRange {
+                let (from, to) = preset_range(preset.as_str());
+                DashPresetRange {
+                    from: SharedString::from(from.as_str()),
+                    to: SharedString::from(to.as_str()),
+                }
+            });
+        }
+
+        // ── Dashboard redesign: header search box ───────────────────────────────
+        // Real substring match over the currently-loaded transactions
+        // (narration/vendor/reference, case-insensitive) — Slint's own
+        // expression language has no string "contains", so this is done in
+        // Rust and the results sent back as ordinary TxnRow rows via the
+        // same build_txn_rows() helper the Transactions table itself uses.
+        {
+            let handle = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_dash_search(move |query| {
+                let h = match handle.upgrade() {
+                    Some(h) => h,
+                    None => return,
+                };
+                let q = query.to_string().to_lowercase();
+                let st = state_ref.lock().unwrap();
+                let matches: Vec<&parser::Transaction> = if q.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    st.transactions
+                        .iter()
+                        .filter(|t| {
+                            t.narration.to_lowercase().contains(&q)
+                                || t.vendor.to_lowercase().contains(&q)
+                                || t.reference.to_lowercase().contains(&q)
+                        })
+                        .collect()
+                };
+                let rows = build_txn_rows(&matches);
+                drop(st);
+                h.set_dash_search_rows(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+            });
+        }
+
         // ── Periodic license revalidation (Phase 4K.3, every 24h) ────────────
         // A `Repeated` slint::Timer — same free-function family as the
         // single-shot timer already used above for the login-lockout
@@ -6342,6 +6622,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 },
             );
+        }
+
+        // Requirement #12: `last_client_id` was already persisted on every
+        // manual client selection (on_do_select_client, below "Persist last
+        // used client") but nothing ever read it back — the setting saved
+        // correctly but had no effect on reload. Auto-select it now that
+        // every callback (including on_do_select_client itself) is wired,
+        // reusing that exact same selection logic via Slint's generated
+        // `invoke_do_select_client` rather than duplicating it.
+        {
+            let last_client_name: Option<String> = {
+                let db = db_conn.lock().unwrap();
+                db.as_ref().and_then(|conn| {
+                    let cfg = settings::Settings::load(conn);
+                    let last_id = cfg.last_client_id?;
+                    let clients = db::get_clients(conn).ok()?;
+                    db::find_client_name(&clients, last_id)
+                })
+            };
+            if let Some(name) = last_client_name {
+                log::info!("[Startup] auto-selecting last-used client: {}", name);
+                app.invoke_do_select_client(SharedString::from(name.as_str()));
+            }
         }
 
         log::info!("Slint event loop starting…");

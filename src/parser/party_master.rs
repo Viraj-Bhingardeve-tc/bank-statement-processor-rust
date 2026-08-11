@@ -134,6 +134,43 @@ mod tests {
     // ── normalize_vendors ─────────────────────────────────────────────────────
 
     #[test]
+    fn normalize_vendors_never_touches_the_raw_imported_fields() {
+        // Requirement #5's data-integrity rule: vendor canonicalization may
+        // rewrite `vendor`/`account_head` (both already system-generated) but
+        // must never touch the actual imported row fields, or the Main
+        // Screen's black/imported coloring on Date, Narration, Debit,
+        // Credit, and Balance would no longer be true.
+        let mut txns = vec![Transaction {
+            date: "10/04/2024".to_string(),
+            narration: "NEFT/AB1234/GAURAV VIDWANS/HDFC0001234".to_string(),
+            reference: "AB1234".to_string(),
+            debit: Some(2_500.0),
+            credit: None,
+            balance: Some(9_875.5),
+            bank_name: "HDFC Bank".to_string(),
+            account_no: "5678XXXXXX1234".to_string(),
+            vendor: "GAURAV VIDWANS".to_string(),
+            ..Transaction::new("t1")
+        }];
+        let before = txns[0].clone();
+
+        normalize_vendors(&mut txns);
+
+        assert_ne!(
+            txns[0].vendor, before.vendor,
+            "sanity check: normalization should actually have changed the vendor here"
+        );
+        assert_eq!(txns[0].date, before.date);
+        assert_eq!(txns[0].narration, before.narration);
+        assert_eq!(txns[0].reference, before.reference);
+        assert_eq!(txns[0].debit, before.debit);
+        assert_eq!(txns[0].credit, before.credit);
+        assert_eq!(txns[0].balance, before.balance);
+        assert_eq!(txns[0].bank_name, before.bank_name);
+        assert_eq!(txns[0].account_no, before.account_no);
+    }
+
+    #[test]
     fn normalize_collapses_reversed_names() {
         // "GAURAV VIDWANS" and "VIDWANS GAURAV" → both → "Vidwans Gaurav" (V > G).
         let mut txns = vec![
@@ -169,6 +206,72 @@ mod tests {
         // Both resolve to "Amazon" via VENDOR_DICT.
         assert_eq!(txns[0].vendor, "Amazon");
         assert_eq!(txns[1].vendor, "Amazon");
+    }
+
+    // ── Requirement #1 ("Club All Customer / Vendor Names") ─────────────────
+    // End-to-end: all five spec-example variants of the same vendor, mixed
+    // into one batch alongside an unrelated vendor, must all collapse to one
+    // canonical ledger name — and the unrelated vendor must stay untouched.
+
+    #[test]
+    fn normalize_vendors_groups_all_spec_example_variants_together() {
+        let mut txns = vec![
+            Transaction {
+                vendor: "ABC Traders".to_string(),
+                ..Transaction::new("t1")
+            },
+            Transaction {
+                vendor: "ABC TRADERS".to_string(),
+                ..Transaction::new("t2")
+            },
+            Transaction {
+                vendor: "ABC Traders Pvt Ltd".to_string(),
+                ..Transaction::new("t3")
+            },
+            Transaction {
+                vendor: "A.B.C. Traders".to_string(),
+                ..Transaction::new("t4")
+            },
+            Transaction {
+                vendor: "ABC Traders- Mumbai".to_string(),
+                ..Transaction::new("t5")
+            },
+        ];
+        normalize_vendors(&mut txns);
+        let canon = txns[0].vendor.clone();
+        for t in &txns {
+            assert_eq!(
+                t.vendor, canon,
+                "all naming variants of the same vendor must resolve to one canonical name"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_vendors_does_not_merge_unrelated_businesses() {
+        let mut txns = vec![
+            Transaction {
+                vendor: "ABC Traders".to_string(),
+                ..Transaction::new("t1")
+            },
+            Transaction {
+                vendor: "ABC Traders Pvt Ltd".to_string(),
+                ..Transaction::new("t2")
+            },
+            // Different business entirely — shares the "Traders" business
+            // word and even a similar-looking prefix, but is not the same
+            // party and must not be folded into the ABC Traders group.
+            Transaction {
+                vendor: "XYZ Distributors".to_string(),
+                ..Transaction::new("t3")
+            },
+        ];
+        normalize_vendors(&mut txns);
+        assert_eq!(txns[0].vendor, txns[1].vendor, "ABC Traders variants merge");
+        assert_ne!(
+            txns[0].vendor, txns[2].vendor,
+            "unrelated vendor must not be merged just because it also ends in a business word"
+        );
     }
 
     #[test]

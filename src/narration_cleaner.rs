@@ -64,6 +64,18 @@ pub struct NarrationMeta {
     pub confidence: f64,
 }
 
+/// Requirement #5 (imported vs system-generated coloring): does the Main
+/// Screen's Narration cell actually end up showing this cleaned/derived text
+/// instead of the bank's raw imported string?
+///
+/// Mirrors the exact condition `main.rs` already uses to pick which text to
+/// display (Settings: "Preserve original narration" off, cleaner confident,
+/// cleaned text non-empty) — kept as one named, tested function so the two
+/// can never silently drift apart and show one thing while coloring another.
+pub fn narration_display_is_generated(narr_preserve: bool, meta: &NarrationMeta) -> bool {
+    !narr_preserve && meta.confidence >= 0.4 && !meta.cleaned.is_empty()
+}
+
 // ── Static data ──────────────────────────────────────────────────────────────
 
 static VENDOR_DICT: Lazy<Vec<(&'static str, &'static str)>> = Lazy::new(|| {
@@ -605,11 +617,47 @@ pub fn to_title_case(s: &str) -> String {
 
 // ── Ledger name normalization ─────────────────────────────────────────────────
 
+/// Strip a trailing "- branch/location" style suffix from a party name.
+///
+/// A hyphen with whitespace on at least one side is treated as a separator —
+/// bank narrations commonly append a branch/city after one, e.g.
+/// "ABC Traders- Mumbai" or "ABC Traders - Pune Branch" — so that suffix is
+/// dropped, leaving just the core name. A hyphen with no adjacent whitespace
+/// (e.g. "CO-OP", "WI-FI") is left untouched, since that's very likely part
+/// of the name itself rather than a separator, and merging on it would risk
+/// conflating two differently-named vendors.
+///
+/// Byte-indexed scanning is safe here even for multi-byte UTF-8 input: '-'
+/// and ' ' are both single-byte ASCII, so comparing raw bytes never produces
+/// a false match against a UTF-8 continuation byte, and slicing at the
+/// hyphen's index is always on a char boundary.
+fn strip_location_suffix(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'-' {
+            continue;
+        }
+        let before_ws = i > 0 && bytes[i - 1] == b' ';
+        let after_ws = i + 1 < bytes.len() && bytes[i + 1] == b' ';
+        if before_ws || after_ws {
+            return s[..i].trim_end();
+        }
+    }
+    s
+}
+
 pub fn normalize_ledger_name(raw: &str) -> String {
     if raw.is_empty() {
         return raw.to_string();
     }
-    let name_up = raw.to_uppercase().trim().to_string();
+    // Drop a trailing location/branch suffix and abbreviation dots before the
+    // dictionary/token pipeline below, so "ABC Traders- Mumbai" and
+    // "A.B.C. Traders" resolve to the same canonical form as "ABC Traders".
+    // Dots are deleted outright (not turned into spaces) so "A.B.C." fuses
+    // into the single token "ABC" rather than splitting into "A", "B", "C".
+    let no_suffix = strip_location_suffix(raw);
+    let no_dots = no_suffix.replace('.', "");
+    let name_up = no_dots.to_uppercase().trim().to_string();
 
     // Pre-strip dict check
     for (k, canonical) in VENDOR_DICT.iter() {
@@ -814,6 +862,51 @@ pub fn clean_batch_with(narrations: &[String], title_case: bool) -> Vec<Narratio
 mod tests {
     use super::*;
 
+    // ── narration_display_is_generated (Requirement #5) ───────────────────────
+
+    fn meta_with(confidence: f64, cleaned: &str) -> NarrationMeta {
+        NarrationMeta {
+            original: "orig".to_string(),
+            cleaned: cleaned.to_string(),
+            txn_type: "Other".to_string(),
+            party: String::new(),
+            payment_ref: String::new(),
+            confidence,
+        }
+    }
+
+    #[test]
+    fn narr_preserve_on_always_shows_raw_narration() {
+        // "Preserve original narration" wins even when the cleaner is
+        // fully confident — the Narration column must read as imported.
+        let meta = meta_with(1.0, "Cleaned Vendor Name");
+        assert!(!narration_display_is_generated(true, &meta));
+    }
+
+    #[test]
+    fn low_confidence_cleaning_keeps_raw_narration() {
+        let meta = meta_with(0.2, "Cleaned Vendor Name");
+        assert!(!narration_display_is_generated(false, &meta));
+    }
+
+    #[test]
+    fn empty_cleaned_text_keeps_raw_narration() {
+        let meta = meta_with(0.9, "");
+        assert!(!narration_display_is_generated(false, &meta));
+    }
+
+    #[test]
+    fn confident_non_empty_cleaning_is_shown_as_generated() {
+        let meta = meta_with(0.9, "Cleaned Vendor Name");
+        assert!(narration_display_is_generated(false, &meta));
+    }
+
+    #[test]
+    fn confidence_exactly_at_threshold_counts_as_generated() {
+        let meta = meta_with(0.4, "Cleaned Vendor Name");
+        assert!(narration_display_is_generated(false, &meta));
+    }
+
     #[test]
     fn detects_upi() {
         let m = clean("UPI/DR/2394823/AMAZON SELLER PAYMEN/AxisB");
@@ -847,6 +940,68 @@ mod tests {
         let n = normalize_ledger_name("GAURAV VIDWANS");
         // canonical order: V > G → VIDWANS GAURAV
         assert_eq!(n, "Vidwans Gaurav");
+    }
+
+    // ── Requirement #1 ("Club All Customer / Vendor Names") ─────────────────
+    // "ABC Traders", "ABC TRADERS", "ABC Traders Pvt Ltd", "A.B.C. Traders",
+    // and "ABC Traders- Mumbai" must all normalize to the same canonical form.
+
+    #[test]
+    fn normalize_ledger_case_difference_collapses() {
+        assert_eq!(
+            normalize_ledger_name("ABC Traders"),
+            normalize_ledger_name("ABC TRADERS")
+        );
+    }
+
+    #[test]
+    fn normalize_ledger_legal_suffix_collapses() {
+        assert_eq!(
+            normalize_ledger_name("ABC Traders"),
+            normalize_ledger_name("ABC Traders Pvt Ltd")
+        );
+    }
+
+    #[test]
+    fn normalize_ledger_abbreviation_dots_collapse() {
+        assert_eq!(
+            normalize_ledger_name("ABC Traders"),
+            normalize_ledger_name("A.B.C. Traders")
+        );
+    }
+
+    #[test]
+    fn normalize_ledger_trailing_location_suffix_collapses() {
+        assert_eq!(
+            normalize_ledger_name("ABC Traders"),
+            normalize_ledger_name("ABC Traders- Mumbai")
+        );
+        assert_eq!(
+            normalize_ledger_name("ABC Traders"),
+            normalize_ledger_name("ABC Traders - Pune Branch")
+        );
+    }
+
+    #[test]
+    fn normalize_ledger_hyphen_without_whitespace_is_not_a_location_separator() {
+        // "CO-OP" has no space on either side of the hyphen — that's very
+        // likely part of the name itself, not a "name - location" separator,
+        // so it must survive untouched rather than being truncated to "CO".
+        assert_eq!(strip_location_suffix("XYZ CO-OP"), "XYZ CO-OP");
+    }
+
+    #[test]
+    fn normalize_ledger_does_not_merge_different_business_names() {
+        // Same business-word suffix, different core name — must stay distinct.
+        assert_ne!(
+            normalize_ledger_name("ABC Traders"),
+            normalize_ledger_name("XYZ Traders")
+        );
+        // Same prefix, different business-type word — must stay distinct.
+        assert_ne!(
+            normalize_ledger_name("ABC Traders"),
+            normalize_ledger_name("ABC Distributors")
+        );
     }
 
     #[test]

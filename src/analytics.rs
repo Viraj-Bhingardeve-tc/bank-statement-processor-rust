@@ -1,7 +1,8 @@
 // analytics.rs — Dashboard analytics: mirrors JS AnalyticsEngine.compute()
 // Pure data aggregation — no UI, no side-effects.
 
-use crate::parser::{Transaction, TransactionStatus};
+use crate::parser::{Transaction, TransactionStatus, VoucherType};
+use crate::tally_group_engine;
 
 // ── Live validation (port of Electron's `_validateTransaction`) ──────────────
 // Computed fresh on every render rather than stored on the transaction, since
@@ -49,6 +50,83 @@ pub fn effective_needs_review(t: &Transaction) -> bool {
         TransactionStatus::NeedsReview => true,
         TransactionStatus::Suspense | TransactionStatus::Manual => false,
         _ => !validate_transaction(t).0,
+    }
+}
+
+// ── Status-filter predicate ─────────────────────────────────────────────────
+// The one predicate every Main Screen status filter goes through — the top
+// toolbar's filter chips (`filter-changed`) and every clickable Summary-panel
+// item (`drill-filter`, Requirement #4) both resolve to the exact same
+// `s: &str` tokens here via `main.rs`'s `on_do_filter_changed`, so a status
+// filter behaves identically no matter which UI element triggered it.
+
+/// Does transaction `t` belong to the named status/category bucket `s`?
+/// An unrecognised token matches everything (mirrors the "all" filter — no
+/// selection is treated as "show all", never as "show nothing").
+pub fn match_status(t: &Transaction, s: &str) -> bool {
+    match s {
+        "unreviewed" => matches!(t.status, TransactionStatus::Unreviewed),
+        "suspense" => matches!(t.status, TransactionStatus::Suspense),
+        "high" => matches!(t.status, TransactionStatus::Classified) && t.confidence >= 0.7,
+        "duplicates" => t.dup_flag,
+        "gst" => t.tags.iter().any(|g| {
+            let u = g.to_uppercase();
+            u.contains("GST") || u.contains("TAX")
+        }),
+        "needs_review" => effective_needs_review(t),
+        "credits" => t.credit.is_some() && t.debit.is_none(),
+        "debits" => t.debit.is_some() && t.credit.is_none(),
+        _ => true,
+    }
+}
+
+// ── Classification type & basis (Requirement #7) ──────────────────────────
+// Distinct from status/review above: this is "how confident is the engine in
+// this row's classification, and why" — not "does this row need review".
+//
+// NOTE on thresholds: this reuses the >=0.8 HIGH / >=0.4 MEDIUM / else LOW
+// split that already exists — and is already literally labeled "HIGH"/
+// "MED"/"LOW" — in the Summary panel's "Classification Quality" breakdown
+// (`push_summary_extras` in main.rs, computed across every non-opening-
+// balance transaction). That is the only place in the codebase that already
+// names three confidence tiers, so it's treated as authoritative here rather
+// than the *different*, narrower >=0.7 split `match_status`'s "high" filter
+// and the row-coloring in `build_txn_rows` use (a binary distinction, scoped
+// to `Classified`-status rows only, for a different purpose — row/filter
+// highlighting, not a labeled three-tier system). Both are left untouched.
+
+/// HIGH / MEDIUM / LOW confidence tier for `confidence` (0.0–1.0).
+pub fn confidence_tier(confidence: f64) -> &'static str {
+    if confidence >= 0.8 {
+        "HIGH"
+    } else if confidence >= 0.4 {
+        "MEDIUM"
+    } else {
+        "LOW"
+    }
+}
+
+/// Human-readable description of the evidence/mechanism that produced `t`'s
+/// current classification — derived entirely from fields the classification
+/// pipeline itself already sets (`classification_source`, `status`), never
+/// fabricated text.
+pub fn classification_basis(t: &Transaction) -> String {
+    match t.classification_source.as_str() {
+        "rule" => "Matched a saved classification rule".to_string(),
+        "keyword" => "Matched a built-in keyword pattern".to_string(),
+        "ai" => "Classified by AI (third-party)".to_string(),
+        // Covers both a manual edit ("Save"/"Save & Learn") and a manually
+        // added row (+ Add Row) — both set classification_source to "user".
+        "user" => "Manually entered or confirmed by user".to_string(),
+        _ => match t.status {
+            // Not reachable via any current caller (Manual rows always carry
+            // classification_source "user" today — see add-txn in main.rs)
+            // but kept as a defensive, honest fallback rather than silently
+            // falling through to the generic "not yet classified" case below.
+            TransactionStatus::Manual => "Manually added transaction".to_string(),
+            TransactionStatus::Suspense => "Marked as suspense".to_string(),
+            _ => "Not yet classified — no matching rule or keyword found".to_string(),
+        },
     }
 }
 
@@ -288,6 +366,29 @@ pub struct AnalyticsResult {
     pub insights: Insights,
 }
 
+// ── Expense Head resolution (shared with the Main Screen) ─────────────────────
+
+/// Resolve the same "Expense Head" label the Transactions table shows for
+/// this row (see Requirement #2's `main.rs` wiring), so the Dashboard's
+/// expense breakdown/top-category — and (Requirement #8) the Excel/CSV
+/// export — never silently drop or mislabel a transaction relative to what
+/// the user sees on the Main Screen.
+///
+/// A bare party ledger (vendor known, no account head ever assigned) is a
+/// Sundry Debtor/Creditor (`tally_group_engine::party_group`); everything
+/// else falls back to the keyword/amount classifier
+/// (`tally_group_engine::classify`) exactly as the Main Screen does.
+pub fn expense_head_label(t: &Transaction) -> String {
+    let is_receipt = matches!(t.txn_type, VoucherType::Receipt);
+    tally_group_engine::party_group(&t.account_head, &t.vendor, is_receipt)
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| {
+            let is_credit = t.credit.is_some();
+            let amount = t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0);
+            tally_group_engine::classify(&t.account_head, &t.narration, is_credit, amount, None)
+        })
+}
+
 // ── Main compute ──────────────────────────────────────────────────────────────
 
 pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResult {
@@ -305,15 +406,20 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
         }
     }
 
-    let mut exp_by_head: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    // Every debit transaction is bucketed under a resolved Expense Head —
+    // previously, a transaction with no `account_head` (a bare party ledger,
+    // e.g. most vendor payments before Requirement #2) was skipped outright,
+    // silently understating total spend and expense-category percentages in
+    // the chart below instead of surfacing it as Sundry Creditors.
+    let mut exp_by_head: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     for t in &real {
-        if t.debit.is_some() && !t.account_head.is_empty() {
-            *exp_by_head.entry(t.account_head.as_str()).or_default() += t.debit.unwrap_or(0.0);
+        if let Some(debit) = t.debit {
+            *exp_by_head.entry(expense_head_label(t)).or_default() += debit;
         }
     }
-    let mut exp_vec: Vec<(&str, f64)> = exp_by_head.into_iter().collect();
+    let mut exp_vec: Vec<(String, f64)> = exp_by_head.into_iter().collect();
     exp_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let top_exp = exp_vec.first().cloned().unwrap_or(("—", 0.0));
+    let top_exp = exp_vec.first().cloned().unwrap_or(("—".to_string(), 0.0));
 
     let suspense_count = real
         .iter()
@@ -371,7 +477,7 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
     let _ = max_monthly; // used in normalisation below
 
     // ── Expense heads (top 10) ────────────────────────────────────────────────
-    let exp_top10: Vec<(&str, f64)> = exp_vec.iter().take(10).cloned().collect();
+    let exp_top10: Vec<(String, f64)> = exp_vec.iter().take(10).cloned().collect();
     let exp_total: f64 = exp_top10.iter().map(|(_, v)| v).sum();
     let expenses: Vec<ExpHead> = exp_top10
         .iter()
@@ -569,4 +675,470 @@ pub fn fmt_amt(v: Option<f64>) -> String {
 
 pub fn fmt_short_pub(v: f64) -> String {
     fmt_short(v)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::TransactionStatus;
+    use crate::tally_group_engine::{GROUP_INDIRECT_EXPENSES, GROUP_SUNDRY_CREDITORS};
+
+    // ── match_status (Requirement #4: Summary-panel hyperlinks) ──────────────
+    // Every clickable Summary item (and the top filter chips) resolves to one
+    // of these tokens via `on_do_filter_changed` — covering each one here
+    // covers every hyperlink target in the Summary panel.
+
+    #[test]
+    fn unreviewed_filter_matches_only_unreviewed_status() {
+        let unreviewed = Transaction::new("t1"); // status defaults to Unreviewed
+        let suspense = Transaction {
+            status: TransactionStatus::Suspense,
+            ..Transaction::new("t2")
+        };
+        assert!(match_status(&unreviewed, "unreviewed"));
+        assert!(!match_status(&suspense, "unreviewed"));
+    }
+
+    #[test]
+    fn needs_review_filter_matches_needs_review_status() {
+        let needs_review = Transaction {
+            status: TransactionStatus::NeedsReview,
+            ..Transaction::new("t1")
+        };
+        let classified = Transaction {
+            status: TransactionStatus::Classified,
+            confidence: 0.9,
+            date: "01/01/2024".to_string(),
+            narration: "a valid narration".to_string(),
+            debit: Some(100.0),
+            ..Transaction::new("t2")
+        };
+        assert!(match_status(&needs_review, "needs_review"));
+        assert!(!match_status(&classified, "needs_review"));
+    }
+
+    #[test]
+    fn suspense_filter_matches_only_suspense_status() {
+        let suspense = Transaction {
+            status: TransactionStatus::Suspense,
+            ..Transaction::new("t1")
+        };
+        let unreviewed = Transaction::new("t2");
+        assert!(match_status(&suspense, "suspense"));
+        assert!(!match_status(&unreviewed, "suspense"));
+    }
+
+    #[test]
+    fn duplicates_filter_matches_only_dup_flagged_rows() {
+        let dup = Transaction {
+            dup_flag: true,
+            ..Transaction::new("t1")
+        };
+        let not_dup = Transaction::new("t2");
+        assert!(match_status(&dup, "duplicates"));
+        assert!(!match_status(&not_dup, "duplicates"));
+    }
+
+    #[test]
+    fn gst_filter_matches_gst_or_tax_tags_case_insensitively() {
+        let gst = Transaction {
+            tags: vec!["GST".to_string()],
+            ..Transaction::new("t1")
+        };
+        let tax = Transaction {
+            tags: vec!["tax".to_string()],
+            ..Transaction::new("t2")
+        };
+        let neither = Transaction {
+            tags: vec!["DUP".to_string()],
+            ..Transaction::new("t3")
+        };
+        assert!(match_status(&gst, "gst"));
+        assert!(match_status(&tax, "gst"));
+        assert!(!match_status(&neither, "gst"));
+    }
+
+    #[test]
+    fn credits_filter_matches_credit_only_rows() {
+        let credit = Transaction {
+            credit: Some(500.0),
+            ..Transaction::new("t1")
+        };
+        let debit = Transaction {
+            debit: Some(500.0),
+            ..Transaction::new("t2")
+        };
+        assert!(match_status(&credit, "credits"));
+        assert!(!match_status(&debit, "credits"));
+    }
+
+    #[test]
+    fn debits_filter_matches_debit_only_rows() {
+        let debit = Transaction {
+            debit: Some(500.0),
+            ..Transaction::new("t1")
+        };
+        let credit = Transaction {
+            credit: Some(500.0),
+            ..Transaction::new("t2")
+        };
+        assert!(match_status(&debit, "debits"));
+        assert!(!match_status(&credit, "debits"));
+    }
+
+    #[test]
+    fn unrecognised_token_matches_everything_like_the_all_filter() {
+        // "all" itself never reaches match_status (on_do_filter_changed clears
+        // filter_statuses instead), but any other unknown token — or a stale
+        // token from a future UI change — must fail open (show the row)
+        // rather than silently hiding every transaction.
+        let t = Transaction::new("t1");
+        assert!(match_status(&t, "all"));
+        assert!(match_status(&t, "something-unrecognised"));
+    }
+
+    // ── confidence_tier / classification_basis (Requirement #7) ──────────────
+
+    #[test]
+    fn high_confidence_produces_high_tier() {
+        assert_eq!(confidence_tier(0.8), "HIGH");
+        assert_eq!(confidence_tier(1.0), "HIGH");
+        assert_eq!(confidence_tier(0.95), "HIGH");
+    }
+
+    #[test]
+    fn medium_confidence_produces_medium_tier() {
+        assert_eq!(confidence_tier(0.4), "MEDIUM");
+        assert_eq!(confidence_tier(0.6), "MEDIUM");
+        assert_eq!(confidence_tier(0.79), "MEDIUM");
+    }
+
+    #[test]
+    fn low_confidence_and_fallback_produce_low_tier() {
+        assert_eq!(confidence_tier(0.0), "LOW");
+        assert_eq!(confidence_tier(0.39), "LOW");
+        assert_eq!(confidence_tier(0.45 - 0.45), "LOW"); // the classifier's own keyword-tier value, zeroed
+    }
+
+    #[test]
+    fn unclassified_transaction_never_gets_a_misleading_high_tier() {
+        // Transaction::new() defaults confidence to 0.0 and status to
+        // Unreviewed — exactly what an unclassified imported row looks like.
+        let t = Transaction::new("t1");
+        assert_eq!(t.confidence, 0.0);
+        assert_eq!(confidence_tier(t.confidence), "LOW");
+    }
+
+    #[test]
+    fn basis_reflects_rule_match() {
+        let t = Transaction {
+            classification_source: "rule".to_string(),
+            confidence: 0.9,
+            status: TransactionStatus::Classified,
+            ..Transaction::new("t1")
+        };
+        assert_eq!(classification_basis(&t), "Matched a saved classification rule");
+        assert_eq!(confidence_tier(t.confidence), "HIGH");
+    }
+
+    #[test]
+    fn basis_reflects_keyword_match() {
+        let t = Transaction {
+            classification_source: "keyword".to_string(),
+            confidence: 0.45,
+            status: TransactionStatus::Classified,
+            ..Transaction::new("t1")
+        };
+        assert_eq!(classification_basis(&t), "Matched a built-in keyword pattern");
+        assert_eq!(confidence_tier(t.confidence), "MEDIUM");
+    }
+
+    #[test]
+    fn basis_reflects_ai_classification() {
+        let t = Transaction {
+            classification_source: "ai".to_string(),
+            confidence: 0.85,
+            status: TransactionStatus::Classified,
+            ..Transaction::new("t1")
+        };
+        assert_eq!(classification_basis(&t), "Classified by AI (third-party)");
+        assert_eq!(confidence_tier(t.confidence), "HIGH");
+    }
+
+    #[test]
+    fn basis_reflects_user_confirmation() {
+        let t = Transaction {
+            classification_source: "user".to_string(),
+            confidence: 1.0,
+            status: TransactionStatus::Classified,
+            ..Transaction::new("t1")
+        };
+        assert_eq!(
+            classification_basis(&t),
+            "Manually entered or confirmed by user"
+        );
+    }
+
+    #[test]
+    fn basis_reflects_suspense_and_never_claims_a_rule_matched() {
+        let t = Transaction {
+            status: TransactionStatus::Suspense,
+            confidence: 0.0,
+            ..Transaction::new("t1")
+        };
+        assert_eq!(classification_basis(&t), "Marked as suspense");
+        assert_eq!(confidence_tier(t.confidence), "LOW");
+    }
+
+    #[test]
+    fn basis_reflects_genuinely_unclassified_rows_without_fabricating_a_reason() {
+        // No classification_source, still Unreviewed — the honest "nothing
+        // matched" case, not a fabricated rule/keyword explanation.
+        let t = Transaction::new("t1");
+        assert_eq!(
+            classification_basis(&t),
+            "Not yet classified — no matching rule or keyword found"
+        );
+    }
+
+    /// Four real-shaped transactions across two months, mirroring the mix a
+    /// real import produces: two bare party rows (no account head — a
+    /// customer receipt and a vendor payment) and one keyword-classified
+    /// expense row.
+    fn sample_txns() -> Vec<Transaction> {
+        vec![
+            Transaction {
+                date: "05/04/2024".to_string(),
+                credit: Some(1000.0),
+                balance: Some(11000.0),
+                vendor: "Ramesh Kumar".to_string(),
+                bank_name: "HDFC".to_string(),
+                ..Transaction::new("t1")
+            },
+            Transaction {
+                date: "10/04/2024".to_string(),
+                debit: Some(300.0),
+                balance: Some(10700.0),
+                vendor: "ABC Traders".to_string(),
+                bank_name: "HDFC".to_string(),
+                ..Transaction::new("t2")
+            },
+            Transaction {
+                date: "02/05/2024".to_string(),
+                credit: Some(500.0),
+                balance: Some(11200.0),
+                vendor: "Ramesh Kumar".to_string(),
+                bank_name: "HDFC".to_string(),
+                ..Transaction::new("t3")
+            },
+            Transaction {
+                date: "15/05/2024".to_string(),
+                debit: Some(200.0),
+                balance: Some(11000.0),
+                account_head: "Salary".to_string(),
+                bank_name: "HDFC".to_string(),
+                ..Transaction::new("t4")
+            },
+        ]
+    }
+
+    // ── 1-4: summary totals ───────────────────────────────────────────────────
+
+    #[test]
+    fn total_credits_sums_all_credit_amounts() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        assert_eq!(data.summary.total_credit, 1500.0);
+    }
+
+    #[test]
+    fn total_debits_sums_all_debit_amounts() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        assert_eq!(data.summary.total_debit, 500.0);
+    }
+
+    #[test]
+    fn net_cash_flow_is_credits_minus_debits() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        assert_eq!(data.summary.net_flow, 1000.0);
+    }
+
+    #[test]
+    fn transaction_count_excludes_opening_balance_row() {
+        let mut txns = sample_txns();
+        txns.push(Transaction {
+            is_opening_balance: true,
+            balance: Some(10_000.0),
+            ..Transaction::new("ob")
+        });
+        let data = compute(&txns, Some(10_000.0));
+        assert_eq!(data.summary.txn_count, 4, "the synthetic OB row must not count");
+    }
+
+    // ── 5: opening/closing balance ────────────────────────────────────────────
+
+    #[test]
+    fn opening_balance_passes_through_and_closing_is_the_last_balance() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        assert_eq!(data.summary.opening_bal, Some(10_000.0));
+        // Last transaction in input order is t4 (balance 11,000).
+        assert_eq!(data.summary.closing_bal, Some(11_000.0));
+    }
+
+    #[test]
+    fn opening_balance_none_when_not_supplied() {
+        let data = compute(&sample_txns(), None);
+        assert_eq!(data.summary.opening_bal, None);
+    }
+
+    // ── 6: monthly credit/debit aggregation ───────────────────────────────────
+
+    #[test]
+    fn monthly_aggregation_buckets_by_calendar_month() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        assert_eq!(data.monthly.keys, vec!["2024-04", "2024-05"]);
+        assert_eq!(data.monthly.credits, vec![1000.0, 500.0]);
+        assert_eq!(data.monthly.debits, vec![300.0, 200.0]);
+    }
+
+    // ── 7: expense-head aggregation ───────────────────────────────────────────
+
+    #[test]
+    fn expense_head_aggregation_covers_both_party_and_classified_debits() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        // t2 (₹300 debit, vendor known, no account head) must land under
+        // Sundry Creditors — not be silently dropped for lacking an account
+        // head, which is what happened before Requirement #3's fix.
+        let creditors = data
+            .expenses
+            .iter()
+            .find(|e| e.label == GROUP_SUNDRY_CREDITORS)
+            .expect("party debit must be bucketed as Sundry Creditors");
+        assert_eq!(creditors.amount, 300.0);
+        // t4 (₹200 debit, account head "Salary") keeps its real classification.
+        let salary = data
+            .expenses
+            .iter()
+            .find(|e| e.label == GROUP_INDIRECT_EXPENSES)
+            .expect("Salary debit must classify as Indirect Expenses");
+        assert_eq!(salary.amount, 200.0);
+    }
+
+    #[test]
+    fn top_expense_category_is_the_largest_bucket() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        // 300 (Sundry Creditors) > 200 (Indirect Expenses).
+        assert_eq!(data.summary.top_expense_head, GROUP_SUNDRY_CREDITORS);
+        assert_eq!(data.summary.top_expense_amt, 300.0);
+    }
+
+    #[test]
+    fn party_debit_with_no_vendor_or_account_head_falls_back_to_classify() {
+        // No evidence at all (no vendor, no account head) — party_group
+        // correctly declines, and the existing amount/keyword fallback in
+        // `classify` still produces a label rather than being force-set to
+        // Sundry Creditors just because it's a debit.
+        let t = Transaction {
+            debit: Some(50.0),
+            ..Transaction::new("t")
+        };
+        let label = expense_head_label(&t);
+        assert_eq!(label, GROUP_INDIRECT_EXPENSES);
+    }
+
+    // ── 8: vendor/customer aggregation ────────────────────────────────────────
+
+    #[test]
+    fn vendor_aggregation_sums_debit_and_credit_per_vendor() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        let ramesh = data
+            .vendors
+            .iter()
+            .find(|v| v.name == "Ramesh Kumar")
+            .expect("Ramesh Kumar must appear in vendor breakdown");
+        assert_eq!(ramesh.credit, 1500.0);
+        assert_eq!(ramesh.debit, 0.0);
+        let abc = data
+            .vendors
+            .iter()
+            .find(|v| v.name == "ABC Traders")
+            .expect("ABC Traders must appear in vendor breakdown");
+        assert_eq!(abc.debit, 300.0);
+        assert_eq!(abc.credit, 0.0);
+    }
+
+    #[test]
+    fn vendor_count_counts_unique_non_empty_vendor_names() {
+        let data = compute(&sample_txns(), Some(10_000.0));
+        // "Ramesh Kumar" (×2) + "ABC Traders" = 2 unique vendors; t4 has none.
+        assert_eq!(data.summary.vendor_count, 2);
+    }
+
+    // ── 9: empty transaction set ──────────────────────────────────────────────
+
+    #[test]
+    fn empty_transaction_set_produces_zeroed_summary_without_panicking() {
+        let data = compute(&[], None);
+        assert_eq!(data.summary.total_credit, 0.0);
+        assert_eq!(data.summary.total_debit, 0.0);
+        assert_eq!(data.summary.net_flow, 0.0);
+        assert_eq!(data.summary.txn_count, 0);
+        assert_eq!(data.summary.vendor_count, 0);
+        assert_eq!(data.summary.closing_bal, None);
+        assert!(data.monthly.labels.is_empty());
+        assert!(data.expenses.is_empty());
+        assert!(data.vendors.is_empty());
+        assert!(data.cashflow.is_empty());
+        // Insight placeholders, not blank/garbage.
+        assert_eq!(data.insights.max_dr_amt, "—");
+        assert_eq!(data.insights.freq_vendor, "—");
+    }
+
+    // ── 10: date-filtered dashboard data ──────────────────────────────────────
+
+    #[test]
+    fn date_filter_restricts_which_transactions_are_aggregated() {
+        let txns = sample_txns();
+        let filter = DashFilter {
+            from: "01/04/2024",
+            to: "30/04/2024",
+            bank: "",
+            vendor: "",
+            head: "",
+        };
+        let filtered: Vec<Transaction> = filter_txns(&txns, &filter).into_iter().cloned().collect();
+        assert_eq!(filtered.len(), 2, "only the two April rows should survive");
+        let data = compute(&filtered, Some(10_000.0));
+        assert_eq!(data.summary.total_credit, 1000.0);
+        assert_eq!(data.summary.total_debit, 300.0);
+        assert_eq!(data.summary.txn_count, 2);
+    }
+
+    #[test]
+    fn vendor_filter_restricts_to_one_party() {
+        let txns = sample_txns();
+        let filter = DashFilter {
+            from: "",
+            to: "",
+            bank: "",
+            vendor: "ABC Traders",
+            head: "",
+        };
+        let filtered: Vec<Transaction> = filter_txns(&txns, &filter).into_iter().cloned().collect();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].vendor, "ABC Traders");
+    }
+
+    #[test]
+    fn empty_filter_is_a_no_op() {
+        let filter = DashFilter {
+            from: "",
+            to: "",
+            bank: "",
+            vendor: "",
+            head: "",
+        };
+        assert!(filter.is_empty());
+    }
 }
