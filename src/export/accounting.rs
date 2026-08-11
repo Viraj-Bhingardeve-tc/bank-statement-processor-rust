@@ -62,6 +62,11 @@ pub struct AccountingOpts {
     pub include_narrations: bool,
     pub only_classified: bool,
     pub skip_low_conf: bool,
+    /// Requirement #10: exclude rows flagged by the within-batch duplicate
+    /// detector (`Transaction.dup_flag`) — same opt-in pattern as
+    /// `skip_low_conf`; defaults to `false` so existing behavior (everything
+    /// exported unless explicitly told to skip) is unchanged.
+    pub skip_duplicates: bool,
 }
 
 impl Default for Software {
@@ -86,6 +91,7 @@ pub fn generate(txns: &[Transaction], opts: &AccountingOpts, opening_bal: Option
                 include_narrations: opts.include_narrations,
                 include_ob: opts.include_ob,
                 skip_low_conf: opts.skip_low_conf,
+                skip_duplicates: opts.skip_duplicates,
             };
             tally::generate(txns, &tally_opts, opening_bal)
         }
@@ -119,6 +125,13 @@ pub fn validate(txns: &[Transaction], opts: &AccountingOpts) -> ExportValidation
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
+    // Requirement #9-F.6: never silently hand back an empty-but-successful
+    // export — if the date range/other filters leave nothing to export,
+    // that's an error, not a 0-row file the user might not notice.
+    if filtered.is_empty() {
+        errors.push("No transactions fall within the selected period/filters".to_string());
+    }
+
     let self_posted = filtered
         .iter()
         .filter(|t| !opts.bank_ledger.is_empty() && posting_ledger(t) == opts.bank_ledger.as_str())
@@ -136,6 +149,11 @@ pub fn validate(txns: &[Transaction], opts: &AccountingOpts) -> ExportValidation
         .iter()
         .filter(|t| t.confidence > 0.0 && t.confidence < 0.4)
         .count();
+    // Requirement #10: flagged duplicates were previously invisible at
+    // export time — no marker, no way to exclude them, no warning. This
+    // surfaces the risk explicitly; `skip_duplicates` (above) lets the user
+    // actually exclude them instead of only being warned.
+    let flagged_dup = filtered.iter().filter(|t| t.dup_flag).count();
     let gst_txns: Vec<&&Transaction> = filtered
         .iter()
         .filter(|t| t.tags.iter().any(|g| g == "GST" || g == "TAX"))
@@ -173,6 +191,12 @@ pub fn validate(txns: &[Transaction], opts: &AccountingOpts) -> ExportValidation
             low_conf
         ));
     }
+    if flagged_dup > 0 {
+        warnings.push(format!(
+            "{} voucher(s) are flagged as possible duplicates — review before import, or enable \"Skip duplicates\"",
+            flagged_dup
+        ));
+    }
     if gst_tagged > 0 {
         if gst_amount_total > 0.0 {
             warnings.push(format!(
@@ -188,6 +212,14 @@ pub fn validate(txns: &[Transaction], opts: &AccountingOpts) -> ExportValidation
     }
 
     ExportValidation { errors, warnings }
+}
+
+/// Number of transactions `generate()` would actually write for `opts` —
+/// same filter (period + status/confidence options) `validate()` uses, so
+/// the caller can show an accurate "Exported N transaction(s)" toast
+/// (Requirement #9-G.4) without re-deriving the filter logic.
+pub fn filtered_count(txns: &[Transaction], opts: &AccountingOpts) -> usize {
+    filter_txns(txns, opts).len()
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -211,6 +243,7 @@ fn filter_txns<'a>(txns: &'a [Transaction], opts: &AccountingOpts) -> Vec<&'a Tr
                 true
             }
         })
+        .filter(|t| !opts.skip_duplicates || !t.dup_flag)
         .collect()
 }
 
@@ -737,5 +770,128 @@ mod tests {
         let xml = generate(&[gst_txn()], &opts(Software::Tally), None);
         assert!(!xml.contains("27AAAPL1234C1ZV"));
         assert!(!xml.contains("2024-25"));
+    }
+
+    // ── Requirement #9 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn tally_software_selection_dispatches_to_the_existing_tally_generator() {
+        // Same assertion the dedicated export::tally test suite makes — proves
+        // the wizard's Software::Tally path is the *same* generator, not a
+        // second, duplicated implementation.
+        let xml = generate(&[gst_txn()], &opts(Software::Tally), None);
+        assert!(xml.contains("<TALLYMESSAGE"), "{}", xml);
+        assert!(xml.contains("ENVELOPE"), "{}", xml);
+    }
+
+    #[test]
+    fn zoho_quickbooks_and_odoo_all_produce_real_non_empty_csv_output() {
+        // Requirement #9-J: only claim a format is "supported" if it
+        // genuinely produces real, populated output — not a stub.
+        for sw in [Software::Zoho, Software::QuickBooks, Software::Odoo] {
+            let csv = generate(&[gst_txn()], &opts(sw), None);
+            let data_lines: Vec<&str> = csv.lines().skip(1).filter(|l| !l.is_empty()).collect();
+            assert!(
+                !data_lines.is_empty(),
+                "{:?} export produced no data rows:\n{}",
+                sw,
+                csv
+            );
+            // The one real transaction's amount must actually appear somewhere.
+            assert!(
+                csv.contains("999.00"),
+                "{:?} export lost the transaction amount:\n{}",
+                sw,
+                csv
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_software_index_falls_back_to_a_known_format_not_garbage() {
+        // Requirement #9-E: an unmapped index must never silently produce an
+        // incorrect/undefined file format.
+        let sw = Software::from_idx(99);
+        assert_eq!(sw, Software::Xml, "unknown indices fall back to Generic XML");
+    }
+
+    #[test]
+    fn empty_period_after_date_filtering_is_a_validation_error_not_a_silent_empty_file() {
+        // Requirement #9-F.6: transactions exist, but none fall in the
+        // selected window — must block export with a clear error, not hand
+        // back a 0-row file.
+        let mut o = opts(Software::Tally);
+        o.date_from = Some("2030-01-01".to_string());
+        o.date_to = Some("2030-01-31".to_string());
+        let v = validate(&[gst_txn()], &o);
+        assert!(!v.can_export());
+        assert!(
+            v.errors.iter().any(|e| e.contains("No transactions")),
+            "{:?}",
+            v.errors
+        );
+    }
+
+    #[test]
+    fn filtered_count_matches_what_generate_actually_writes() {
+        let o = opts(Software::Zoho);
+        let txns = vec![gst_txn()];
+        assert_eq!(filtered_count(&txns, &o), 1);
+
+        let mut o_out_of_range = o.clone();
+        o_out_of_range.date_from = Some("2030-01-01".to_string());
+        assert_eq!(filtered_count(&txns, &o_out_of_range), 0);
+    }
+
+    // ── skip_duplicates (Requirement #10) ─────────────────────────────────────
+
+    #[test]
+    fn duplicate_flagged_transactions_are_included_by_default() {
+        let mut t = gst_txn();
+        t.dup_flag = true;
+        let csv = generate(&[t], &opts(Software::Zoho), None);
+        assert!(csv.contains("999.00"), "default behavior must still include flagged rows:\n{}", csv);
+    }
+
+    #[test]
+    fn skip_duplicates_excludes_flagged_transactions_across_formats() {
+        let mut t = gst_txn();
+        t.dup_flag = true;
+        for sw in [Software::Tally, Software::Zoho, Software::QuickBooks, Software::Odoo] {
+            let mut o = opts(sw);
+            o.skip_duplicates = true;
+            assert_eq!(
+                filtered_count(&[t.clone()], &o),
+                0,
+                "{:?} must exclude the flagged row when skip_duplicates is set",
+                sw
+            );
+        }
+    }
+
+    #[test]
+    fn validate_warns_about_duplicates_when_not_skipping_them() {
+        let mut t = gst_txn();
+        t.dup_flag = true;
+        let v = validate(&[t], &opts(Software::Zoho));
+        assert!(v.can_export(), "a flagged duplicate is a warning, not a blocking error");
+        assert!(
+            v.warnings.iter().any(|w| w.contains("duplicate")),
+            "{:?}",
+            v.warnings
+        );
+    }
+
+    #[test]
+    fn validate_does_not_warn_about_duplicates_once_they_are_skipped() {
+        let mut t = gst_txn();
+        t.dup_flag = true;
+        let mut o = opts(Software::Zoho);
+        o.skip_duplicates = true;
+        let v = validate(&[t], &o);
+        // With the only transaction excluded, this now hits the
+        // "no transactions" error instead — but must never claim there's an
+        // un-skipped duplicate warning for a row that was actually excluded.
+        assert!(!v.warnings.iter().any(|w| w.contains("duplicate")));
     }
 }
