@@ -34,7 +34,10 @@ pub trait PaymentRepository: Send + Sync {
     /// `payment.dispute.*` webhooks only ever carry the real Razorpay
     /// payment id, never `provider_ref`'s checkout-time payment-link/
     /// subscription id — see `gateway_payment_id`'s doc comment on
-    /// `domain::Payment`.
+    /// `domain::Payment`. Same "more than one match is an error, never
+    /// silently pick one" contract `find_by_provider_ref` has (Finding
+    /// H2) — see [`single_payment_or_duplicate_gateway_error`] and
+    /// migration `0009`.
     async fn find_by_gateway_payment_id(
         &self,
         gateway_payment_id: &str,
@@ -117,6 +120,30 @@ fn single_payment_or_duplicate_error(
     }
 }
 
+/// [`single_payment_or_duplicate_error`]'s twin for `gateway_payment_id`
+/// lookups (end-to-end payment testing pass, Phase 4N). `find_by_gateway_payment_id`
+/// used to `ORDER BY created_at DESC LIMIT 1` — the identical "silently
+/// pick the most recent match" shortcut Finding H2 already fixed for
+/// `provider_ref`, just not caught here at the time. `refund.*`/
+/// `payment.dispute.*` webhooks correlate solely via `gateway_payment_id`
+/// (`domain::Payment::gateway_payment_id`'s doc comment) — silently
+/// mutating the wrong row's payment/license status on a collision would be
+/// exactly as serious as the original H2 finding, so this gets the same
+/// fail-closed treatment rather than being left as a lower-priority
+/// inconsistency.
+fn single_payment_or_duplicate_gateway_error(
+    rows: Vec<PaymentRow>,
+    gateway_payment_id: &str,
+) -> Result<Option<Payment>, RepositoryError> {
+    match rows.len() {
+        0 => Ok(None),
+        1 => rows.into_iter().next().map(Payment::try_from).transpose(),
+        _ => Err(RepositoryError::DuplicateGatewayPaymentId(
+            gateway_payment_id.to_string(),
+        )),
+    }
+}
+
 #[async_trait]
 impl PaymentRepository for PgPaymentRepository {
     async fn insert(&self, new_payment: NewPayment) -> Result<Payment, RepositoryError> {
@@ -159,20 +186,26 @@ impl PaymentRepository for PgPaymentRepository {
         single_payment_or_duplicate_error(rows, provider_ref)
     }
 
+    /// End-to-end payment testing pass (Phase 4N): fetches every matching
+    /// row and lets [`single_payment_or_duplicate_gateway_error`] decide
+    /// what that means — previously `ORDER BY created_at DESC LIMIT 1`,
+    /// the same silent-pick shortcut Finding H2 fixed for
+    /// `find_by_provider_ref`. See migration `0009` for the partial
+    /// `UNIQUE` index that makes a genuine collision unreachable going
+    /// forward.
     async fn find_by_gateway_payment_id(
         &self,
         gateway_payment_id: &str,
     ) -> Result<Option<Payment>, RepositoryError> {
-        let row = sqlx::query_as::<_, PaymentRow>(
+        let rows = sqlx::query_as::<_, PaymentRow>(
             "SELECT id, subscription_id, amount_minor, currency, provider, provider_ref, gateway_payment_id, status, created_at \
-             FROM payments WHERE gateway_payment_id = $1 \
-             ORDER BY created_at DESC LIMIT 1",
+             FROM payments WHERE gateway_payment_id = $1",
         )
         .bind(gateway_payment_id)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
 
-        row.map(Payment::try_from).transpose()
+        single_payment_or_duplicate_gateway_error(rows, gateway_payment_id)
     }
 
     async fn update_status(&self, id: i64, status: PaymentStatus) -> Result<(), RepositoryError> {
@@ -259,5 +292,58 @@ mod tests {
             err,
             RepositoryError::DuplicateProviderReference(_)
         ));
+    }
+
+    // ── End-to-end payment testing pass, Phase 4N: the same H2 fix for
+    //    gateway_payment_id ────────────────────────────────────────────
+
+    fn sample_gateway_row(id: i64, gateway_payment_id: &str) -> PaymentRow {
+        PaymentRow {
+            gateway_payment_id: Some(gateway_payment_id.to_string()),
+            ..sample_row(id, "sub_checkout_ref")
+        }
+    }
+
+    #[test]
+    fn single_payment_or_duplicate_gateway_error_returns_none_for_zero_rows() {
+        let result = single_payment_or_duplicate_gateway_error(vec![], "pay_abc");
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn single_payment_or_duplicate_gateway_error_returns_the_one_match() {
+        let result = single_payment_or_duplicate_gateway_error(
+            vec![sample_gateway_row(1, "pay_abc")],
+            "pay_abc",
+        );
+        let payment = result.unwrap().unwrap();
+        assert_eq!(payment.id, 1);
+        assert_eq!(payment.gateway_payment_id.as_deref(), Some("pay_abc"));
+    }
+
+    #[test]
+    fn single_payment_or_duplicate_gateway_error_rejects_two_rows_sharing_a_gateway_payment_id() {
+        let rows = vec![
+            sample_gateway_row(1, "pay_abc"),
+            sample_gateway_row(2, "pay_abc"),
+        ];
+        let err = single_payment_or_duplicate_gateway_error(rows, "pay_abc").unwrap_err();
+        match err {
+            RepositoryError::DuplicateGatewayPaymentId(gateway_payment_id) => {
+                assert_eq!(gateway_payment_id, "pay_abc");
+            }
+            other => panic!("expected DuplicateGatewayPaymentId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_payment_or_duplicate_gateway_error_rejects_more_than_two_rows_too() {
+        let rows = vec![
+            sample_gateway_row(1, "pay_abc"),
+            sample_gateway_row(2, "pay_abc"),
+            sample_gateway_row(3, "pay_abc"),
+        ];
+        let err = single_payment_or_duplicate_gateway_error(rows, "pay_abc").unwrap_err();
+        assert!(matches!(err, RepositoryError::DuplicateGatewayPaymentId(_)));
     }
 }

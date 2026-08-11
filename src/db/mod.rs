@@ -29,6 +29,15 @@ pub struct Client {
     pub tally_ledger: String,
 }
 
+/// Requirement #12: find the name of the client with `id` in `clients` — the
+/// lookup `main.rs`'s startup auto-select does against
+/// `Settings.last_client_id`. Extracted as a pure function so that "does the
+/// remembered last-used client actually get found" is unit-testable without
+/// a live database or the Slint bindings the rest of that startup step needs.
+pub fn find_client_name(clients: &[Client], id: i64) -> Option<String> {
+    clients.iter().find(|c| c.id == id).map(|c| c.name.clone())
+}
+
 #[derive(Debug, Clone)]
 pub struct ImportRecord {
     pub id: i64,
@@ -1121,6 +1130,32 @@ CREATE TABLE IF NOT EXISTS dedupe_hashes (
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── find_client_name (Requirement #12) ────────────────────────────────────
+
+    fn sample_clients() -> Vec<Client> {
+        vec![
+            Client { id: 1, name: "Acme Co".to_string(), tally_ledger: "HDFC".to_string() },
+            Client { id: 2, name: "Beta Traders".to_string(), tally_ledger: "ICICI".to_string() },
+        ]
+    }
+
+    #[test]
+    fn finds_the_matching_client_by_id() {
+        assert_eq!(find_client_name(&sample_clients(), 2), Some("Beta Traders".to_string()));
+    }
+
+    #[test]
+    fn returns_none_for_an_id_that_no_longer_exists() {
+        // e.g. the remembered last-used client was deleted since — must not
+        // panic or silently select the wrong client.
+        assert_eq!(find_client_name(&sample_clients(), 999), None);
+    }
+
+    #[test]
+    fn returns_none_for_an_empty_client_list() {
+        assert_eq!(find_client_name(&[], 1), None);
+    }
 
     #[test]
     fn in_memory_db_initialises() {

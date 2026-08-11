@@ -1,0 +1,153 @@
+// theme.slint — Shared design system for the whole application.
+//
+// UI-only: this file defines no business logic and touches no Rust
+// properties/callbacks. It exists purely so every screen (Dashboard now,
+// Transactions next) draws from the same spacing/color/radius/typography
+// tokens and the same Button/Badge/Card primitives instead of each screen
+// inventing its own pixel values. `FintechPalette`/`PiePalette` were moved
+// here verbatim from dashboard.slint (same field names, same values) so
+// every existing reference to them keeps working unchanged.
+
+import { HorizontalBox } from "std-widgets.slint";
+
+// ── Spacing scale (8px system) ──────────────────────────────────────────────
+export global Spacing {
+    out property <length> xs:      4px;   // micro spacing
+    out property <length> sm:      8px;   // icon/text spacing
+    out property <length> md:      12px;  // compact spacing
+    out property <length> base:    16px;  // normal spacing
+    out property <length> card:    20px;  // card internal spacing
+    out property <length> section: 24px;  // section spacing
+    out property <length> major:   32px;  // major section spacing
+}
+
+// ── Corner radius scale ──────────────────────────────────────────────────────
+export global Radius {
+    out property <length> sm:   6px;    // inputs, chips
+    out property <length> md:   8px;    // buttons, small controls
+    out property <length> lg:   12px;   // cards
+    out property <length> pill: 999px;  // pills / avatars
+}
+
+// ── Typography scale (size, matching weight used alongside it) ───────────────
+export global Type {
+    out property <length> h1:    20px;  // page title
+    out property <length> h2:    16px;  // card/section title
+    out property <length> h3:    14px;  // sub-heading, KPI value (small cards)
+    out property <length> body:  13px;  // table cell / control text
+    out property <length> small: 11px;  // captions, muted context lines
+    out property <length> micro: 10px;  // badges, table headers
+}
+
+// ── Color system ──────────────────────────────────────────────────────────────
+// Same palette dashboard.slint already used under the name `FintechPalette` —
+// kept as-is (name and fields) so nothing that already binds to it breaks;
+// this is just its new, shared home.
+export global FintechPalette {
+    out property <color> navy:        #062B67;
+    out property <color> primary:     #146EF5;
+    out property <color> page-bg:     #F5F8FC;
+    out property <color> card:        #FFFFFF;
+    out property <color> text:        #15264A;
+    out property <color> text-muted:  #6B7890;
+    out property <color> border:      #E7ECF3;
+    out property <color> success:     #16A34A;
+    out property <color> danger:      #DC2626;
+    out property <color> warning:     #F59E0B;
+    out property <color> purple:      #7C3AED;
+    out property <color> teal:        #0D9488;
+}
+
+// ── Expense-head donut/legend palette (matches the old JS PIE_PALETTE) ───────
+export global PiePalette {
+    pure public function color(idx: int) -> color {
+        idx == 0 ? #146EF5 :
+        idx == 1 ? #16A34A :
+        idx == 2 ? #7C3AED :
+        idx == 3 ? #F59E0B :
+        idx == 4 ? #DC2626 :
+        idx == 5 ? #0D9488 :
+        idx == 6 ? #E65100 :
+        idx == 7 ? #F57F17 :
+        idx == 8 ? #0277BD :
+        #4E342E
+    }
+}
+
+// ── Badge (status/confidence/tag pill) ───────────────────────────────────────
+// One consistent pill shape/padding for every colored status tag in the app
+// (Review status, DUP, GST, TAX, confidence tiers, nav "New" badge, ...).
+// Callers only choose the two colors; the shape/spacing is fixed.
+export component Badge inherits Rectangle {
+    in property <string> text: "";
+    in property <color>  fg:   FintechPalette.text;
+    in property <color>  bg:   FintechPalette.page-bg;
+
+    height: 20px;
+    border-radius: Radius.pill;
+    background: root.bg;
+    width: label.preferred-width + Spacing.sm * 2;
+
+    label := Text {
+        text: root.text;
+        font-size: Type.micro;
+        font-weight: 700;
+        color: root.fg;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// ── Button (primary / secondary / ghost / danger) ────────────────────────────
+// One button component so height/radius/padding/font stay identical
+// everywhere instead of every screen hand-rolling its own Rectangle+TouchArea.
+// `compact` shaves the height down for dense toolbars/filter bars.
+export component AppButton inherits Rectangle {
+    in property <string> text: "";
+    in property <string> variant: "primary"; // primary | secondary | ghost | danger | ai
+    in property <bool>   enabled: true;
+    in property <bool>   compact: false;
+    callback clicked();
+
+    height: root.compact ? 30px : 36px;
+    border-radius: Radius.md;
+    border-width: root.variant == "secondary" || root.variant == "ghost" ? 1px : 0px;
+    border-color: FintechPalette.border;
+    background: !root.enabled ? #C7CEDA
+        : root.variant == "primary"   ? FintechPalette.primary
+        : root.variant == "danger"    ? FintechPalette.danger
+        : root.variant == "ai"        ? FintechPalette.purple
+        : root.variant == "secondary" ? FintechPalette.card
+        : transparent; // ghost
+    opacity: root.enabled ? 1.0 : 0.7;
+
+    ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { if root.enabled { root.clicked(); } }
+    }
+
+    HorizontalBox {
+        padding-left: Spacing.base; padding-right: Spacing.base;
+        padding-top: 0px; padding-bottom: 0px;
+        alignment: center;
+        Text {
+            text: root.text;
+            font-size: Type.body; font-weight: 700;
+            color: root.variant == "primary" || root.variant == "danger" || root.variant == "ai" ? white
+                : !root.enabled ? FintechPalette.text-muted
+                : FintechPalette.text;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+}
+
+// ── Card (base surface for KPI/chart/table containers) ────────────────────────
+export component Card inherits Rectangle {
+    background:    FintechPalette.card;
+    border-radius: Radius.lg;
+    border-width:  1px;
+    border-color:  FintechPalette.border;
+    drop-shadow-blur:     8px;
+    drop-shadow-color:    #0A1F4412;
+    drop-shadow-offset-y: 2px;
+}

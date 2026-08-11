@@ -16,6 +16,7 @@ use hmac::{Hmac, Mac};
 use license_protocol::{CreateCheckoutSessionRequest, LoginRequest, LoginResponse};
 use license_server::auth::password::hash_password;
 use license_server::config::{AppConfig, PaymentConfig, Secret};
+use license_server::repository::payment::PaymentRepository;
 use license_server::state::AppState;
 use license_server::{build_router, db};
 use serde_json::json;
@@ -624,6 +625,162 @@ async fn payments_provider_ref_unique_index_does_not_constrain_null_values() {
         count, 2,
         "multiple NULL provider_ref rows must both be allowed"
     );
+
+    cleanup_user(&pool, user_id).await;
+}
+
+// ── End-to-end payment testing pass, Phase 4N: the same H2 fix, applied to
+//    payments.gateway_payment_id ────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn payments_gateway_payment_id_unique_index_rejects_a_duplicate() {
+    let pool = connected_pool().await;
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at) \
+         VALUES ($1, 'yearly', 'pending_payment', now()) RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let gateway_payment_id = format!("pay_{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, gateway_payment_id, status) \
+         VALUES ($1, 499900, 'INR', 'razorpay', $2, 'succeeded')",
+    )
+    .bind(subscription_id)
+    .bind(&gateway_payment_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Migration 0009's partial UNIQUE index must reject this at the
+    // database level — not merely something application code happens to
+    // avoid doing.
+    let second_insert = sqlx::query(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, gateway_payment_id, status) \
+         VALUES ($1, 499900, 'INR', 'razorpay', $2, 'succeeded')",
+    )
+    .bind(subscription_id)
+    .bind(&gateway_payment_id)
+    .execute(&pool)
+    .await;
+
+    assert!(
+        second_insert.is_err(),
+        "inserting a second payments row with the same gateway_payment_id must be rejected by the database"
+    );
+
+    cleanup_user(&pool, user_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn payments_gateway_payment_id_unique_index_does_not_constrain_null_values() {
+    // Partial (`WHERE gateway_payment_id IS NOT NULL`) since the column is
+    // unset until an activating webhook supplies one (`payment.captured`/
+    // `payment_link.paid`/`subscription.activated`/`.charged`) — multiple
+    // not-yet-activated payments must never collide with each other.
+    let pool = connected_pool().await;
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at) \
+         VALUES ($1, 'yearly', 'pending_payment', now()) RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    for _ in 0..2 {
+        sqlx::query(
+            "INSERT INTO payments (subscription_id, amount_minor, currency, provider, gateway_payment_id, status) \
+             VALUES ($1, 499900, 'INR', 'razorpay', NULL, 'pending')",
+        )
+        .bind(subscription_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payments WHERE subscription_id = $1 AND gateway_payment_id IS NULL",
+    )
+    .bind(subscription_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count, 2,
+        "multiple NULL gateway_payment_id rows must both be allowed"
+    );
+
+    cleanup_user(&pool, user_id).await;
+}
+
+/// Real end-to-end regression for the `find_by_gateway_payment_id`
+/// fix itself (end-to-end payment testing pass, Phase 4N): with the
+/// unique index in place, `find_by_gateway_payment_id` can never observe
+/// more than one row against a real, freshly migrated database — this
+/// proves the happy path (a `refund.created` webhook correlating back to
+/// the one row that actually has this `gateway_payment_id`) still works
+/// against the real repository, not just the mock.
+#[tokio::test]
+#[ignore = "requires a real, reachable Postgres — see PHASE4_DESIGN.md §9"]
+async fn find_by_gateway_payment_id_returns_the_one_real_match() {
+    let pool = connected_pool().await;
+    let email = format!("test-{}@example.com", Uuid::new_v4());
+    let user_id: i64 =
+        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+            .bind(&email)
+            .bind("hash")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let subscription_id: i64 = sqlx::query_scalar(
+        "INSERT INTO subscriptions (user_id, plan_type, status, started_at) \
+         VALUES ($1, 'yearly', 'pending_payment', now()) RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let gateway_payment_id = format!("pay_{}", Uuid::new_v4());
+    let payment_id: i64 = sqlx::query_scalar(
+        "INSERT INTO payments (subscription_id, amount_minor, currency, provider, gateway_payment_id, status) \
+         VALUES ($1, 499900, 'INR', 'razorpay', $2, 'succeeded') RETURNING id",
+    )
+    .bind(subscription_id)
+    .bind(&gateway_payment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let repository = license_server::repository::payment::PgPaymentRepository::new(pool.clone());
+    let found = repository
+        .find_by_gateway_payment_id(&gateway_payment_id)
+        .await
+        .unwrap()
+        .expect("the seeded row must be found");
+    assert_eq!(found.id, payment_id);
 
     cleanup_user(&pool, user_id).await;
 }

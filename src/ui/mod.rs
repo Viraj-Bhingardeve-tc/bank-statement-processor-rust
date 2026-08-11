@@ -14,6 +14,28 @@ pub struct BatchFileResult {
     pub err_msg: String,
 }
 
+/// Requirement #11: the Batch Monitor modal's session summary line — e.g.
+/// "Session: 2 import(s)  |  184 transactions  |  120 classified  |  64
+/// unreviewed" — or blank when nothing has been loaded yet. Extracted out of
+/// `main.rs`'s `refresh_batch_monitor_display` so this piece of "does the
+/// monitor actually show something meaningful" logic is unit-testable
+/// without the Slint bindings that function otherwise depends on.
+pub fn batch_session_summary(
+    import_count: usize,
+    txn_count: usize,
+    classified: usize,
+    unreviewed: usize,
+) -> String {
+    if txn_count == 0 {
+        String::new()
+    } else {
+        format!(
+            "Session: {} import(s)  |  {} transactions  |  {} classified  |  {} unreviewed",
+            import_count, txn_count, classified, unreviewed
+        )
+    }
+}
+
 /// State for a batch-folder import that's paused waiting for a PDF password
 /// — or for a user-requested pause/abort (see `paused`/`aborted` below).
 /// Old app's batch loop can `await` a per-file password prompt inline
@@ -213,5 +235,30 @@ mod tests {
     #[test]
     fn fmt_inr_negative() {
         assert_eq!(fmt_inr(-1000.0), "-1,000.00");
+    }
+
+    // ── batch_session_summary (Requirement #11) ───────────────────────────────
+
+    #[test]
+    fn batch_session_summary_is_blank_when_nothing_has_been_loaded() {
+        assert_eq!(batch_session_summary(0, 0, 0, 0), "");
+    }
+
+    #[test]
+    fn batch_session_summary_reports_all_four_counts() {
+        let s = batch_session_summary(2, 184, 120, 64);
+        assert_eq!(
+            s,
+            "Session: 2 import(s)  |  184 transactions  |  120 classified  |  64 unreviewed"
+        );
+    }
+
+    #[test]
+    fn batch_session_summary_is_non_blank_whenever_transactions_are_loaded() {
+        // Even with 0 imports/classified — e.g. after Batch Monitor's own
+        // display is refreshed following a "Load All into Session" rather
+        // than a batch folder run — the summary must still say something
+        // rather than silently looking like nothing happened.
+        assert_ne!(batch_session_summary(0, 5, 0, 5), "");
     }
 }

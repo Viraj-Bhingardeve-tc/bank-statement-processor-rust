@@ -276,6 +276,35 @@ impl PaymentService {
         }
     }
 
+    /// [`find_payment_by_provider_ref_or_none`]'s twin for
+    /// `gateway_payment_id` lookups (end-to-end payment testing pass,
+    /// Phase 4N) — same reasoning, applied to `refund.*`/
+    /// `payment.dispute.*` correlation instead of activation correlation:
+    /// treat `RepositoryError::DuplicateGatewayPaymentId` the same as "no
+    /// match" rather than letting it surface as a `PaymentOperationError`
+    /// and trigger a pointless Razorpay redelivery this server can never
+    /// safely resolve until the underlying duplicate rows are fixed.
+    async fn find_payment_by_gateway_payment_id_or_none(
+        &self,
+        gateway_payment_id: &str,
+    ) -> Result<Option<Payment>, PaymentOperationError> {
+        match self
+            .payment_repository
+            .find_by_gateway_payment_id(gateway_payment_id)
+            .await
+        {
+            Ok(payment) => Ok(payment),
+            Err(RepositoryError::DuplicateGatewayPaymentId(_)) => {
+                tracing::warn!(
+                    gateway_payment_id = %gateway_payment_id,
+                    "multiple payments rows share this gateway_payment_id; refusing to guess which one this webhook concerns"
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn resolve_payment_captured(
         &self,
         payload: &RazorpayWebhookPayload,
@@ -605,8 +634,7 @@ impl PaymentService {
         gateway_payment_id: &str,
     ) -> Result<Option<(Payment, Option<AffectedLicense>)>, PaymentOperationError> {
         let Some(payment) = self
-            .payment_repository
-            .find_by_gateway_payment_id(gateway_payment_id)
+            .find_payment_by_gateway_payment_id_or_none(gateway_payment_id)
             .await?
         else {
             return Ok(None);
@@ -1089,17 +1117,28 @@ mod tests {
             Ok(first)
         }
 
+        /// End-to-end payment testing pass (Phase 4N): mirrors the real
+        /// `PgPaymentRepository`'s "more than one match is an error, never
+        /// silently pick one" semantics — same reasoning `find_by_provider_ref`
+        /// above already documents for Finding H2, just applied to the
+        /// gateway id refund/dispute correlation reads (impossible to
+        /// arrange against the real, migration-`0009`-constrained schema,
+        /// so this mock is the only practical way to exercise it).
         async fn find_by_gateway_payment_id(
             &self,
             gateway_payment_id: &str,
         ) -> Result<Option<Payment>, RepositoryError> {
-            Ok(self
-                .payments
-                .lock()
-                .unwrap()
+            let payments = self.payments.lock().unwrap();
+            let mut matches = payments
                 .iter()
-                .find(|p| p.gateway_payment_id.as_deref() == Some(gateway_payment_id))
-                .cloned())
+                .filter(|p| p.gateway_payment_id.as_deref() == Some(gateway_payment_id));
+            let first = matches.next().cloned();
+            if matches.next().is_some() {
+                return Err(RepositoryError::DuplicateGatewayPaymentId(
+                    gateway_payment_id.to_string(),
+                ));
+            }
+            Ok(first)
         }
 
         async fn update_status(
@@ -3175,6 +3214,77 @@ mod tests {
         assert!(
             result.is_ok(),
             "an unmatched gateway_payment_id must not fail the webhook call"
+        );
+    }
+
+    /// End-to-end payment testing pass (Phase 4N): if two local `payments`
+    /// rows ever shared a `gateway_payment_id` (unreachable against a
+    /// freshly migrated schema since migration `0009`, but the mock
+    /// exercises the defense-in-depth path — see
+    /// `MockPaymentRepository::find_by_gateway_payment_id`'s doc comment),
+    /// a refund webhook must refuse to guess which row it concerns rather
+    /// than surfacing `DuplicateGatewayPaymentId` as a `500` and triggering
+    /// pointless Razorpay redelivery.
+    #[tokio::test]
+    async fn refund_referencing_an_ambiguous_gateway_payment_id_is_acknowledged_not_errored() {
+        let first = sample_activated_payment(1, 10, "pay_shared", PaymentStatus::Succeeded);
+        let second = sample_activated_payment(2, 11, "pay_shared", PaymentStatus::Succeeded);
+        let (service, payments, ..) =
+            service_with_reconciliation(vec![first, second], vec![], vec![], vec![]);
+
+        let result = service
+            .process_webhook_event("evt_1", refund_payload("refund.created", "pay_shared"))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "an ambiguous gateway_payment_id must not fail the webhook call"
+        );
+        let statuses: Vec<PaymentStatus> = payments
+            .payments
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![PaymentStatus::Succeeded, PaymentStatus::Succeeded],
+            "neither ambiguous row may be mutated"
+        );
+    }
+
+    /// Same ambiguity, for `payment.dispute.created` — a different
+    /// `resolve_*` method, but funnels through the same
+    /// `find_payment_and_license`/`find_payment_by_gateway_payment_id_or_none`
+    /// path as the refund case above.
+    #[tokio::test]
+    async fn dispute_created_referencing_an_ambiguous_gateway_payment_id_is_acknowledged_not_errored(
+    ) {
+        let first = sample_activated_payment(1, 10, "pay_shared", PaymentStatus::Succeeded);
+        let second = sample_activated_payment(2, 11, "pay_shared", PaymentStatus::Succeeded);
+        let (service, payments, ..) =
+            service_with_reconciliation(vec![first, second], vec![], vec![], vec![]);
+
+        let result = service
+            .process_webhook_event("evt_1", dispute_created_payload("pay_shared"))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "an ambiguous gateway_payment_id must not fail the webhook call"
+        );
+        let statuses: Vec<PaymentStatus> = payments
+            .payments
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![PaymentStatus::Succeeded, PaymentStatus::Succeeded],
+            "neither ambiguous row may be mutated"
         );
     }
 

@@ -241,7 +241,15 @@ impl HttpRazorpayClient {
 /// Subscriptions (genuine recurring charges), unaffected — only the
 /// Payment Links substitute below is test-mode-only, since Payment Links
 /// are a single one-time charge, not a recurring one.
-fn is_test_mode_key(key_id: &str) -> bool {
+///
+/// `pub(crate)`: also used by `config::AppConfig::from_vars` to require
+/// `RAZORPAY_MONTHLY_PLAN_ID`/`RAZORPAY_YEARLY_PLAN_ID` at startup whenever
+/// a live key is configured — the same "fail at deploy time, not at the
+/// first affected checkout" reasoning as `ConfigError::
+/// IncompleteRazorpayCredentials`. Sharing this function (instead of a
+/// second `starts_with("rzp_test_")` in `config.rs`) keeps the two checks
+/// from ever silently drifting apart on what counts as "live."
+pub(crate) fn is_test_mode_key(key_id: &str) -> bool {
     key_id.starts_with("rzp_test_")
 }
 

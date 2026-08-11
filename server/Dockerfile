@@ -12,6 +12,17 @@
 ########################################################################
 FROM rust:1.90-slim-bookworm AS builder
 
+# pkg-config + libssl-dev: reqwest (server/Cargo.toml) pulls in openssl-sys
+# transitively via its default native-tls backend (see the runtime stage's
+# own libssl3 comment below) — openssl-sys's build script needs both to
+# compile against system OpenSSL. Without them `cargo build` fails at the
+# openssl-sys build script with "Could not find directory of OpenSSL
+# installation" / "pkg-config could not be found", even though the final
+# binary only needs the runtime stage's libssl3 to link against.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build
 
 # Workspace manifest + lockfile first (PHASE4_DESIGN.md §1.1: root
@@ -83,11 +94,11 @@ EXPOSE 8080
 #   --interval=30s:      matches docker-compose.yml's Postgres healthcheck
 #                         cadence — an app-tier check doesn't need to run
 #                         more often than that.
-#   --timeout=5s:         generous for a same-container loopback request;
-#                         the busybox wget call itself times out sooner
-#                         (see -T 3 below), so a hung connection is always
-#                         reported as a clean CMD failure, never something
-#                         Docker has to kill mid-probe.
+#   --timeout=5s:         generous for a same-container loopback request; a
+#                         hung connection is killed by Docker itself at this
+#                         bound and reported as a failed probe (no -T of
+#                         busybox wget's own — see that flag's own note
+#                         below for why).
 #   --start-period=10s:   matches Postgres's own start_period — gives the
 #                         process time to run migrations (main.rs) before
 #                         an early failure could count toward --retries.
@@ -100,11 +111,18 @@ EXPOSE 8080
 #                         stdout/stderr, so this only prevents noise
 #                         appearing in `docker inspect`'s captured log on
 #                         every run.
-#   wget -T 3:            a 3s request timeout, comfortably under this
-#                         instruction's own --timeout=5s.
+#   no wget -T:           deliberately omitted, not just left at its
+#                         default. `busybox-static` 1.35.0's wget -T
+#                         (every bookworm point release tested, including
+#                         the original 2022 release) segfaults the moment
+#                         a timeout is requested — reproduced with plain
+#                         HTTP/HTTPS targets outside this image too, so
+#                         it's a real bug in that build, not something
+#                         specific to this healthcheck. `--timeout=5s`
+#                         above already bounds a hung probe without it.
 #   -O /dev/null:          discards the response body — this check only
 #                         cares about the HTTP outcome, not the content.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD busybox wget -q -T 3 -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+    CMD busybox wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
 
 ENTRYPOINT ["/usr/local/bin/license-server"]

@@ -134,12 +134,16 @@ pub struct DatabaseConfig {
 /// username against Razorpay's API, so it's treated as sensitive too, not
 /// just the secret proper); the two plan ids are Razorpay-side
 /// configuration identifiers, not credentials, so they stay plain
-/// `Option<String>`. All five independently optional — a missing set means
-/// Razorpay isn't configured in this environment (`PHASE4_DESIGN.md` §6),
-/// a normal state for local dev/early staging, not a startup failure
-/// (unchanged behavior from before this phase — see
-/// `AppConfig::from_vars`'s doc comment on the one new check this phase
-/// *does* add: internal consistency between `key_id` and `key_secret`).
+/// `Option<String>`. All five are optional at the type level — a fully
+/// unset set means Razorpay isn't configured in this environment
+/// (`PHASE4_DESIGN.md` §6), a normal state for local dev/early staging,
+/// not a startup failure — but `AppConfig::from_vars` enforces two
+/// consistency rules a bare `Option` can't express on its own: `key_id`
+/// and `key_secret` must be set together (`ConfigError::
+/// IncompleteRazorpayCredentials`), and a *live* `key_id` requires both
+/// plan ids too (`ConfigError::LiveRazorpayKeyMissingPlanIds`) — a
+/// test-mode key does not, since `razorpay::HttpRazorpayClient` never
+/// needs a Plan id under one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaymentConfig {
     pub razorpay_key_id: Option<Secret<String>>,
@@ -327,6 +331,30 @@ impl AppConfig {
             return Err(ConfigError::IncompleteRazorpayCredentials);
         }
 
+        let razorpay_monthly_plan_id = get("RAZORPAY_MONTHLY_PLAN_ID");
+        let razorpay_yearly_plan_id = get("RAZORPAY_YEARLY_PLAN_ID");
+        // A live key with a Plan id missing would otherwise only fail the
+        // first time a real customer picks that plan — see
+        // `ConfigError::LiveRazorpayKeyMissingPlanIds`'s own doc comment.
+        // Test-mode keys are exempt: `razorpay::HttpRazorpayClient::
+        // create_checkout` falls back to Payment Links for `monthly`/
+        // `yearly` under one, so no Plan id is ever needed there, and
+        // requiring one anyway would defeat the whole point of that
+        // fallback (local dev/testing without a Razorpay-dashboard Plan
+        // provisioned).
+        if let Some(key_id) = razorpay_key_id.as_deref() {
+            if !crate::razorpay::is_test_mode_key(key_id) {
+                let monthly_missing = razorpay_monthly_plan_id.is_none();
+                let yearly_missing = razorpay_yearly_plan_id.is_none();
+                if monthly_missing || yearly_missing {
+                    return Err(ConfigError::LiveRazorpayKeyMissingPlanIds {
+                        monthly_missing,
+                        yearly_missing,
+                    });
+                }
+            }
+        }
+
         // Zero is rejected, not just "any valid u64": `reconciliation::spawn`
         // feeds this straight into `tokio::time::interval`, which panics
         // outright on a zero-duration period ("`period` must be non-zero.",
@@ -397,8 +425,8 @@ impl AppConfig {
                 razorpay_key_id: razorpay_key_id.map(Secret::new),
                 razorpay_key_secret: razorpay_key_secret.map(Secret::new),
                 razorpay_webhook_secret: get("RAZORPAY_WEBHOOK_SECRET").map(Secret::new),
-                razorpay_monthly_plan_id: get("RAZORPAY_MONTHLY_PLAN_ID"),
-                razorpay_yearly_plan_id: get("RAZORPAY_YEARLY_PLAN_ID"),
+                razorpay_monthly_plan_id,
+                razorpay_yearly_plan_id,
             },
             reconciliation: ReconciliationConfig {
                 interval_secs: reconciliation_interval_secs,
@@ -436,6 +464,24 @@ pub enum ConfigError {
     /// both unset. No message payload for the same reason as
     /// `InvalidDatabaseUrl` — whichever *is* set could be a real secret.
     IncompleteRazorpayCredentials,
+    /// `RAZORPAY_KEY_ID` is a live key (does not start with `rzp_test_`)
+    /// but `RAZORPAY_MONTHLY_PLAN_ID` and/or `RAZORPAY_YEARLY_PLAN_ID` is
+    /// unset. Mirrors `IncompleteRazorpayCredentials`'s own reasoning:
+    /// `razorpay::HttpRazorpayClient::create_checkout` only skips the real
+    /// Subscriptions API (and its Plan-id requirement) for `monthly`/
+    /// `yearly` under a *test-mode* key (`razorpay::is_test_mode_key`) — a
+    /// live key with a Plan id left unset would only surface as a failed
+    /// checkout (`RazorpayError::NotConfigured`, a `PROVIDER_ERROR`
+    /// response) the first time a real customer picks that plan, not at
+    /// deploy time. No message payload: like `IncompleteRazorpayCredentials`,
+    /// this only fires when `RAZORPAY_KEY_ID` is already known to be set,
+    /// and the plan ids themselves (unlike the key/secret) are never
+    /// secret, so `Display` below can and does name exactly which one(s)
+    /// are missing without any redaction concern.
+    LiveRazorpayKeyMissingPlanIds {
+        monthly_missing: bool,
+        yearly_missing: bool,
+    },
     /// (Phase 4K.4) `RECONCILIATION_INTERVAL_SECS` set but not a valid
     /// non-negative integer.
     InvalidReconciliationInterval(String),
@@ -485,6 +531,26 @@ impl fmt::Display for ConfigError {
                 "RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must both be set, or both left unset \
                  (values are not logged, since either may be a real secret)"
             ),
+            ConfigError::LiveRazorpayKeyMissingPlanIds {
+                monthly_missing,
+                yearly_missing,
+            } => {
+                let missing = match (monthly_missing, yearly_missing) {
+                    (true, true) => "RAZORPAY_MONTHLY_PLAN_ID and RAZORPAY_YEARLY_PLAN_ID are",
+                    (true, false) => "RAZORPAY_MONTHLY_PLAN_ID is",
+                    (false, true) => "RAZORPAY_YEARLY_PLAN_ID is",
+                    (false, false) => unreachable!(
+                        "LiveRazorpayKeyMissingPlanIds is only constructed when at least one is missing"
+                    ),
+                };
+                write!(
+                    f,
+                    "RAZORPAY_KEY_ID is a live key (rzp_live_...) but {missing} not set — a real \
+                     customer picking that plan would only discover this at checkout. Set it to a \
+                     Plan id created in the Razorpay dashboard, or use a test-mode key \
+                     (rzp_test_...) for this environment"
+                )
+            }
             ConfigError::InvalidReconciliationInterval(v) => write!(
                 f,
                 "invalid RECONCILIATION_INTERVAL_SECS value {v:?} (expected a positive, non-zero \
@@ -851,6 +917,104 @@ mod tests {
         assert!(err.to_string().contains("xyz"));
     }
 
+    // ── Live-key Plan-id requirement ─────────────────────────────────────
+
+    #[test]
+    fn a_live_key_with_neither_plan_id_set_is_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RAZORPAY_KEY_ID", "rzp_live_realkeyid"),
+            ("RAZORPAY_KEY_SECRET", "realsecret"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::LiveRazorpayKeyMissingPlanIds {
+                monthly_missing: true,
+                yearly_missing: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_live_key_missing_only_the_monthly_plan_id_is_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RAZORPAY_KEY_ID", "rzp_live_realkeyid"),
+            ("RAZORPAY_KEY_SECRET", "realsecret"),
+            ("RAZORPAY_YEARLY_PLAN_ID", "plan_yearly"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::LiveRazorpayKeyMissingPlanIds {
+                monthly_missing: true,
+                yearly_missing: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_live_key_missing_only_the_yearly_plan_id_is_a_config_error() {
+        let result = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RAZORPAY_KEY_ID", "rzp_live_realkeyid"),
+            ("RAZORPAY_KEY_SECRET", "realsecret"),
+            ("RAZORPAY_MONTHLY_PLAN_ID", "plan_monthly"),
+        ]));
+        assert_eq!(
+            result.unwrap_err(),
+            ConfigError::LiveRazorpayKeyMissingPlanIds {
+                monthly_missing: false,
+                yearly_missing: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_live_key_with_both_plan_ids_set_is_accepted() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RAZORPAY_KEY_ID", "rzp_live_realkeyid"),
+            ("RAZORPAY_KEY_SECRET", "realsecret"),
+            ("RAZORPAY_MONTHLY_PLAN_ID", "plan_monthly"),
+            ("RAZORPAY_YEARLY_PLAN_ID", "plan_yearly"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.payment.razorpay_monthly_plan_id.as_deref(),
+            Some("plan_monthly")
+        );
+    }
+
+    #[test]
+    fn a_test_mode_key_never_requires_plan_ids() {
+        let config = AppConfig::from_vars(vars(&[
+            ("DATABASE_URL", DB_URL),
+            ("RAZORPAY_KEY_ID", "rzp_test_key"),
+            ("RAZORPAY_KEY_SECRET", "testsecret"),
+        ]))
+        .unwrap();
+        assert_eq!(config.payment.razorpay_monthly_plan_id, None);
+        assert_eq!(config.payment.razorpay_yearly_plan_id, None);
+    }
+
+    #[test]
+    fn no_razorpay_key_at_all_never_requires_plan_ids() {
+        let config = AppConfig::from_vars(vars(&[("DATABASE_URL", DB_URL)])).unwrap();
+        assert_eq!(config.payment.razorpay_monthly_plan_id, None);
+        assert_eq!(config.payment.razorpay_yearly_plan_id, None);
+    }
+
+    #[test]
+    fn live_razorpay_key_missing_plan_ids_error_names_the_missing_one() {
+        let err = ConfigError::LiveRazorpayKeyMissingPlanIds {
+            monthly_missing: true,
+            yearly_missing: false,
+        };
+        let message = err.to_string();
+        assert!(message.contains("RAZORPAY_MONTHLY_PLAN_ID"));
+        assert!(!message.contains("RAZORPAY_YEARLY_PLAN_ID is"));
+    }
+
     // ── Redacted Debug ───────────────────────────────────────────────────
 
     #[test]
@@ -880,6 +1044,8 @@ mod tests {
             ("RAZORPAY_KEY_ID", "rzp_live_realkeyid"),
             ("RAZORPAY_KEY_SECRET", "reallysecretvalue"),
             ("RAZORPAY_WEBHOOK_SECRET", "reallysecretwebhook"),
+            ("RAZORPAY_MONTHLY_PLAN_ID", "plan_monthly"),
+            ("RAZORPAY_YEARLY_PLAN_ID", "plan_yearly"),
         ]))
         .unwrap();
 

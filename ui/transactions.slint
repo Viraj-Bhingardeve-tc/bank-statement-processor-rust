@@ -1,0 +1,375 @@
+// transactions.slint — Redesigned Transactions page (Phase 2 UI/UX pass).
+//
+// UI-only: every component here is presentation — layout, spacing, color,
+// typography — built on the SAME shared design system Phase 1 introduced in
+// theme.slint (Spacing/Radius/Type/FintechPalette/Badge/AppButton/Card), not
+// a second one. None of these components read the database, parse
+// statements, classify transactions, dedupe, export, or reconcile; they only
+// display `TxnRow` values and existing filter/count/callback state that
+// main_screen.slint already owns and passes in, exactly as the previous
+// (undressed) table did. Every callback below simply reports what was
+// clicked — main_screen.slint still calls the exact same existing
+// root-level callbacks it always did in response.
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+import { Spacing, Radius, Type, FintechPalette, Badge, AppButton, Card } from "theme.slint";
+import { TxnRow, OriginColor } from "dashboard.slint";
+
+// ── Page header shell ─────────────────────────────────────────────────────────
+// Title/subtitle on the left; the caller places its own action buttons as
+// children on the right (unchanged callback bodies — this component owns no
+// business logic, only the layout around them).
+export component TxnPageHeader inherits Rectangle {
+    in property <string> title:    "Transactions";
+    in property <string> subtitle: "Review, classify and manage bank transactions";
+
+    background: FintechPalette.card;
+    height: 68px;
+    Rectangle { y: parent.height - 1px; height: 1px; background: FintechPalette.border; }
+
+    HorizontalBox {
+        padding-left: Spacing.section; padding-right: Spacing.section; spacing: Spacing.md;
+
+        VerticalBox {
+            padding: 0px; spacing: 0px; alignment: center; min-width: 220px;
+            Text { text: root.title; font-size: Type.h1; font-weight: 800; color: FintechPalette.text; }
+            Text { text: root.subtitle; font-size: Type.small; color: FintechPalette.text-muted; }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        HorizontalBox {
+            padding: 0px; spacing: Spacing.sm;
+            @children
+        }
+    }
+}
+
+// ── Filter / control card shell ─────────────────────────────────────────────────
+// A single Card; the caller stacks its own rows (period controls, status
+// chips, ...) as children — each child becomes one vertically-stacked row.
+export component TxnFilterCard inherits Card {
+    VerticalBox {
+        padding: Spacing.card; spacing: Spacing.md;
+        @children
+    }
+}
+
+// ── Status filter chip (All / Unreviewed / Suspense / ...) ───────────────────
+// Same contract as the old FBtn (label + count + active + clicked()) so
+// every existing `toggle-status(...)`/`filter-changed(...)` call site keeps
+// working untouched — this is only a visual replacement.
+export component TxnStatusChip inherits Rectangle {
+    in property <string> label:  "";
+    in property <string> count:  "";
+    in property <bool>   active: false;
+    in property <color>  accent: FintechPalette.primary;
+    callback clicked();
+
+    height: 30px;
+    border-radius: Radius.pill;
+    background: root.active ? root.accent : FintechPalette.page-bg;
+    border-width: 1px;
+    border-color: root.active ? root.accent : FintechPalette.border;
+    accessible-role: button;
+    accessible-label: root.count != "" ? root.label + " (" + root.count + ")" : root.label;
+    accessible-checked: root.active;
+
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+
+    HorizontalBox {
+        padding-left: Spacing.md; padding-right: Spacing.md; padding-top: 0px; padding-bottom: 0px;
+        spacing: Spacing.xs;
+        Text {
+            text: root.label; font-size: Type.small; font-weight: 700;
+            color: root.active ? white : FintechPalette.text;
+            vertical-alignment: center;
+        }
+        if root.count != "" : Rectangle {
+            height: 18px; min-width: 22px;
+            border-radius: Radius.pill;
+            background: root.active ? #FFFFFF3D : FintechPalette.border;
+            Text {
+                text: root.count; font-size: Type.micro; font-weight: 800;
+                color: root.active ? white : FintechPalette.text-muted;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ── Removable active-filter pill (shown in the "Filters: ..." strip) ─────────
+export component TxnActiveFilterPill inherits Rectangle {
+    in property <string> label: "";
+    in property <color>  accent: FintechPalette.primary;
+    callback remove();
+
+    height: 24px;
+    border-radius: Radius.pill;
+    background: root.accent;
+
+    HorizontalBox {
+        padding-left: Spacing.sm; padding-right: Spacing.xs; padding-top: 0px; padding-bottom: 0px;
+        spacing: Spacing.xs;
+        Text { text: root.label; font-size: Type.micro; font-weight: 700; color: white; vertical-alignment: center; }
+        Rectangle {
+            width: 16px; height: 16px; border-radius: Radius.pill;
+            background: #FFFFFF33;
+            accessible-role: button;
+            accessible-label: "Remove " + root.label + " filter";
+            TouchArea { mouse-cursor: pointer; clicked => { root.remove(); } }
+            Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+}
+
+// ── Table column geometry ─────────────────────────────────────────────────────
+// Kept in one place so the header and every row agree exactly. Total is
+// wider than a 1366–1440px window on purpose — the table scrolls
+// horizontally (see TxnTable below) rather than cramming 16 columns into
+// unreadably narrow cells.
+export global TxnCols {
+    out property <length> bank:     100px;
+    out property <length> account:  100px;
+    out property <length> date:      90px;
+    out property <length> narration: 280px;
+    out property <length> ref-no:   100px;
+    out property <length> debit:    100px;
+    out property <length> credit:   100px;
+    out property <length> balance:  110px;
+    out property <length> vendor:   140px;
+    out property <length> ledger:   140px;
+    out property <length> exp-head: 150px;
+    out property <length> confidence: 100px;
+    out property <length> basis:    150px;
+    out property <length> status:   110px;
+    out property <length> tags:     100px;
+    out property <length> review:   110px;
+    // Sum of the above — the table's total content width.
+    out property <length> total: 1980px;
+}
+
+// Plain left/right-aligned text cell — used for the columns that are just
+// colored text (no badge). `align-right: true` right-aligns (for the
+// Debit/Credit/Balance amount columns).
+component TxnCell inherits Rectangle {
+    in property <string> text: "";
+    in property <length> w: 100px;
+    in property <color>  fg: FintechPalette.text;
+    in property <int>    weight: 500;
+    in property <bool>   italic: false;
+    in property <bool>   align-right: false;
+    in property <length> font-sz: Type.body;
+
+    width: root.w;
+    clip: true;
+    Text {
+        x: root.align-right ? 0px : Spacing.md;
+        width: parent.width - (root.align-right ? Spacing.md : Spacing.md * 2);
+        height: parent.height;
+        text: root.text;
+        font-size: root.font-sz; font-weight: root.weight; font-italic: root.italic;
+        color: root.fg;
+        horizontal-alignment: root.align-right ? right : left;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// ── Table header row ───────────────────────────────────────────────────────────
+component TxnDataHeader inherits Rectangle {
+    in property <bool> compact: false;
+    background: FintechPalette.navy;
+
+    HorizontalBox {
+        padding: 0px; spacing: 0px;
+        TxnCell { w: TxnCols.bank;      text: "Bank";              fg: white; weight: 700; font-sz: Type.micro; }
+        TxnCell { w: TxnCols.account;   text: "Account No";        fg: white; weight: 700; font-sz: Type.micro; }
+        TxnCell { w: TxnCols.date;      text: "Date";              fg: white; weight: 700; font-sz: Type.micro; }
+        TxnCell { w: TxnCols.narration; text: "Narration";         fg: white; weight: 700; font-sz: Type.micro; }
+        TxnCell { w: TxnCols.ref-no;    text: "Ref";               fg: white; weight: 700; font-sz: Type.micro; }
+        TxnCell { w: TxnCols.debit;     text: "Debit";             fg: #FFCDD2; weight: 700; font-sz: Type.micro; align-right: true; }
+        TxnCell { w: TxnCols.credit;    text: "Credit";            fg: #C8E6C9; weight: 700; font-sz: Type.micro; align-right: true; }
+        TxnCell { w: TxnCols.balance;   text: "Balance";           fg: white; weight: 700; font-sz: Type.micro; align-right: true; }
+        TxnCell { w: TxnCols.vendor;    text: "Vendor / Customer"; fg: white; weight: 700; font-sz: Type.micro; italic: true; }
+        TxnCell { w: TxnCols.ledger;    text: "Ledger for Posting"; fg: white; weight: 700; font-sz: Type.micro; italic: true; }
+        TxnCell { w: TxnCols.exp-head;  text: "Expense Head";      fg: white; weight: 700; font-sz: Type.micro; italic: true; }
+        Rectangle { width: TxnCols.confidence; Text { text: "Confidence"; font-size: Type.micro; font-weight: 700; font-italic: true; color: white; horizontal-alignment: center; vertical-alignment: center; width: parent.width; } }
+        TxnCell { w: TxnCols.basis;     text: "Basis";             fg: white; weight: 700; font-sz: Type.micro; italic: true; }
+        Rectangle { width: TxnCols.status; Text { text: "Type / Status"; font-size: Type.micro; font-weight: 700; font-italic: true; color: white; horizontal-alignment: center; vertical-alignment: center; width: parent.width; } }
+        Rectangle { width: TxnCols.tags; Text { text: "Tags"; font-size: Type.micro; font-weight: 700; font-italic: true; color: white; horizontal-alignment: center; vertical-alignment: center; width: parent.width; } }
+        TxnCell { w: TxnCols.review;    text: "Review";            fg: white; weight: 700; font-sz: Type.micro; italic: true; }
+    }
+}
+
+// ── Table data row ─────────────────────────────────────────────────────────────
+export component TxnDataRow inherits Rectangle {
+    in property <TxnRow> data;
+    in property <int>    row-idx;
+    in property <bool>   compact: false;
+    in property <bool>   selected: false;
+    callback clicked(int);
+
+    height: root.compact ? 34px : 46px;
+    background:
+        root.data.row-color == 1 ? #E8F5E9 :
+        root.data.row-color == 2 ? #FFFDE7 :
+        root.data.row-color == 3 ? #FFEBEE :
+        root.data.row-color == 4 ? #F3E5F5 :
+        root.data.row-color == 5 ? #FCE4EC :
+        root.data.row-color == 6 ? #E3F2FD :
+        FintechPalette.card;
+    accessible-role: list-item;
+    accessible-label: root.data.date + ", " + root.data.narration
+        + (root.data.debit != "" ? ", Debit " + root.data.debit : "")
+        + (root.data.credit != "" ? ", Credit " + root.data.credit : "")
+        + ", Balance " + root.data.balance
+        + ", " + root.data.status-text;
+
+    // Selected-row accent (double-click-pending state, reuses the existing
+    // dclick-pending-idx main_screen.slint already tracks — no new state).
+    if root.selected : Rectangle { x: 0px; width: 3px; height: parent.height; background: FintechPalette.primary; }
+
+    Rectangle { y: parent.height - 1px; height: 1px; background: FintechPalette.border; }
+
+    ta := TouchArea {
+        width: parent.width; height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(root.row-idx); }
+    }
+    // Hover overlay — presentation only.
+    if ta.has-hover : Rectangle { background: #0A192908; }
+
+    HorizontalBox {
+        padding: 0px; spacing: 0px;
+        TxnCell { w: TxnCols.bank;    text: root.data.bank-name;  fg: FintechPalette.text-muted; font-sz: Type.small; }
+        TxnCell { w: TxnCols.account; text: root.data.account-no; fg: FintechPalette.text-muted; font-sz: Type.small; }
+        TxnCell { w: TxnCols.date;    text: root.data.date;       fg: OriginColor.imported; weight: 600; }
+        TxnCell {
+            w: TxnCols.narration; text: root.data.narration;
+            fg: root.data.narration-is-generated ? OriginColor.generated : OriginColor.imported;
+        }
+        TxnCell { w: TxnCols.ref-no; text: root.data.ref-no; fg: FintechPalette.text-muted; font-sz: Type.small; }
+        TxnCell {
+            w: TxnCols.debit; text: root.data.debit; align-right: true;
+            weight: root.data.debit != "" ? 700 : 400;
+            fg: root.data.debit != "" ? FintechPalette.danger : #CCCCCC;
+        }
+        TxnCell {
+            w: TxnCols.credit; text: root.data.credit; align-right: true;
+            weight: root.data.credit != "" ? 700 : 400;
+            fg: root.data.credit != "" ? FintechPalette.success : #CCCCCC;
+        }
+        TxnCell { w: TxnCols.balance; text: root.data.balance; align-right: true; weight: 700; fg: FintechPalette.text; }
+        TxnCell { w: TxnCols.vendor;    text: root.data.vendor;       fg: OriginColor.generated; weight: 600; }
+        TxnCell { w: TxnCols.ledger;    text: root.data.ledger;       fg: OriginColor.generated; weight: 600; }
+        TxnCell { w: TxnCols.exp-head;  text: root.data.expense-head; fg: OriginColor.generated; font-sz: Type.small; }
+
+        // Confidence badge — HIGH/MEDIUM/LOW (analytics::confidence_tier),
+        // same three tiers/colors as before, just Badge-rendered.
+        Rectangle {
+            width: TxnCols.confidence;
+            if root.data.classification-type != "" : Badge {
+                text: root.data.classification-type;
+                fg: root.data.classification-type == "HIGH" ? #1B5E20
+                    : root.data.classification-type == "MEDIUM" ? #B26A00 : #C62828;
+                bg: root.data.classification-type == "HIGH" ? #C8E6C9
+                    : root.data.classification-type == "MEDIUM" ? #FFF3CD : #FFCDD2;
+            }
+        }
+
+        TxnCell { w: TxnCols.basis; text: root.data.classification-basis; fg: OriginColor.generated; font-sz: Type.small; }
+
+        // Type/Status — same row-color-driven chip set as before, Badge-rendered.
+        Rectangle {
+            width: TxnCols.status;
+            if root.data.row-color == 1 : Badge { text: "HIGH";     fg: #1B5E20; bg: #C8E6C9; }
+            if root.data.row-color == 3 : Badge { text: "REVIEW";   fg: #B71C1C; bg: #FFCDD2; }
+            if root.data.row-color == 4 : Badge { text: "SUSPENSE"; fg: #6A1B9A; bg: #E1BEE7; }
+            if root.data.row-color == 5 : Badge { text: "DUP";      fg: #880E4F; bg: #FCE4EC; }
+            if root.data.row-color == 6 : Badge { text: "MANUAL";   fg: #0D47A1; bg: #BBDEFB; }
+            if root.data.row-color == 0 : Text {
+                text: root.data.status-text; font-size: Type.small; color: OriginColor.generated;
+                horizontal-alignment: center; vertical-alignment: center; width: parent.width;
+            }
+        }
+
+        // Tags — GST / TAX / DUP, still multi-valued, still Requirement-#5
+        // colored the same as before.
+        Rectangle {
+            width: TxnCols.tags;
+            HorizontalBox {
+                padding: 0px; spacing: Spacing.xs; alignment: center;
+                if root.data.has-gst : Badge { text: "GST"; fg: #1B5E20; bg: #C8E6C9; }
+                if root.data.has-tax : Badge { text: "TAX"; fg: #BF360C; bg: #FFE0B2; }
+                if root.data.has-dup-tag : Badge { text: "DUP"; fg: #880E4F; bg: #FCE4EC; }
+            }
+        }
+
+        TxnCell { w: TxnCols.review; text: root.data.review; fg: OriginColor.generated; font-sz: Type.small; }
+    }
+}
+
+// ── Full table: sticky header + independently-scrolling body, synced ─────────
+// horizontally so wide rows and the header always line up. Encapsulated
+// here so main_screen.slint just hands it `rows`/`compact`/`selected-idx`
+// and gets the click index back — exactly the same information the old
+// inline TxnHeader/TxnTableRow/ListView trio exchanged with it.
+export component TxnTable inherits Rectangle {
+    in property <[TxnRow]> rows: [];
+    in property <bool>     compact: false;
+    in property <int>      selected-idx: -1;
+    callback row-clicked(int);
+
+    background: FintechPalette.card;
+
+    VerticalBox {
+        padding: 0px; spacing: 0px;
+
+        Rectangle {
+            height: root.compact ? 34px : 42px;
+            clip: true;
+            background: FintechPalette.navy;
+            Rectangle {
+                x: body.viewport-x; width: TxnCols.total; height: parent.height;
+                TxnDataHeader { width: TxnCols.total; height: parent.height; compact: root.compact; }
+            }
+        }
+
+        body := ScrollView {
+            vertical-stretch: 1;
+            VerticalBox {
+                padding: 0px; spacing: 0px; width: TxnCols.total;
+                for row[idx] in root.rows : TxnDataRow {
+                    width: TxnCols.total;
+                    data: row; row-idx: idx; compact: root.compact;
+                    selected: root.selected-idx == idx;
+                    clicked(i) => { root.row-clicked(i); }
+                }
+            }
+        }
+    }
+}
+
+// ── Right-hand summary section (Card-based) ───────────────────────────────────
+// A titled Card the caller fills with existing SR/SDivider rows (unchanged
+// components, unchanged bindings) — this only supplies the card chrome so
+// the summary panel reads as separated sections instead of one long list.
+export component SummarySection inherits Card {
+    in property <string> title: "";
+    VerticalBox {
+        padding: Spacing.card; spacing: Spacing.xs;
+        Text { text: root.title; font-size: Type.micro; font-weight: 800; color: FintechPalette.primary; letter-spacing: 0.6px; }
+        @children
+    }
+}
+
+// ── Bottom action toolbar shell ───────────────────────────────────────────────
+export component TxnActionBar inherits Rectangle {
+    background: FintechPalette.card;
+    Rectangle { y: 0px; height: 1px; background: FintechPalette.border; }
+    HorizontalBox {
+        padding-left: Spacing.section; padding-right: Spacing.section; spacing: Spacing.sm;
+        @children
+    }
+}
