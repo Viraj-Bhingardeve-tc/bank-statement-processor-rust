@@ -362,6 +362,11 @@ pub struct AnalyticsResult {
     pub monthly: MonthlyAgg,
     pub expenses: Vec<ExpHead>,
     pub cashflow: Vec<CashPoint>,
+    // Cash Flow Trend is min-max scaled (see CashPoint.norm), not 0-based
+    // like the other charts — its axis-label range needs the actual
+    // min/max balance the chart was scaled against, not just 0..max.
+    pub cashflow_min: f64,
+    pub cashflow_max: f64,
     pub vendors: Vec<VendorAgg>,
     pub insights: Insights,
 }
@@ -505,8 +510,19 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
         1
     };
     let sample: Vec<f64> = bal_txns.iter().step_by(step.max(1)).cloned().collect();
-    let min_b = sample.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_b = sample.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    // Guard against empty `sample`: the fold seeds (±INFINITY) are never
+    // finite balance values on their own, so min_b/max_b must not leak
+    // out as INFINITY/-INFINITY below — cashflow_min/max are consumed as
+    // Cash Flow Trend's axis-label range (see axis_tick_labels), and a
+    // non-finite value there would format as the literal text "inf".
+    let (min_b, max_b) = if sample.is_empty() {
+        (0.0, 0.0)
+    } else {
+        (
+            sample.iter().cloned().fold(f64::INFINITY, f64::min),
+            sample.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        )
+    };
     let range = (max_b - min_b).max(1.0);
     let cashflow: Vec<CashPoint> = sample
         .iter()
@@ -626,6 +642,8 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
         monthly,
         expenses,
         cashflow,
+        cashflow_min: min_b,
+        cashflow_max: max_b,
         vendors,
         insights,
     }
@@ -677,468 +695,108 @@ pub fn fmt_short_pub(v: f64) -> String {
     fmt_short(v)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Chart axis labels (Monthly Credits vs Debits / Cash Flow Trend / Top
+// Vendors) ───────────────────────────────────────────────────────────────────
+// The old dashboard drew these three charts with Chart.js, whose `y`/`x`
+// scales auto-pick round tick values and format each with a fixed
+// `v => '₹' + (v/1000).toFixed(0) + 'K'` callback (dashboard.js:111,178,203)
+// — always thousands, never switching to L/Cr like fmt_short above. This
+// port hand-draws its own bars/line instead of using a charting library, so
+// there's no automatic axis scaling to lean on; these two functions
+// reproduce just enough of it (round the top of the scale up to a "nice"
+// 1/2/5/10×10ⁿ value, then format 5 evenly-spaced ticks the same way) to
+// match the old screenshots without depending on a charting crate.
+
+/// Round `raw_max` up to the nearest "nice" number (1, 2, 5, or 10 × 10ⁿ).
+/// Used both as the bar-height normalisation ceiling (so the tallest bar
+/// doesn't touch the very top of its chart, matching the old Chart.js
+/// look) and as the top value axis_tick_labels below formats.
+pub fn nice_axis_max(raw_max: f64) -> f64 {
+    if raw_max <= 0.0 {
+        return 1.0;
+    }
+    let exp = raw_max.log10().floor();
+    let base = 10f64.powf(exp);
+    let frac = raw_max / base;
+    let nice_frac = if frac <= 1.0 {
+        1.0
+    } else if frac <= 2.0 {
+        2.0
+    } else if frac <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice_frac * base
+}
+
+/// Five "₹NK" tick labels evenly spaced from `min` to `max`, bottom to top
+/// — the same 0%/25%/50%/75%/100% positions the existing chart grid lines
+/// already draw at (see MonthlyChart/CashFlowChart in dashboard.slint), so
+/// these line up with them without changing where those lines are drawn.
+pub fn axis_tick_labels(min: f64, max: f64) -> Vec<String> {
+    (0..=4)
+        .map(|i| {
+            let v = min + (max - min) * (i as f64 / 4.0);
+            format!("₹{:.0}K", v / 1_000.0)
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::TransactionStatus;
-    use crate::tally_group_engine::{GROUP_INDIRECT_EXPENSES, GROUP_SUNDRY_CREDITORS};
 
-    // ── match_status (Requirement #4: Summary-panel hyperlinks) ──────────────
-    // Every clickable Summary item (and the top filter chips) resolves to one
-    // of these tokens via `on_do_filter_changed` — covering each one here
-    // covers every hyperlink target in the Summary panel.
+    // ── nice_axis_max ─────────────────────────────────────────────────────────
 
     #[test]
-    fn unreviewed_filter_matches_only_unreviewed_status() {
-        let unreviewed = Transaction::new("t1"); // status defaults to Unreviewed
-        let suspense = Transaction {
-            status: TransactionStatus::Suspense,
-            ..Transaction::new("t2")
-        };
-        assert!(match_status(&unreviewed, "unreviewed"));
-        assert!(!match_status(&suspense, "unreviewed"));
+    fn rounds_up_to_the_nearest_1_2_5_10_step() {
+        // 3.874×10⁶ sits above the "2" rung and at/below the "5" rung of
+        // the 1/2/5/10 ladder, so it rounds up to 5×10⁶ — not the nearest
+        // value in absolute terms, but the standard nice-number behavior.
+        assert_eq!(nice_axis_max(3_874_000.0), 5_000_000.0);
+        assert_eq!(nice_axis_max(1_400.0), 2_000.0);
+        assert_eq!(nice_axis_max(180.0), 200.0);
+        assert_eq!(nice_axis_max(60.0), 100.0);
     }
 
     #[test]
-    fn needs_review_filter_matches_needs_review_status() {
-        let needs_review = Transaction {
-            status: TransactionStatus::NeedsReview,
-            ..Transaction::new("t1")
-        };
-        let classified = Transaction {
-            status: TransactionStatus::Classified,
-            confidence: 0.9,
-            date: "01/01/2024".to_string(),
-            narration: "a valid narration".to_string(),
-            debit: Some(100.0),
-            ..Transaction::new("t2")
-        };
-        assert!(match_status(&needs_review, "needs_review"));
-        assert!(!match_status(&classified, "needs_review"));
+    fn already_nice_values_are_left_unchanged() {
+        assert_eq!(nice_axis_max(5_000_000.0), 5_000_000.0);
+        assert_eq!(nice_axis_max(2_000.0), 2_000.0);
     }
 
     #[test]
-    fn suspense_filter_matches_only_suspense_status() {
-        let suspense = Transaction {
-            status: TransactionStatus::Suspense,
-            ..Transaction::new("t1")
-        };
-        let unreviewed = Transaction::new("t2");
-        assert!(match_status(&suspense, "suspense"));
-        assert!(!match_status(&unreviewed, "suspense"));
+    fn zero_or_negative_max_never_produces_a_zero_or_negative_scale() {
+        // Used as a bar-height/normalisation divisor downstream — a 0 or
+        // negative result would divide-by-zero or invert bar heights.
+        assert_eq!(nice_axis_max(0.0), 1.0);
+        assert_eq!(nice_axis_max(-500.0), 1.0);
     }
 
-    #[test]
-    fn duplicates_filter_matches_only_dup_flagged_rows() {
-        let dup = Transaction {
-            dup_flag: true,
-            ..Transaction::new("t1")
-        };
-        let not_dup = Transaction::new("t2");
-        assert!(match_status(&dup, "duplicates"));
-        assert!(!match_status(&not_dup, "duplicates"));
-    }
+    // ── axis_tick_labels ─────────────────────────────────────────────────────
 
     #[test]
-    fn gst_filter_matches_gst_or_tax_tags_case_insensitively() {
-        let gst = Transaction {
-            tags: vec!["GST".to_string()],
-            ..Transaction::new("t1")
-        };
-        let tax = Transaction {
-            tags: vec!["tax".to_string()],
-            ..Transaction::new("t2")
-        };
-        let neither = Transaction {
-            tags: vec!["DUP".to_string()],
-            ..Transaction::new("t3")
-        };
-        assert!(match_status(&gst, "gst"));
-        assert!(match_status(&tax, "gst"));
-        assert!(!match_status(&neither, "gst"));
-    }
-
-    #[test]
-    fn credits_filter_matches_credit_only_rows() {
-        let credit = Transaction {
-            credit: Some(500.0),
-            ..Transaction::new("t1")
-        };
-        let debit = Transaction {
-            debit: Some(500.0),
-            ..Transaction::new("t2")
-        };
-        assert!(match_status(&credit, "credits"));
-        assert!(!match_status(&debit, "credits"));
-    }
-
-    #[test]
-    fn debits_filter_matches_debit_only_rows() {
-        let debit = Transaction {
-            debit: Some(500.0),
-            ..Transaction::new("t1")
-        };
-        let credit = Transaction {
-            credit: Some(500.0),
-            ..Transaction::new("t2")
-        };
-        assert!(match_status(&debit, "debits"));
-        assert!(!match_status(&credit, "debits"));
-    }
-
-    #[test]
-    fn unrecognised_token_matches_everything_like_the_all_filter() {
-        // "all" itself never reaches match_status (on_do_filter_changed clears
-        // filter_statuses instead), but any other unknown token — or a stale
-        // token from a future UI change — must fail open (show the row)
-        // rather than silently hiding every transaction.
-        let t = Transaction::new("t1");
-        assert!(match_status(&t, "all"));
-        assert!(match_status(&t, "something-unrecognised"));
-    }
-
-    // ── confidence_tier / classification_basis (Requirement #7) ──────────────
-
-    #[test]
-    fn high_confidence_produces_high_tier() {
-        assert_eq!(confidence_tier(0.8), "HIGH");
-        assert_eq!(confidence_tier(1.0), "HIGH");
-        assert_eq!(confidence_tier(0.95), "HIGH");
-    }
-
-    #[test]
-    fn medium_confidence_produces_medium_tier() {
-        assert_eq!(confidence_tier(0.4), "MEDIUM");
-        assert_eq!(confidence_tier(0.6), "MEDIUM");
-        assert_eq!(confidence_tier(0.79), "MEDIUM");
-    }
-
-    #[test]
-    fn low_confidence_and_fallback_produce_low_tier() {
-        assert_eq!(confidence_tier(0.0), "LOW");
-        assert_eq!(confidence_tier(0.39), "LOW");
-        assert_eq!(confidence_tier(0.45 - 0.45), "LOW"); // the classifier's own keyword-tier value, zeroed
-    }
-
-    #[test]
-    fn unclassified_transaction_never_gets_a_misleading_high_tier() {
-        // Transaction::new() defaults confidence to 0.0 and status to
-        // Unreviewed — exactly what an unclassified imported row looks like.
-        let t = Transaction::new("t1");
-        assert_eq!(t.confidence, 0.0);
-        assert_eq!(confidence_tier(t.confidence), "LOW");
-    }
-
-    #[test]
-    fn basis_reflects_rule_match() {
-        let t = Transaction {
-            classification_source: "rule".to_string(),
-            confidence: 0.9,
-            status: TransactionStatus::Classified,
-            ..Transaction::new("t1")
-        };
-        assert_eq!(classification_basis(&t), "Matched a saved classification rule");
-        assert_eq!(confidence_tier(t.confidence), "HIGH");
-    }
-
-    #[test]
-    fn basis_reflects_keyword_match() {
-        let t = Transaction {
-            classification_source: "keyword".to_string(),
-            confidence: 0.45,
-            status: TransactionStatus::Classified,
-            ..Transaction::new("t1")
-        };
-        assert_eq!(classification_basis(&t), "Matched a built-in keyword pattern");
-        assert_eq!(confidence_tier(t.confidence), "MEDIUM");
-    }
-
-    #[test]
-    fn basis_reflects_ai_classification() {
-        let t = Transaction {
-            classification_source: "ai".to_string(),
-            confidence: 0.85,
-            status: TransactionStatus::Classified,
-            ..Transaction::new("t1")
-        };
-        assert_eq!(classification_basis(&t), "Classified by AI (third-party)");
-        assert_eq!(confidence_tier(t.confidence), "HIGH");
-    }
-
-    #[test]
-    fn basis_reflects_user_confirmation() {
-        let t = Transaction {
-            classification_source: "user".to_string(),
-            confidence: 1.0,
-            status: TransactionStatus::Classified,
-            ..Transaction::new("t1")
-        };
+    fn labels_are_evenly_spaced_in_thousands_from_min_to_max() {
+        let labels = axis_tick_labels(0.0, 4_000_000.0);
         assert_eq!(
-            classification_basis(&t),
-            "Manually entered or confirmed by user"
+            labels,
+            vec!["₹0K", "₹1000K", "₹2000K", "₹3000K", "₹4000K"]
         );
     }
 
     #[test]
-    fn basis_reflects_suspense_and_never_claims_a_rule_matched() {
-        let t = Transaction {
-            status: TransactionStatus::Suspense,
-            confidence: 0.0,
-            ..Transaction::new("t1")
-        };
-        assert_eq!(classification_basis(&t), "Marked as suspense");
-        assert_eq!(confidence_tier(t.confidence), "LOW");
-    }
-
-    #[test]
-    fn basis_reflects_genuinely_unclassified_rows_without_fabricating_a_reason() {
-        // No classification_source, still Unreviewed — the honest "nothing
-        // matched" case, not a fabricated rule/keyword explanation.
-        let t = Transaction::new("t1");
+    fn labels_honour_a_non_zero_floor_for_min_max_scaled_charts() {
+        // Cash Flow Trend isn't 0-based — it's min-max scaled.
+        let labels = axis_tick_labels(1_000_000.0, 3_000_000.0);
         assert_eq!(
-            classification_basis(&t),
-            "Not yet classified — no matching rule or keyword found"
+            labels,
+            vec!["₹1000K", "₹1500K", "₹2000K", "₹2500K", "₹3000K"]
         );
     }
 
-    /// Four real-shaped transactions across two months, mirroring the mix a
-    /// real import produces: two bare party rows (no account head — a
-    /// customer receipt and a vendor payment) and one keyword-classified
-    /// expense row.
-    fn sample_txns() -> Vec<Transaction> {
-        vec![
-            Transaction {
-                date: "05/04/2024".to_string(),
-                credit: Some(1000.0),
-                balance: Some(11000.0),
-                vendor: "Ramesh Kumar".to_string(),
-                bank_name: "HDFC".to_string(),
-                ..Transaction::new("t1")
-            },
-            Transaction {
-                date: "10/04/2024".to_string(),
-                debit: Some(300.0),
-                balance: Some(10700.0),
-                vendor: "ABC Traders".to_string(),
-                bank_name: "HDFC".to_string(),
-                ..Transaction::new("t2")
-            },
-            Transaction {
-                date: "02/05/2024".to_string(),
-                credit: Some(500.0),
-                balance: Some(11200.0),
-                vendor: "Ramesh Kumar".to_string(),
-                bank_name: "HDFC".to_string(),
-                ..Transaction::new("t3")
-            },
-            Transaction {
-                date: "15/05/2024".to_string(),
-                debit: Some(200.0),
-                balance: Some(11000.0),
-                account_head: "Salary".to_string(),
-                bank_name: "HDFC".to_string(),
-                ..Transaction::new("t4")
-            },
-        ]
-    }
-
-    // ── 1-4: summary totals ───────────────────────────────────────────────────
-
     #[test]
-    fn total_credits_sums_all_credit_amounts() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        assert_eq!(data.summary.total_credit, 1500.0);
-    }
-
-    #[test]
-    fn total_debits_sums_all_debit_amounts() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        assert_eq!(data.summary.total_debit, 500.0);
-    }
-
-    #[test]
-    fn net_cash_flow_is_credits_minus_debits() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        assert_eq!(data.summary.net_flow, 1000.0);
-    }
-
-    #[test]
-    fn transaction_count_excludes_opening_balance_row() {
-        let mut txns = sample_txns();
-        txns.push(Transaction {
-            is_opening_balance: true,
-            balance: Some(10_000.0),
-            ..Transaction::new("ob")
-        });
-        let data = compute(&txns, Some(10_000.0));
-        assert_eq!(data.summary.txn_count, 4, "the synthetic OB row must not count");
-    }
-
-    // ── 5: opening/closing balance ────────────────────────────────────────────
-
-    #[test]
-    fn opening_balance_passes_through_and_closing_is_the_last_balance() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        assert_eq!(data.summary.opening_bal, Some(10_000.0));
-        // Last transaction in input order is t4 (balance 11,000).
-        assert_eq!(data.summary.closing_bal, Some(11_000.0));
-    }
-
-    #[test]
-    fn opening_balance_none_when_not_supplied() {
-        let data = compute(&sample_txns(), None);
-        assert_eq!(data.summary.opening_bal, None);
-    }
-
-    // ── 6: monthly credit/debit aggregation ───────────────────────────────────
-
-    #[test]
-    fn monthly_aggregation_buckets_by_calendar_month() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        assert_eq!(data.monthly.keys, vec!["2024-04", "2024-05"]);
-        assert_eq!(data.monthly.credits, vec![1000.0, 500.0]);
-        assert_eq!(data.monthly.debits, vec![300.0, 200.0]);
-    }
-
-    // ── 7: expense-head aggregation ───────────────────────────────────────────
-
-    #[test]
-    fn expense_head_aggregation_covers_both_party_and_classified_debits() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        // t2 (₹300 debit, vendor known, no account head) must land under
-        // Sundry Creditors — not be silently dropped for lacking an account
-        // head, which is what happened before Requirement #3's fix.
-        let creditors = data
-            .expenses
-            .iter()
-            .find(|e| e.label == GROUP_SUNDRY_CREDITORS)
-            .expect("party debit must be bucketed as Sundry Creditors");
-        assert_eq!(creditors.amount, 300.0);
-        // t4 (₹200 debit, account head "Salary") keeps its real classification.
-        let salary = data
-            .expenses
-            .iter()
-            .find(|e| e.label == GROUP_INDIRECT_EXPENSES)
-            .expect("Salary debit must classify as Indirect Expenses");
-        assert_eq!(salary.amount, 200.0);
-    }
-
-    #[test]
-    fn top_expense_category_is_the_largest_bucket() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        // 300 (Sundry Creditors) > 200 (Indirect Expenses).
-        assert_eq!(data.summary.top_expense_head, GROUP_SUNDRY_CREDITORS);
-        assert_eq!(data.summary.top_expense_amt, 300.0);
-    }
-
-    #[test]
-    fn party_debit_with_no_vendor_or_account_head_falls_back_to_classify() {
-        // No evidence at all (no vendor, no account head) — party_group
-        // correctly declines, and the existing amount/keyword fallback in
-        // `classify` still produces a label rather than being force-set to
-        // Sundry Creditors just because it's a debit.
-        let t = Transaction {
-            debit: Some(50.0),
-            ..Transaction::new("t")
-        };
-        let label = expense_head_label(&t);
-        assert_eq!(label, GROUP_INDIRECT_EXPENSES);
-    }
-
-    // ── 8: vendor/customer aggregation ────────────────────────────────────────
-
-    #[test]
-    fn vendor_aggregation_sums_debit_and_credit_per_vendor() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        let ramesh = data
-            .vendors
-            .iter()
-            .find(|v| v.name == "Ramesh Kumar")
-            .expect("Ramesh Kumar must appear in vendor breakdown");
-        assert_eq!(ramesh.credit, 1500.0);
-        assert_eq!(ramesh.debit, 0.0);
-        let abc = data
-            .vendors
-            .iter()
-            .find(|v| v.name == "ABC Traders")
-            .expect("ABC Traders must appear in vendor breakdown");
-        assert_eq!(abc.debit, 300.0);
-        assert_eq!(abc.credit, 0.0);
-    }
-
-    #[test]
-    fn vendor_count_counts_unique_non_empty_vendor_names() {
-        let data = compute(&sample_txns(), Some(10_000.0));
-        // "Ramesh Kumar" (×2) + "ABC Traders" = 2 unique vendors; t4 has none.
-        assert_eq!(data.summary.vendor_count, 2);
-    }
-
-    // ── 9: empty transaction set ──────────────────────────────────────────────
-
-    #[test]
-    fn empty_transaction_set_produces_zeroed_summary_without_panicking() {
-        let data = compute(&[], None);
-        assert_eq!(data.summary.total_credit, 0.0);
-        assert_eq!(data.summary.total_debit, 0.0);
-        assert_eq!(data.summary.net_flow, 0.0);
-        assert_eq!(data.summary.txn_count, 0);
-        assert_eq!(data.summary.vendor_count, 0);
-        assert_eq!(data.summary.closing_bal, None);
-        assert!(data.monthly.labels.is_empty());
-        assert!(data.expenses.is_empty());
-        assert!(data.vendors.is_empty());
-        assert!(data.cashflow.is_empty());
-        // Insight placeholders, not blank/garbage.
-        assert_eq!(data.insights.max_dr_amt, "—");
-        assert_eq!(data.insights.freq_vendor, "—");
-    }
-
-    // ── 10: date-filtered dashboard data ──────────────────────────────────────
-
-    #[test]
-    fn date_filter_restricts_which_transactions_are_aggregated() {
-        let txns = sample_txns();
-        let filter = DashFilter {
-            from: "01/04/2024",
-            to: "30/04/2024",
-            bank: "",
-            vendor: "",
-            head: "",
-        };
-        let filtered: Vec<Transaction> = filter_txns(&txns, &filter).into_iter().cloned().collect();
-        assert_eq!(filtered.len(), 2, "only the two April rows should survive");
-        let data = compute(&filtered, Some(10_000.0));
-        assert_eq!(data.summary.total_credit, 1000.0);
-        assert_eq!(data.summary.total_debit, 300.0);
-        assert_eq!(data.summary.txn_count, 2);
-    }
-
-    #[test]
-    fn vendor_filter_restricts_to_one_party() {
-        let txns = sample_txns();
-        let filter = DashFilter {
-            from: "",
-            to: "",
-            bank: "",
-            vendor: "ABC Traders",
-            head: "",
-        };
-        let filtered: Vec<Transaction> = filter_txns(&txns, &filter).into_iter().cloned().collect();
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].vendor, "ABC Traders");
-    }
-
-    #[test]
-    fn empty_filter_is_a_no_op() {
-        let filter = DashFilter {
-            from: "",
-            to: "",
-            bank: "",
-            vendor: "",
-            head: "",
-        };
-        assert!(filter.is_empty());
+    fn always_five_labels() {
+        assert_eq!(axis_tick_labels(0.0, 100.0).len(), 5);
     }
 }

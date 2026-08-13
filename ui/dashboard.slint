@@ -230,11 +230,38 @@ component InsCard inherits Card {
 // ── Monthly bar chart ──────────────────────────────────────────────────────────
 component MonthlyChart inherits Rectangle {
     in property <[DashMonthBar]> data: [];
+    // 5 "₹NK" labels, index 0 = bottom (₹0K) … index 4 = top (nice-rounded
+    // max) — matching the 0/25/50/75/100% positions the grid lines below
+    // are already drawn at (original: Chart.js y-axis, dashboard.js:111).
+    in property <[string]> y-ticks: [];
     callback month-clicked(string, string);  // (range-from, range-to)
+
+    HorizontalBox {
+        padding: 0px; spacing: 4px;
+
+        // Y-axis label gutter — same vertical split (flexible area + 18px
+        // bottom spacer) as the chart body on the right, so labels line
+        // up with the grid lines instead of the x-axis month row.
+        VerticalBox {
+            padding: 0px; spacing: 0px;
+            width: 32px;
+            Rectangle {
+                vertical-stretch: 1;
+                for frac[i] in [0.0, 0.25, 0.5, 0.75, 1.0] : Text {
+                    x: 0px; width: parent.width; height: 12px;
+                    y: max(0px, min(parent.height - 12px, parent.height * (1 - frac) - 6px));
+                    text: root.y-ticks.length > i ? root.y-ticks[i] : "";
+                    font-size: 8px; color: #90A4AE;
+                    horizontal-alignment: right; vertical-alignment: center;
+                }
+            }
+            Rectangle { height: 18px; }
+        }
 
     VerticalBox {
         padding: 0px; spacing: 0px;
         vertical-stretch: 1;
+        horizontal-stretch: 1;
 
         Rectangle {
             vertical-stretch: 1;
@@ -296,6 +323,7 @@ component MonthlyChart inherits Rectangle {
                 }
             }
         }
+    }
     }
 }
 
@@ -403,8 +431,101 @@ component RecentTxnList inherits Rectangle {
         horizontal-alignment: center; vertical-alignment: center;
     }
 
-    if rows.length > 0 : VerticalBox {
+    if data.length > 0 : ScrollView {
+        VerticalBox {
+            padding: 2px; spacing: 4px;
+            for item in root.data : Rectangle {
+                height: 22px;
+
+                // Color dot
+                Rectangle {
+                    x: 0px; y: 5px;
+                    width: 10px; height: 10px;
+                    border-radius: 5px;
+                    background: PiePalette.color(item.color-idx);
+                }
+
+                // Label
+                Text {
+                    x: 15px; y: 0px; width: 100px; height: 22px;
+                    text: item.label;
+                    font-size: 10px; color: #37474F;
+                    overflow: elide; vertical-alignment: center;
+                }
+
+                // Bar track
+                Rectangle {
+                    x: 120px; y: 7px;
+                    width: parent.width - 210px;
+                    height: 8px;
+                    background: #F5F5F5;
+                    border-radius: 4px;
+
+                    // Fill
+                    Rectangle {
+                        x: 0px; y: 0px;
+                        width: parent.width * item.w;
+                        height: parent.height;
+                        background: PiePalette.color(item.color-idx);
+                        border-radius: 4px;
+                        opacity: 0.8;
+                    }
+                }
+
+                // Percentage
+                Text {
+                    x: parent.width - 85px; y: 0px; width: 30px; height: 22px;
+                    text: item.pct + "%";
+                    font-size: 9px; color: #90A4AE;
+                    horizontal-alignment: right; vertical-alignment: center;
+                }
+
+                // Amount
+                Text {
+                    x: parent.width - 54px; y: 0px; width: 54px; height: 22px;
+                    text: item.amount-str;
+                    font-size: 10px; color: #546E7A;
+                    horizontal-alignment: right; vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// ── Cash flow sparkline ────────────────────────────────────────────────────────
+component CashFlowChart inherits Rectangle {
+    in property <[DashCashPt]> data: [];
+    // 5 "₹NK" labels, index 0 = bottom … index 4 = top — spans
+    // cashflow_min..cashflow_max (min-max scaled, not 0-based like the
+    // other two charts), so index 0 isn't necessarily "₹0K".
+    in property <[string]> y-ticks: [];
+
+    HorizontalBox {
+        padding: 0px; spacing: 4px;
+
+        // Y-axis label gutter — mirrors the flexible-area + 8px bottom
+        // spacer split of the chart body on the right.
+        VerticalBox {
+            padding: 0px; spacing: 0px;
+            width: 32px;
+            Rectangle {
+                vertical-stretch: 1;
+                for frac[i] in [0.0, 0.25, 0.5, 0.75, 1.0] : Text {
+                    x: 0px; width: parent.width; height: 12px;
+                    y: max(0px, min(parent.height - 12px, parent.height * (1 - frac) - 6px));
+                    text: root.y-ticks.length > i ? root.y-ticks[i] : "";
+                    font-size: 8px; color: #90A4AE;
+                    horizontal-alignment: right; vertical-alignment: center;
+                }
+            }
+            Rectangle { height: 8px; }
+        }
+
+    VerticalBox {
         padding: 0px; spacing: 0px;
+        vertical-stretch: 1;
+        horizontal-stretch: 1;
+
         Rectangle {
             height: 30px;
             HorizontalBox {
@@ -460,11 +581,15 @@ component RecentTxnList inherits Rectangle {
             }
         }
     }
+    }
 }
 
 // ── Top Vendors / Customers list (Dashboard card) ─────────────────────────────
 component TopVendorsList inherits Rectangle {
     in property <[DashVendorBar]> data: [];
+    // 5 "₹NK" labels, index 0 = left (₹0K) … index 4 = right (nice-rounded
+    // max) — original: Chart.js x-axis, dashboard.js:203.
+    in property <[string]> x-ticks: [];
 
     if data.length == 0 : Text {
         text: "No vendor data — classify transactions";
@@ -474,177 +599,10 @@ component TopVendorsList inherits Rectangle {
     }
 
     if data.length > 0 : VerticalBox {
-        padding: 0px; spacing: 0px;
-        Rectangle {
-            height: 30px;
-            HorizontalBox {
-                padding-left: Spacing.sm; padding-right: Spacing.sm; padding-top: 0px; padding-bottom: 0px; spacing: Spacing.sm;
-                Text { text: "Name";          font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; horizontal-stretch: 1; }
-                Text { text: "Type";          font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 60px; }
-                Text { text: "Debit (\u{20B9})";  font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 66px; horizontal-alignment: right; }
-                Text { text: "Credit (\u{20B9})"; font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 66px; horizontal-alignment: right; }
-                Text { text: "Net (\u{20B9})";    font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 66px; horizontal-alignment: right; }
-            }
-        }
-        Rectangle { height: 1px; background: FintechPalette.border; }
-        for v[idx] in root.data : Rectangle {
-            visible: idx < 5;
-            height: idx < 5 ? 36px : 0px;
-            clip: true;
-            background: Math.mod(idx, 2) == 0 ? FintechPalette.card : #F8FAFD;
-            HorizontalBox {
-                padding-left: Spacing.sm; padding-right: Spacing.sm; padding-top: 0px; padding-bottom: 0px; spacing: Spacing.sm;
-                Text { text: v.label; font-size: Type.small; font-weight: 600; color: FintechPalette.text; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
-                Text { text: v.kind; font-size: Type.micro; color: FintechPalette.text-muted; width: 60px; vertical-alignment: center; }
-                Text { text: v.debit-str == "" ? "\u{2014}" : v.debit-str; font-size: Type.small; color: FintechPalette.danger; width: 66px; horizontal-alignment: right; vertical-alignment: center; }
-                Text { text: v.credit-str == "" ? "\u{2014}" : v.credit-str; font-size: Type.small; color: FintechPalette.success; width: 66px; horizontal-alignment: right; vertical-alignment: center; }
-                Text {
-                    text: (v.net-is-positive ? "+" : "-") + v.net-str;
-                    font-size: Type.small; font-weight: 700;
-                    color: v.net-is-positive ? FintechPalette.success : FintechPalette.text;
-                    width: 66px; horizontal-alignment: right; vertical-alignment: center;
-                }
-            }
-        }
-    }
-}
+        padding: 0px; spacing: 2px;
 
-// ── Period filter bar ──────────────────────────────────────────────────────────
-// Reuses the exact same filter inputs the old Dashboard already had
-// (filter-banks/filter-vendors/filter-heads dropdowns + dash-filter-changed
-// callback, unchanged) plus a row of quick-range chips. The chips don't do
-// their own date math — they ask Rust for the range via `dash-date-preset`,
-// which is a thin wrapper around the same `preset_range()` helper the
-// Transactions tab's own Today/This Month/.../Prev FY buttons already use
-// (main.rs), just returning the answer instead of also mutating the
-// Transactions filter state.
-component PeriodFilterBar inherits Card {
-    in property <[string]> filter-banks:   ["All Banks"];
-    in property <[string]> filter-vendors: ["All Vendors"];
-    in property <[string]> filter-heads:   ["All Expense Heads"];
-    in-out property <string> from-text: "";
-    in-out property <string> to-text:   "";
-    in-out property <int>    bank-idx:   0;
-    in-out property <int>    vendor-idx: 0;
-    in-out property <int>    head-idx:   0;
-    in-out property <string> active-preset: "";
-    // "Filters" toggles the bank/vendor/head row open/closed — a real
-    // show/hide of the same existing dropdowns below, not a second set of
-    // fake filters.
-    property <bool> show-filters: false;
-
-    callback date-preset(string) -> DashPresetRange;
-    callback apply();
-
-    property <[{id: string, label: string}]> presets: [
-        { id: "today", label: "Today" },
-        { id: "this_month", label: "This Month" },
-        { id: "last_month", label: "Last Month" },
-        { id: "current_fy", label: "Current FY" },
-        { id: "prev_fy", label: "Prev FY" },
-    ];
-
-    VerticalBox {
-        padding: Spacing.card;
-        spacing: Spacing.md;
-
-        HorizontalBox {
-            padding: 0px; spacing: Spacing.md;
-
-            Text { text: "From"; font-size: Type.small; font-weight: 600; color: FintechPalette.text-muted; vertical-alignment: center; }
-            LineEdit {
-                placeholder-text: "DD/MM/YYYY"; text: root.from-text;
-                height: 32px; min-width: 100px; max-width: 100px; font-size: Type.small;
-                edited(v) => { root.from-text = v; }
-            }
-            Text { text: "To"; font-size: Type.small; font-weight: 600; color: FintechPalette.text-muted; vertical-alignment: center; }
-            LineEdit {
-                placeholder-text: "DD/MM/YYYY"; text: root.to-text;
-                height: 32px; min-width: 100px; max-width: 100px; font-size: Type.small;
-                edited(v) => { root.to-text = v; }
-            }
-
-            Rectangle { width: 1px; height: 24px; background: FintechPalette.border; }
-
-            for p in root.presets : Rectangle {
-                height: 28px; width: p.label.character-count * 6px + Spacing.md * 2;
-                border-radius: Radius.pill;
-                background: root.active-preset == p.id ? FintechPalette.primary : FintechPalette.page-bg;
-                TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.active-preset = p.id;
-                        // date-preset() is a pure lookup (main.rs's existing
-                        // preset_range() helper, reused rather than
-                        // reimplemented) — calling it twice below to read
-                        // both fields is harmless, it has no side effects.
-                        root.from-text = root.date-preset(p.id).from;
-                        root.to-text = root.date-preset(p.id).to;
-                        root.apply();
-                    }
-                }
-                Text {
-                    text: p.label; font-size: Type.micro; font-weight: 700;
-                    color: root.active-preset == p.id ? white : FintechPalette.text-muted;
-                    horizontal-alignment: center; vertical-alignment: center;
-                }
-            }
-
-            Rectangle { horizontal-stretch: 1; }
-
-            AppButton {
-                text: root.show-filters ? "Filters \u{25B4}" : "Filters \u{25BE}";
-                variant: "secondary"; compact: true;
-                clicked => { root.show-filters = !root.show-filters; }
-            }
-            AppButton {
-                text: "Apply"; variant: "primary"; compact: true;
-                clicked => { root.apply(); }
-            }
-        }
-
-        if root.show-filters : HorizontalBox {
-            padding: 0px; spacing: Spacing.md;
-            Text { text: "Bank"; font-size: Type.small; font-weight: 600; color: FintechPalette.text-muted; vertical-alignment: center; }
-            ComboBox { model: root.filter-banks;   current-index <=> root.bank-idx;   height: 32px; min-width: 140px; }
-            Text { text: "Vendor"; font-size: Type.small; font-weight: 600; color: FintechPalette.text-muted; vertical-alignment: center; }
-            ComboBox { model: root.filter-vendors; current-index <=> root.vendor-idx; height: 32px; min-width: 140px; }
-            Text { text: "Expense Head"; font-size: Type.small; font-weight: 600; color: FintechPalette.text-muted; vertical-alignment: center; }
-            ComboBox { model: root.filter-heads;   current-index <=> root.head-idx;   height: 32px; min-width: 160px; }
-            Rectangle { horizontal-stretch: 1; }
-        }
-    }
-}
-
-// ── Quick action card ──────────────────────────────────────────────────────────
-export component QuickActionCard inherits Rectangle {
-    in property <string> title:      "";
-    in property <string> subtitle:   "";
-    in property <string> icon:       "\u{25CF}";
-    in property <color>  icon-bg:    FintechPalette.primary;
-    in property <bool>   highlighted: false;
-    callback clicked();
-
-    background:    root.highlighted ? FintechPalette.primary : FintechPalette.card;
-    border-radius: Radius.lg;
-    border-width:  1px;
-    border-color:  root.highlighted ? FintechPalette.primary : FintechPalette.border;
-    horizontal-stretch: 1;
-    min-width: 150px;
-    height: 72px;
-    drop-shadow-blur:     6px;
-    drop-shadow-color:    #0A1F4412;
-    drop-shadow-offset-y: 1px;
-
-    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
-
-    HorizontalBox {
-        padding: Spacing.md; spacing: Spacing.sm;
-        Rectangle {
-            width: 36px; height: 36px; border-radius: Radius.pill;
-            background: root.highlighted ? #FFFFFF33 : root.icon-bg;
-            Text { text: root.icon; color: white; font-size: Type.h3; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-        }
+        ScrollView {
+        vertical-stretch: 1;
         VerticalBox {
             padding: 0px; spacing: Spacing.xs; alignment: center;
             Text {
@@ -656,6 +614,25 @@ export component QuickActionCard inherits Rectangle {
                 text: root.subtitle; font-size: Type.micro;
                 color: root.highlighted ? #FFFFFFC0 : FintechPalette.text-muted;
                 overflow: elide; wrap: word-wrap;
+            }
+        }
+        }
+
+        // X-axis tick row — aligned with the same 95px left margin /
+        // (parent.width - 95px) bar-length region the debit/credit bars
+        // above use, so labels land under the same 0/25/50/75/100% points
+        // the bars themselves are scaled against. x is clamped into
+        // [0, parent.width - 40px] so the leftmost/rightmost labels (whose
+        // natural centered position would otherwise straddle the edge)
+        // never extend past ChartCard's clip:true boundary.
+        Rectangle {
+            height: 14px;
+            for frac[i] in [0.0, 0.25, 0.5, 0.75, 1.0] : Text {
+                x: max(0px, min(parent.width - 40px, 95px + (parent.width - 95px) * frac - 20px));
+                width: 40px; y: 0px; height: 14px;
+                text: root.x-ticks.length > i ? root.x-ticks[i] : "";
+                font-size: 8px; color: #90A4AE;
+                horizontal-alignment: center; vertical-alignment: center;
             }
         }
     }
@@ -698,7 +675,12 @@ export component DashboardScreen inherits Rectangle {
     in property <[DashVendorBar]> chart-vendors:   [];
     in property <[TxnRow]>        transaction-rows: [];
 
-    // ── Filter options (unchanged) ────────────────────────────────────────────
+    // ── Chart axis-tick labels (5 each, bottom/left → top/right) ─────────────
+    in property <[string]> chart-monthly-y-ticks:  [];
+    in property <[string]> chart-cashflow-y-ticks: [];
+    in property <[string]> chart-vendors-x-ticks:  [];
+
+    // ── Filter options ────────────────────────────────────────────────────────
     in property <[string]> filter-banks:   ["All Banks"];
     in property <[string]> filter-vendors: ["All Vendors"];
     in property <[string]> filter-heads:   ["All Expense Heads"];
@@ -849,6 +831,7 @@ export component DashboardScreen inherits Rectangle {
                         }
                         MonthlyChart {
                             data: root.chart-monthly;
+                            y-ticks: root.chart-monthly-y-ticks;
                             vertical-stretch: 1;
                             month-clicked(f, t) => {
                                 root.dash-from = f;
@@ -898,17 +881,43 @@ export component DashboardScreen inherits Rectangle {
                     }
                 }
 
-                ChartCard {
-                    horizontal-stretch: 1;
-                    chart-title: "Top 5 Vendors / Customers";
-                    Rectangle {
-                        height: 24px;
-                        TouchArea { mouse-cursor: pointer; clicked => { root.view-all-clicked(); } }
-                        Text { text: "View All"; font-size: Type.small; font-weight: 700; color: FintechPalette.primary; horizontal-alignment: right; vertical-alignment: center; }
+                if root.has-data : HorizontalBox {
+                    spacing: 12px; height: 240px;
+
+                    // Cash Flow Trend (2fr)
+                    ChartCard {
+                        horizontal-stretch: 2;
+                        chart-title: "CASH FLOW TREND";
+
+                        CashFlowChart {
+                            data: root.chart-cashflow;
+                            y-ticks: root.chart-cashflow-y-ticks;
+                            vertical-stretch: 1;
+                        }
                     }
-                    TopVendorsList {
-                        data: root.chart-vendors;
-                        vertical-stretch: 1;
+
+                    // Top 10 Vendors / Customers (1fr)
+                    ChartCard {
+                        horizontal-stretch: 1;
+                        chart-title: "TOP 10 VENDORS / CUSTOMERS";
+
+                        // Legend
+                        HorizontalBox {
+                            padding: 0px; spacing: 10px; height: 14px;
+                            Rectangle { width: 10px; height: 10px; border-radius: 2px;
+                                        background: #C62828; opacity: 0.75; }
+                            Text { text: "Debit"; font-size: 9px; color: #37474F; vertical-alignment: center; }
+                            Rectangle { width: 10px; height: 10px; border-radius: 2px;
+                                        background: #2E7D32; opacity: 0.75; }
+                            Text { text: "Credit"; font-size: 9px; color: #37474F; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        VendorsChart {
+                            data: root.chart-vendors;
+                            x-ticks: root.chart-vendors-x-ticks;
+                            vertical-stretch: 1;
+                        }
                     }
                 }
             }

@@ -177,10 +177,281 @@ component MFtr inherits Rectangle {
     }
 }
 
+<<<<<<< HEAD
 // TxnHeader / TxnTableRow (old table header + row components) removed —
 // Phase 2 replaced every call site with TxnTable/TxnDataHeader/TxnDataRow
 // (transactions.slint), which own the sticky header + synced horizontal-
 // scroll table now used by the Transactions screen below.
+=======
+// ── Transaction table header ───────────────────────────────────────────────────
+// Original: thead { background:#1565C0; } th { padding:7px 9px; font-weight:600; white-space:nowrap; border-right:1px solid #1976D2; }
+// Generated columns have font-style:italic. Debit header color:#FFCDD2, Credit:#C8E6C9
+component TxnHeader inherits Rectangle {
+    height: 32px; background: #1565C0;
+    accessible-role: table;
+    accessible-label: "Transactions table header";
+    Rectangle { y: 31px; height: 1px; background: #1976D2; }
+
+    HorizontalBox {
+        padding: 0px; spacing: 0px;
+        // Bank Name 90px (raw)
+        Rectangle { width: 90px; clip: true;
+            Rectangle { x: 89px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 72px; height: parent.height; text: "Bank Name"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Account No 90px (raw)
+        Rectangle { width: 90px; clip: true;
+            Rectangle { x: 89px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 72px; height: parent.height; text: "Account No"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Date 82px (raw)
+        Rectangle { width: 82px; clip: true;
+            Rectangle { x: 81px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 64px; height: parent.height; text: "Date"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Narration stretch (raw)
+        Rectangle { horizontal-stretch: 1; clip: true;
+            Rectangle { x: parent.width - 1px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: parent.width - 18px; height: parent.height; text: "Narration"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Ref 95px (raw)
+        Rectangle { width: 95px; clip: true;
+            Rectangle { x: 94px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 77px; height: parent.height; text: "Ref"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Debit 92px (raw) — pink tint header
+        Rectangle { width: 92px; clip: true;
+            Rectangle { x: 91px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 83px; height: parent.height; text: "Debit"; font-size: 12px; font-weight: 600; color: #FFCDD2; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Credit 92px (raw) — green tint header
+        Rectangle { width: 92px; clip: true;
+            Rectangle { x: 91px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 83px; height: parent.height; text: "Credit"; font-size: 12px; font-weight: 600; color: #C8E6C9; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Balance 100px (raw)
+        Rectangle { width: 100px; clip: true;
+            Rectangle { x: 99px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 91px; height: parent.height; text: "Balance"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Vendor/Customer 120px (generated — italic)
+        Rectangle { width: 120px; clip: true;
+            Rectangle { x: 119px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 102px; height: parent.height; text: "Vendor/Customer"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Ledger for Posting 120px (generated — italic)
+        Rectangle { width: 120px; clip: true;
+            Rectangle { x: 119px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 102px; height: parent.height; text: "Ledger for Posting"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
+        }
+        // Expense Head 100px (generated — italic)
+        Rectangle { width: 100px; clip: true;
+            Rectangle { x: 99px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 82px; height: parent.height; text: "Expense Head"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
+        }
+        // Type/Status 75px (generated — italic)
+        Rectangle { width: 75px; clip: true;
+            Rectangle { x: 74px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 57px; height: parent.height; text: "Type/Status"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
+        }
+        // Tags 80px (generated — italic, min-width:80px in original)
+        Rectangle { width: 80px; clip: true;
+            Rectangle { x: 79px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 9px; width: 62px; height: parent.height; text: "Tags"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+        // Review 60px (generated — italic)
+        Rectangle { width: 60px; clip: true;
+            Text { x: 9px; width: 42px; height: parent.height; text: "Review"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        }
+    }
+}
+
+// ── Custom transaction table row ───────────────────────────────────────────────
+component TxnTableRow inherits Rectangle {
+    in property <TxnRow> data;
+    in property <int>    row-idx;
+    in property <bool>   compact: false;
+    callback clicked(int);
+
+    height: root.compact ? 22px : 26px;
+    background:
+        root.data.row-color == 1 ? #E8F5E9 :
+        root.data.row-color == 2 ? #FFFDE7 :
+        root.data.row-color == 3 ? #FFEBEE :
+        root.data.row-color == 4 ? #F3E5F5 :
+        root.data.row-color == 5 ? #FCE4EC :
+        root.data.row-color == 6 ? #E3F2FD :
+        #FFFFFF;
+    accessible-role: list-item;
+    accessible-label: root.data.date + ", " + root.data.narration
+        + (root.data.debit != "" ? ", Debit " + root.data.debit : "")
+        + (root.data.credit != "" ? ", Credit " + root.data.credit : "")
+        + ", Balance " + root.data.balance
+        + ", " + root.data.status-text;
+
+    // Bottom row separator
+    Rectangle { y: parent.height - 1px; height: 1px; background: #E3F2FD; }
+
+    ta := TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => { root.clicked(root.row-idx); }
+    }
+
+    HorizontalBox {
+        padding: 0px; spacing: 0px;
+
+        // Bank Name 90px (matches header)
+        Rectangle { width: 90px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.bank-name; font-size: 11px; color: #555555;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Account No 90px (matches header)
+        Rectangle { width: 90px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.account-no; font-size: 11px; color: #555555;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Date 82px
+        Rectangle { width: 82px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.date; font-size: 12px; color: #0A1929;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Narration stretch
+        Rectangle { horizontal-stretch: 1; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.narration; font-size: 12px; color: #0A1929;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Ref 95px
+        Rectangle { width: 95px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.ref-no; font-size: 11px; color: #546E7A;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Debit 92px right-aligned red
+        Rectangle { width: 92px; clip: true;
+            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+                   text: root.data.debit;
+                   font-size: 12px; font-weight: root.data.debit != "" ? 600 : 400;
+                   color: root.data.debit != "" ? #B71C1C : #CCCCCC;
+                   horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Credit 92px right-aligned green
+        Rectangle { width: 92px; clip: true;
+            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+                   text: root.data.credit;
+                   font-size: 12px; font-weight: root.data.credit != "" ? 600 : 400;
+                   color: root.data.credit != "" ? #1B5E20 : #CCCCCC;
+                   horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Balance 100px right-aligned blue
+        Rectangle { width: 100px; clip: true;
+            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+                   text: root.data.balance; font-size: 12px; font-weight: 600;
+                   color: #0D47A1;
+                   horizontal-alignment: right; vertical-alignment: center; }
+        }
+        // Vendor 120px
+        Rectangle { width: 120px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.vendor; font-size: 12px; color: #0D47A1; font-weight: 600;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Ledger 120px
+        Rectangle { width: 120px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.ledger; font-size: 12px; color: #0D47A1; font-weight: 600;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Expense Head 100px
+        Rectangle { width: 100px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.expense-head; font-size: 11px; color: #455A64;
+                   vertical-alignment: center; overflow: elide; }
+        }
+        // Status 75px — chip rendering
+        Rectangle { width: 75px; clip: true;
+            HorizontalBox {
+                padding-left: 4px; padding-right: 4px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 2px; alignment: start;
+                if root.data.row-color == 1 : Rectangle {
+                    height: 14px; min-width: 34px; background: #C8E6C9;
+                    border-radius: 7px; border-width: 1px; border-color: #81C784;
+                    Text { text: "HIGH"; font-size: 9px; font-weight: 800; color: #1B5E20;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 3 : Rectangle {
+                    height: 14px; min-width: 42px; background: #FFCDD2;
+                    border-radius: 7px; border-width: 1px; border-color: #EF9A9A;
+                    Text { text: "REVIEW"; font-size: 9px; font-weight: 800; color: #B71C1C;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 4 : Rectangle {
+                    height: 14px; min-width: 56px; background: #E1BEE7;
+                    border-radius: 7px; border-width: 1px; border-color: #BA68C8;
+                    Text { text: "SUSPENSE"; font-size: 9px; font-weight: 800; color: #6A1B9A;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 5 : Rectangle {
+                    height: 14px; min-width: 30px; background: #FCE4EC;
+                    border-radius: 7px; border-width: 1px; border-color: #E91E63;
+                    Text { text: "DUP"; font-size: 9px; font-weight: 800; color: #880E4F;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 6 : Rectangle {
+                    height: 14px; min-width: 38px; background: #BBDEFB;
+                    border-radius: 7px; border-width: 1px; border-color: #64B5F6;
+                    Text { text: "MANUAL"; font-size: 9px; font-weight: 800; color: #0D47A1;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.row-color == 0 : Text {
+                    text: root.data.status-text; font-size: 10px; color: #888888;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        // Tags 80px — GST/TAX/DUP badges (original: min-width:80px)
+        Rectangle { width: 80px; clip: true;
+            HorizontalBox {
+                padding-left: 3px; padding-right: 3px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 2px; alignment: start;
+                if root.data.has-gst : Rectangle {
+                    height: 14px; min-width: 26px; background: #C8E6C9;
+                    border-radius: 3px; border-width: 1px; border-color: #66BB6A;
+                    Text { text: "GST"; font-size: 9px; font-weight: 800; color: #1B5E20;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.has-tax : Rectangle {
+                    height: 14px; min-width: 26px; background: #FFE0B2;
+                    border-radius: 3px; border-width: 1px; border-color: #FFA726;
+                    Text { text: "TAX"; font-size: 9px; font-weight: 800; color: #BF360C;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.data.has-dup-tag : Rectangle {
+                    height: 14px; min-width: 26px; background: #FCE4EC;
+                    border-radius: 3px; border-width: 1px; border-color: #E91E63;
+                    Text { text: "DUP"; font-size: 9px; font-weight: 800; color: #880E4F;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+        // Review 60px (original: .review-ok #2e7d32 checkmark, .review-reason
+        // #bf360c failure text — two colors, not one flat grey)
+        Rectangle { width: 60px; clip: true;
+            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+                   text: root.data.review; font-size: 11px;
+                   color: root.data.review == "\u{2713}" ? #2E7D32
+                        : root.data.review == "" ? #546E7A
+                        : #BF360C;
+                   vertical-alignment: center; overflow: elide; }
+        }
+    }
+}
+>>>>>>> fix/old-ui-fidelity
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MainScreen
@@ -289,6 +560,9 @@ export component MainScreen inherits Rectangle {
     in property <[DashExpBar]>    dash-chart-expenses: [];
     in property <[DashCashPt]>    dash-chart-cashflow: [];
     in property <[DashVendorBar]> dash-chart-vendors:  [];
+    in property <[string]> dash-chart-monthly-y-ticks:  [];
+    in property <[string]> dash-chart-cashflow-y-ticks: [];
+    in property <[string]> dash-chart-vendors-x-ticks:  [];
     in property <[string]> dash-filter-banks:   ["All Banks"];
     in property <[string]> dash-filter-vendors: ["All Vendors"];
     in property <[string]> dash-filter-heads:   ["All Expense Heads"];
@@ -910,6 +1184,7 @@ export component MainScreen inherits Rectangle {
                                     }
                                 }
 
+<<<<<<< HEAD
                                 if root.transaction-rows.length > 0 : SummarySection {
                                     title: "CLIENT";
                                     SR { lbl: "Name";    val: root.dash-client-name != "" ? root.dash-client-name : "\u{2014}"; vcol: #37474F; }
@@ -917,6 +1192,49 @@ export component MainScreen inherits Rectangle {
                                     SR { lbl: "Account"; val: root.dash-account-no  != "" ? root.dash-account-no  : "\u{2014}"; vcol: #37474F; }
                                     SR { lbl: "Period";  val: root.dash-period;  vcol: #546E7A; }
                                 }
+=======
+                                // ── Top stat tiles (original: 4-tile .sum-stats-grid right
+                                // after client info — Transactions/To Review/Duplicates/GST-Tax,
+                                // each a sum-link that drills into that filter except the plain
+                                // Transactions count). "To Review" reuses dash-unreviewed, the
+                                // same pending/unreviewed count the banner below and the
+                                // "Unreviewed" row further down already use — not a new value.
+                                SDivider { title: "TRANSACTIONS"; }
+                                HorizontalBox {
+                                    padding: 0px; spacing: 6px;
+                                    // sum-stat: padding:7px 8px; text-align:center; border-radius:6px
+                                    // sum-stat-val: font-size:15px; font-weight:800; color:#0D47A1
+                                    // sum-stat-lbl: font-size:9px; color:#888; text-transform:uppercase; letter-spacing:.4px
+                                    for s in [
+                                        {v: root.dash-txn-count,  lbl: "TRANSACTIONS", flt: ""},
+                                        {v: root.dash-unreviewed, lbl: "TO REVIEW",    flt: "unreviewed"},
+                                        {v: root.dash-duplicates, lbl: "DUPLICATES",   flt: "duplicates"},
+                                        {v: root.dash-gst-count,  lbl: "GST/TAX",      flt: "gst"},
+                                    ] : Rectangle {
+                                        horizontal-stretch: 1; height: 46px;
+                                        background: #FFFFFF; border-radius: 6px;
+                                        border-width: 1px; border-color: #BBDEFB;
+                                        VerticalBox {
+                                            padding-top: 7px; padding-bottom: 7px;
+                                            padding-left: 8px; padding-right: 8px;
+                                            spacing: 2px; alignment: center;
+                                            Text { text: s.v; font-size: 15px; font-weight: 800; color: #0D47A1; horizontal-alignment: center; }
+                                            Text { text: s.lbl; font-size: 9px; color: #888888; letter-spacing: 0.4px; horizontal-alignment: center; }
+                                        }
+                                        if s.flt != "" : TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.show-dashboard = false; root.active-filter = s.flt; root.drill-filter(s.flt); }
+                                        }
+                                    }
+                                }
+
+                                SDivider { title: "BALANCES"; }
+                                SR { lbl: "Opening Balance"; val: root.dash-opening;      vcol: #1565C0; }
+                                SR { lbl: "Total Receipts";  val: root.dash-credits;      vcol: #2E7D32; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "credits";      root.drill-filter("credits"); } }
+                                SR { lbl: "Total Payments";  val: root.dash-debits;       vcol: #C62828; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "debits";       root.drill-filter("debits"); } }
+                                SR { lbl: "Closing Balance"; val: root.dash-closing;      vcol: #1565C0; }
+                                SR { lbl: "Calc. Closing";   val: root.dash-calc-closing; vcol: #546E7A; }
+>>>>>>> fix/old-ui-fidelity
 
                                 if root.transaction-rows.length > 0 : SummarySection {
                                     title: "BALANCES";
@@ -982,11 +1300,35 @@ export component MainScreen inherits Rectangle {
                                     }
                                 }
 
+<<<<<<< HEAD
                                 if root.transaction-rows.length > 0 : SummarySection {
                                     title: "REVIEW STATUS";
                                     SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "unreviewed";   root.drill-filter("unreviewed"); } }
                                     SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: FintechPalette.warning; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "needs_review"; root.drill-filter("needs_review"); } }
                                     if root.dash-has-suspense : SR { lbl: "Suspense"; val: root.dash-suspense; vcol: FintechPalette.purple; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense"; root.drill-filter("suspense"); } }
+=======
+                                // Pending-classification badge (original: .pending-badge —
+                                // background #fff3e0/color #e65100 when pending>0, else
+                                // background #e8f5e9/color #2e7d32). "Pending" there means
+                                // status === 'unreviewed' specifically, same as dash-unreviewed
+                                // used for the "Unreviewed" row below — not dash-needs-review,
+                                // which is a different, narrower bucket.
+                                if root.transaction-rows.length > 0 && root.dash-unreviewed != "0" : Rectangle {
+                                    height: 28px; border-radius: 5px; background: #FFF3E0;
+                                    Text {
+                                        text: "\u{26A0} " + root.dash-unreviewed + " of " + root.dash-txn-count + " need review";
+                                        font-size: 12px; font-weight: 600; color: #E65100;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                if root.transaction-rows.length > 0 && root.dash-unreviewed == "0" : Rectangle {
+                                    height: 28px; border-radius: 5px; background: #E8F5E9;
+                                    Text {
+                                        text: "\u{2713} All " + root.dash-txn-count + " classified";
+                                        font-size: 12px; font-weight: 600; color: #2E7D32;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+>>>>>>> fix/old-ui-fidelity
                                 }
 
                                 if root.transaction-rows.length > 0 : SummarySection {
@@ -997,6 +1339,7 @@ export component MainScreen inherits Rectangle {
                                 }
 
                                 // ── Classification Quality card ───────────────────────────────────────
+<<<<<<< HEAD
                                 if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : SummarySection {
                                     title: "CLASSIFICATION QUALITY";
                                     Rectangle {
@@ -1009,6 +1352,21 @@ export component MainScreen inherits Rectangle {
                                         Badge { text: "HIGH " + root.dash-conf-hi-count;  fg: #1B5E20; bg: #C8E6C9; }
                                         Badge { text: "MED "  + root.dash-conf-med-count; fg: #F57F17; bg: #FFF9C4; }
                                         Badge { text: "LOW "  + root.dash-conf-lo-count;  fg: #C62828; bg: #FFCDD2; }
+=======
+                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : SDivider { title: "CLASSIFICATION QUALITY"; }
+                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : Rectangle {
+                                    // Original: .conf-bar-hi #388E3C, .conf-bar-med #EF6C00, .conf-bar-lo #C62828
+                                    height: 10px; border-radius: 4px; clip: true; background: #C62828;
+                                    // High conf segment (green, left)
+                                    Rectangle {
+                                        x: 0; y: 0; height: parent.height; background: #388E3C;
+                                        width: parent.width * root.dash-conf-hi-frac;
+                                    }
+                                    // Medium conf segment (orange, after green)
+                                    Rectangle {
+                                        x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #EF6C00;
+                                        width: parent.width * root.dash-conf-med-frac;
+>>>>>>> fix/old-ui-fidelity
                                     }
                                     if root.dash-cq-ai != "0" : SR { lbl: "\u{2726} AI classified"; val: root.dash-cq-ai;   vcol: FintechPalette.purple; }
                                     if root.dash-cq-rule != "0" : SR { lbl: "Rule matched";         val: root.dash-cq-rule; vcol: FintechPalette.primary; }
@@ -1038,6 +1396,65 @@ export component MainScreen inherits Rectangle {
                                     title: "GST / TAX";
                                     SR { lbl: "GST Paid";        val: root.dash-gst-paid; vcol: FintechPalette.danger; }
                                     SR { lbl: "GST Recv./Refund"; val: root.dash-gst-recv; vcol: FintechPalette.success; }
+                                }
+
+                                // ── Duplicates Detected card (original: .sum-card with
+                                // border-color:#f48fb1, title color:#880e4f) — a standalone
+                                // callout distinct from the plain "Duplicates" row above
+                                // (that row stays, for its click-to-filter behavior).
+                                if root.dash-duplicates != "0" : Rectangle {
+                                    border-width: 1px; border-color: #F48FB1; border-radius: 6px;
+                                    background: #FFFFFF;
+                                    VerticalBox {
+                                        padding-top: 8px; padding-bottom: 8px;
+                                        padding-left: 10px; padding-right: 10px;
+                                        spacing: 4px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 4px;
+                                            Rectangle {
+                                                width: 26px; height: 13px; border-radius: 3px;
+                                                background: #FCE4EC; border-width: 1px; border-color: #E91E63;
+                                                Text { text: "DUP"; font-size: 8px; font-weight: 800; color: #880E4F;
+                                                       horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Text {
+                                                text: "Duplicates Detected"; font-size: 9.5px; font-weight: 800;
+                                                letter-spacing: 0.6px; color: #880E4F; vertical-alignment: center;
+                                            }
+                                        }
+                                        HorizontalBox {
+                                            padding: 0px;
+                                            Text { text: "Flagged rows"; font-size: 10px; color: #37474F; horizontal-stretch: 1; vertical-alignment: center; }
+                                            Text { text: root.dash-duplicates; font-size: 10px; font-weight: 700; color: #C62828; vertical-alignment: center; }
+                                        }
+                                        Text { text: "Use the Duplicates filter to review"; font-size: 10px; color: #888888; }
+                                    }
+                                }
+
+                                // ── Suspense card (original: .sum-card with border-color:
+                                // #ba68c8, title color:#6a1b9a) — dash-suspense already IS
+                                // the ₹ amount in suspense (main.rs: fmt_amt(s.suspense_amount)),
+                                // not a row count, so no backend change was needed here; the
+                                // plain "Suspense" row above (a count-shaped SR, reusing the
+                                // same dash-suspense value) stays for its click-to-filter
+                                // behavior.
+                                if root.dash-has-suspense : Rectangle {
+                                    border-width: 1px; border-color: #BA68C8; border-radius: 6px;
+                                    background: #FFFFFF;
+                                    VerticalBox {
+                                        padding-top: 8px; padding-bottom: 8px;
+                                        padding-left: 10px; padding-right: 10px;
+                                        spacing: 4px;
+                                        Text {
+                                            text: "Suspense"; font-size: 9.5px; font-weight: 800;
+                                            letter-spacing: 0.6px; color: #6A1B9A;
+                                        }
+                                        HorizontalBox {
+                                            padding: 0px;
+                                            Text { text: "Amount in suspense"; font-size: 10px; color: #37474F; horizontal-stretch: 1; vertical-alignment: center; }
+                                            Text { text: root.dash-suspense; font-size: 10px; font-weight: 700; color: #7B1FA2; vertical-alignment: center; }
+                                        }
+                                    }
                                 }
 
                                 // ── Recurring parties ─────────────────────────────────────────────────
@@ -1105,11 +1522,70 @@ export component MainScreen inherits Rectangle {
                 }
             }
 
+<<<<<<< HEAD
         // The Dashboard itself no longer lives here — this whole VerticalLayout
         // (Toolbar/DateBar/Tabs/content/Footer) is now only instantiated
         // `if !root.show-dashboard`, so a "show-dashboard" branch inside it
         // could never run. See the new Sidebar+Header+DashboardScreen shell
         // below, added as a sibling `if root.show-dashboard` branch instead.
+=======
+        // ─────────────────────────── DASHBOARD ────────────────────────────────
+        if root.show-dashboard : DashboardScreen {
+            width: parent.width; height: parent.height;
+            // Summary
+            opening-balance: root.dash-opening;
+            total-credits:   root.dash-credits;
+            total-debits:    root.dash-debits;
+            closing-balance: root.dash-closing;
+            net-cash-flow:   root.dash-net-flow;
+            txn-count:       root.dash-txn-count;
+            vendor-count:    root.dash-vendors;
+            top-expense:     root.dash-top-expense;
+            top-expense-amt: root.dash-top-exp-amt;
+            has-data:        root.dash-has-data;
+            // Charts
+            chart-monthly:   root.dash-chart-monthly;
+            chart-expenses:  root.dash-chart-expenses;
+            chart-cashflow:  root.dash-chart-cashflow;
+            chart-vendors:   root.dash-chart-vendors;
+            chart-monthly-y-ticks:  root.dash-chart-monthly-y-ticks;
+            chart-cashflow-y-ticks: root.dash-chart-cashflow-y-ticks;
+            chart-vendors-x-ticks:  root.dash-chart-vendors-x-ticks;
+            // Filter options
+            filter-banks:    root.dash-filter-banks;
+            filter-vendors:  root.dash-filter-vendors;
+            filter-heads:    root.dash-filter-heads;
+            // Insights
+            ins-max-dr:       root.dash-ins-max-dr;
+            ins-max-dr-narr:  root.dash-ins-max-dr-narr;
+            ins-max-cr:       root.dash-ins-max-cr;
+            ins-max-cr-narr:  root.dash-ins-max-cr-narr;
+            ins-avg-dr:       root.dash-ins-avg-dr;
+            ins-avg-cr:       root.dash-ins-avg-cr;
+            ins-dr-count:     root.dash-ins-dr-count;
+            ins-cr-count:     root.dash-ins-cr-count;
+            ins-freq-vendor:  root.dash-ins-freq-vendor;
+            // Callbacks
+            dash-filter-changed(f, t, b, v, h) => {
+                root.dash-filter-changed(f, t, b, v, h);
+            }
+            card-credits-clicked => {
+                root.show-dashboard = false;
+                root.active-filter = "credits";
+                root.drill-filter("credits");
+            }
+            card-debits-clicked => {
+                root.show-dashboard = false;
+                root.active-filter = "debits";
+                root.drill-filter("debits");
+            }
+            card-txns-clicked => {
+                root.show-dashboard = false;
+                root.active-filter = "all";
+                root.drill-filter("all");
+            }
+        }
+>>>>>>> fix/old-ui-fidelity
 
         } // end content wrapper Rectangle
 

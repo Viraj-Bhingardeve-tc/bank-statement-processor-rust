@@ -135,6 +135,9 @@ export component AppWindow inherits Window {
     in property <[DashExpBar]>    dash-chart-expenses: [];
     in property <[DashCashPt]>    dash-chart-cashflow: [];
     in property <[DashVendorBar]> dash-chart-vendors:  [];
+    in property <[string]> dash-chart-monthly-y-ticks:  [];
+    in property <[string]> dash-chart-cashflow-y-ticks: [];
+    in property <[string]> dash-chart-vendors-x-ticks:  [];
     in property <[string]> dash-filter-banks:   ["All Banks"];
     in property <[string]> dash-filter-vendors: ["All Vendors"];
     in property <[string]> dash-filter-heads:   ["All Expense Heads"];
@@ -452,6 +455,9 @@ export component AppWindow inherits Window {
         dash-chart-expenses:  root.dash-chart-expenses;
         dash-chart-cashflow:  root.dash-chart-cashflow;
         dash-chart-vendors:   root.dash-chart-vendors;
+        dash-chart-monthly-y-ticks:  root.dash-chart-monthly-y-ticks;
+        dash-chart-cashflow-y-ticks: root.dash-chart-cashflow-y-ticks;
+        dash-chart-vendors-x-ticks:  root.dash-chart-vendors-x-ticks;
         dash-filter-banks:    root.dash-filter-banks;
         dash-filter-vendors:  root.dash-filter-vendors;
         dash-filter-heads:    root.dash-filter-heads;
