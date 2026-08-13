@@ -167,11 +167,38 @@ component InsCard inherits Rectangle {
 // ── Monthly bar chart ──────────────────────────────────────────────────────────
 component MonthlyChart inherits Rectangle {
     in property <[DashMonthBar]> data: [];
+    // 5 "₹NK" labels, index 0 = bottom (₹0K) … index 4 = top (nice-rounded
+    // max) — matching the 0/25/50/75/100% positions the grid lines below
+    // are already drawn at (original: Chart.js y-axis, dashboard.js:111).
+    in property <[string]> y-ticks: [];
     callback month-clicked(string, string);  // (range-from, range-to)
+
+    HorizontalBox {
+        padding: 0px; spacing: 4px;
+
+        // Y-axis label gutter — same vertical split (flexible area + 18px
+        // bottom spacer) as the chart body on the right, so labels line
+        // up with the grid lines instead of the x-axis month row.
+        VerticalBox {
+            padding: 0px; spacing: 0px;
+            width: 32px;
+            Rectangle {
+                vertical-stretch: 1;
+                for frac[i] in [0.0, 0.25, 0.5, 0.75, 1.0] : Text {
+                    x: 0px; width: parent.width; height: 12px;
+                    y: max(0px, min(parent.height - 12px, parent.height * (1 - frac) - 6px));
+                    text: root.y-ticks.length > i ? root.y-ticks[i] : "";
+                    font-size: 8px; color: #90A4AE;
+                    horizontal-alignment: right; vertical-alignment: center;
+                }
+            }
+            Rectangle { height: 18px; }
+        }
 
     VerticalBox {
         padding: 0px; spacing: 0px;
         vertical-stretch: 1;
+        horizontal-stretch: 1;
 
         // Y-axis grid lines + bars
         Rectangle {
@@ -236,6 +263,7 @@ component MonthlyChart inherits Rectangle {
                 }
             }
         }
+    }
     }
 }
 
@@ -313,10 +341,36 @@ component ExpenseChart inherits Rectangle {
 // ── Cash flow sparkline ────────────────────────────────────────────────────────
 component CashFlowChart inherits Rectangle {
     in property <[DashCashPt]> data: [];
+    // 5 "₹NK" labels, index 0 = bottom … index 4 = top — spans
+    // cashflow_min..cashflow_max (min-max scaled, not 0-based like the
+    // other two charts), so index 0 isn't necessarily "₹0K".
+    in property <[string]> y-ticks: [];
+
+    HorizontalBox {
+        padding: 0px; spacing: 4px;
+
+        // Y-axis label gutter — mirrors the flexible-area + 8px bottom
+        // spacer split of the chart body on the right.
+        VerticalBox {
+            padding: 0px; spacing: 0px;
+            width: 32px;
+            Rectangle {
+                vertical-stretch: 1;
+                for frac[i] in [0.0, 0.25, 0.5, 0.75, 1.0] : Text {
+                    x: 0px; width: parent.width; height: 12px;
+                    y: max(0px, min(parent.height - 12px, parent.height * (1 - frac) - 6px));
+                    text: root.y-ticks.length > i ? root.y-ticks[i] : "";
+                    font-size: 8px; color: #90A4AE;
+                    horizontal-alignment: right; vertical-alignment: center;
+                }
+            }
+            Rectangle { height: 8px; }
+        }
 
     VerticalBox {
         padding: 0px; spacing: 0px;
         vertical-stretch: 1;
+        horizontal-stretch: 1;
 
         Rectangle {
             vertical-stretch: 1;
@@ -363,11 +417,15 @@ component CashFlowChart inherits Rectangle {
 
         Rectangle { height: 8px; }
     }
+    }
 }
 
 // ── Top vendors horizontal bar ─────────────────────────────────────────────────
 component VendorsChart inherits Rectangle {
     in property <[DashVendorBar]> data: [];
+    // 5 "₹NK" labels, index 0 = left (₹0K) … index 4 = right (nice-rounded
+    // max) — original: Chart.js x-axis, dashboard.js:203.
+    in property <[string]> x-ticks: [];
 
     if data.length == 0 : Text {
         text: "No vendor data — classify transactions";
@@ -375,7 +433,11 @@ component VendorsChart inherits Rectangle {
         horizontal-alignment: center; vertical-alignment: center;
     }
 
-    if data.length > 0 : ScrollView {
+    if data.length > 0 : VerticalBox {
+        padding: 0px; spacing: 2px;
+
+        ScrollView {
+        vertical-stretch: 1;
         VerticalBox {
             padding: 2px; spacing: 5px;
             for v in root.data : Rectangle {
@@ -426,6 +488,25 @@ component VendorsChart inherits Rectangle {
                 }
             }
         }
+        }
+
+        // X-axis tick row — aligned with the same 95px left margin /
+        // (parent.width - 95px) bar-length region the debit/credit bars
+        // above use, so labels land under the same 0/25/50/75/100% points
+        // the bars themselves are scaled against. x is clamped into
+        // [0, parent.width - 40px] so the leftmost/rightmost labels (whose
+        // natural centered position would otherwise straddle the edge)
+        // never extend past ChartCard's clip:true boundary.
+        Rectangle {
+            height: 14px;
+            for frac[i] in [0.0, 0.25, 0.5, 0.75, 1.0] : Text {
+                x: max(0px, min(parent.width - 40px, 95px + (parent.width - 95px) * frac - 20px));
+                width: 40px; y: 0px; height: 14px;
+                text: root.x-ticks.length > i ? root.x-ticks[i] : "";
+                font-size: 8px; color: #90A4AE;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
     }
 }
 
@@ -459,6 +540,11 @@ export component DashboardScreen inherits Rectangle {
     in property <[DashExpBar]>    chart-expenses:  [];
     in property <[DashCashPt]>    chart-cashflow:  [];
     in property <[DashVendorBar]> chart-vendors:   [];
+
+    // ── Chart axis-tick labels (5 each, bottom/left → top/right) ─────────────
+    in property <[string]> chart-monthly-y-ticks:  [];
+    in property <[string]> chart-cashflow-y-ticks: [];
+    in property <[string]> chart-vendors-x-ticks:  [];
 
     // ── Filter options ────────────────────────────────────────────────────────
     in property <[string]> filter-banks:   ["All Banks"];
@@ -690,6 +776,7 @@ export component DashboardScreen inherits Rectangle {
 
                         MonthlyChart {
                             data: root.chart-monthly;
+                            y-ticks: root.chart-monthly-y-ticks;
                             vertical-stretch: 1;
                             month-clicked(f, t) => {
                                 root.dash-from = f;
@@ -724,6 +811,7 @@ export component DashboardScreen inherits Rectangle {
 
                         CashFlowChart {
                             data: root.chart-cashflow;
+                            y-ticks: root.chart-cashflow-y-ticks;
                             vertical-stretch: 1;
                         }
                     }
@@ -747,6 +835,7 @@ export component DashboardScreen inherits Rectangle {
 
                         VendorsChart {
                             data: root.chart-vendors;
+                            x-ticks: root.chart-vendors-x-ticks;
                             vertical-stretch: 1;
                         }
                     }

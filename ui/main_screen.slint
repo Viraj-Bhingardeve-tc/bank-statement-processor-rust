@@ -585,10 +585,14 @@ component TxnTableRow inherits Rectangle {
                 }
             }
         }
-        // Review 60px
+        // Review 60px (original: .review-ok #2e7d32 checkmark, .review-reason
+        // #bf360c failure text — two colors, not one flat grey)
         Rectangle { width: 60px; clip: true;
             Text { x: 6px; width: parent.width - 12px; height: parent.height;
-                   text: root.data.review; font-size: 11px; color: #546E7A;
+                   text: root.data.review; font-size: 11px;
+                   color: root.data.review == "\u{2713}" ? #2E7D32
+                        : root.data.review == "" ? #546E7A
+                        : #BF360C;
                    vertical-alignment: center; overflow: elide; }
         }
     }
@@ -701,6 +705,9 @@ export component MainScreen inherits Rectangle {
     in property <[DashExpBar]>    dash-chart-expenses: [];
     in property <[DashCashPt]>    dash-chart-cashflow: [];
     in property <[DashVendorBar]> dash-chart-vendors:  [];
+    in property <[string]> dash-chart-monthly-y-ticks:  [];
+    in property <[string]> dash-chart-cashflow-y-ticks: [];
+    in property <[string]> dash-chart-vendors-x-ticks:  [];
     in property <[string]> dash-filter-banks:   ["All Banks"];
     in property <[string]> dash-filter-vendors: ["All Vendors"];
     in property <[string]> dash-filter-heads:   ["All Expense Heads"];
@@ -1468,6 +1475,41 @@ export component MainScreen inherits Rectangle {
                                 SR { lbl: "Account"; val: root.dash-account-no  != "" ? root.dash-account-no  : "\u{2014}"; vcol: #37474F; }
                                 SR { lbl: "Period";  val: root.dash-period;  vcol: #546E7A; }
 
+                                // ── Top stat tiles (original: 4-tile .sum-stats-grid right
+                                // after client info — Transactions/To Review/Duplicates/GST-Tax,
+                                // each a sum-link that drills into that filter except the plain
+                                // Transactions count). "To Review" reuses dash-unreviewed, the
+                                // same pending/unreviewed count the banner below and the
+                                // "Unreviewed" row further down already use — not a new value.
+                                SDivider { title: "TRANSACTIONS"; }
+                                HorizontalBox {
+                                    padding: 0px; spacing: 6px;
+                                    // sum-stat: padding:7px 8px; text-align:center; border-radius:6px
+                                    // sum-stat-val: font-size:15px; font-weight:800; color:#0D47A1
+                                    // sum-stat-lbl: font-size:9px; color:#888; text-transform:uppercase; letter-spacing:.4px
+                                    for s in [
+                                        {v: root.dash-txn-count,  lbl: "TRANSACTIONS", flt: ""},
+                                        {v: root.dash-unreviewed, lbl: "TO REVIEW",    flt: "unreviewed"},
+                                        {v: root.dash-duplicates, lbl: "DUPLICATES",   flt: "duplicates"},
+                                        {v: root.dash-gst-count,  lbl: "GST/TAX",      flt: "gst"},
+                                    ] : Rectangle {
+                                        horizontal-stretch: 1; height: 46px;
+                                        background: #FFFFFF; border-radius: 6px;
+                                        border-width: 1px; border-color: #BBDEFB;
+                                        VerticalBox {
+                                            padding-top: 7px; padding-bottom: 7px;
+                                            padding-left: 8px; padding-right: 8px;
+                                            spacing: 2px; alignment: center;
+                                            Text { text: s.v; font-size: 15px; font-weight: 800; color: #0D47A1; horizontal-alignment: center; }
+                                            Text { text: s.lbl; font-size: 9px; color: #888888; letter-spacing: 0.4px; horizontal-alignment: center; }
+                                        }
+                                        if s.flt != "" : TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.show-dashboard = false; root.active-filter = s.flt; root.drill-filter(s.flt); }
+                                        }
+                                    }
+                                }
+
                                 SDivider { title: "BALANCES"; }
                                 SR { lbl: "Opening Balance"; val: root.dash-opening;      vcol: #1565C0; }
                                 SR { lbl: "Total Receipts";  val: root.dash-credits;      vcol: #2E7D32; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "credits";      root.drill-filter("credits"); } }
@@ -1510,27 +1552,26 @@ export component MainScreen inherits Rectangle {
                                     }
                                 }
 
-                                SDivider { title: "TRANSACTIONS"; }
-                                HorizontalBox {
-                                    padding: 0px; spacing: 6px;
-                                    // sum-stat: padding:7px 8px; text-align:center; border-radius:6px
-                                    // sum-stat-val: font-size:15px; font-weight:800; color:#0D47A1
-                                    // sum-stat-lbl: font-size:9px; color:#888; text-transform:uppercase; letter-spacing:.4px
-                                    for s in [
-                                        {v: root.dash-txn-count,    lbl: "TOTAL"},
-                                        {v: root.dash-credit-count, lbl: "CREDITS"},
-                                        {v: root.dash-debit-count,  lbl: "DEBITS"},
-                                    ] : Rectangle {
-                                        horizontal-stretch: 1; height: 46px;
-                                        background: #FFFFFF; border-radius: 6px;
-                                        border-width: 1px; border-color: #BBDEFB;
-                                        VerticalBox {
-                                            padding-top: 7px; padding-bottom: 7px;
-                                            padding-left: 8px; padding-right: 8px;
-                                            spacing: 2px; alignment: center;
-                                            Text { text: s.v; font-size: 15px; font-weight: 800; color: #0D47A1; horizontal-alignment: center; }
-                                            Text { text: s.lbl; font-size: 9px; color: #888888; letter-spacing: 0.4px; horizontal-alignment: center; }
-                                        }
+                                // Pending-classification badge (original: .pending-badge —
+                                // background #fff3e0/color #e65100 when pending>0, else
+                                // background #e8f5e9/color #2e7d32). "Pending" there means
+                                // status === 'unreviewed' specifically, same as dash-unreviewed
+                                // used for the "Unreviewed" row below — not dash-needs-review,
+                                // which is a different, narrower bucket.
+                                if root.transaction-rows.length > 0 && root.dash-unreviewed != "0" : Rectangle {
+                                    height: 28px; border-radius: 5px; background: #FFF3E0;
+                                    Text {
+                                        text: "\u{26A0} " + root.dash-unreviewed + " of " + root.dash-txn-count + " need review";
+                                        font-size: 12px; font-weight: 600; color: #E65100;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+                                if root.transaction-rows.length > 0 && root.dash-unreviewed == "0" : Rectangle {
+                                    height: 28px; border-radius: 5px; background: #E8F5E9;
+                                    Text {
+                                        text: "\u{2713} All " + root.dash-txn-count + " classified";
+                                        font-size: 12px; font-weight: 600; color: #2E7D32;
+                                        horizontal-alignment: center; vertical-alignment: center;
                                     }
                                 }
 
@@ -1547,15 +1588,16 @@ export component MainScreen inherits Rectangle {
                                 // ── Classification Quality card ───────────────────────────────────────
                                 if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : SDivider { title: "CLASSIFICATION QUALITY"; }
                                 if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : Rectangle {
-                                    height: 10px; border-radius: 4px; clip: true; background: #FFCDD2;
+                                    // Original: .conf-bar-hi #388E3C, .conf-bar-med #EF6C00, .conf-bar-lo #C62828
+                                    height: 10px; border-radius: 4px; clip: true; background: #C62828;
                                     // High conf segment (green, left)
                                     Rectangle {
-                                        x: 0; y: 0; height: parent.height; background: #A5D6A7;
+                                        x: 0; y: 0; height: parent.height; background: #388E3C;
                                         width: parent.width * root.dash-conf-hi-frac;
                                     }
-                                    // Medium conf segment (yellow, after green)
+                                    // Medium conf segment (orange, after green)
                                     Rectangle {
-                                        x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #FFF176;
+                                        x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #EF6C00;
                                         width: parent.width * root.dash-conf-med-frac;
                                     }
                                 }
@@ -1601,6 +1643,65 @@ export component MainScreen inherits Rectangle {
                                 if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SDivider { title: "GST / TAX"; }
                                 if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Paid";        val: root.dash-gst-paid; vcol: #C62828; }
                                 if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Recv./Refund"; val: root.dash-gst-recv; vcol: #2E7D32; }
+
+                                // ── Duplicates Detected card (original: .sum-card with
+                                // border-color:#f48fb1, title color:#880e4f) — a standalone
+                                // callout distinct from the plain "Duplicates" row above
+                                // (that row stays, for its click-to-filter behavior).
+                                if root.dash-duplicates != "0" : Rectangle {
+                                    border-width: 1px; border-color: #F48FB1; border-radius: 6px;
+                                    background: #FFFFFF;
+                                    VerticalBox {
+                                        padding-top: 8px; padding-bottom: 8px;
+                                        padding-left: 10px; padding-right: 10px;
+                                        spacing: 4px;
+                                        HorizontalBox {
+                                            padding: 0px; spacing: 4px;
+                                            Rectangle {
+                                                width: 26px; height: 13px; border-radius: 3px;
+                                                background: #FCE4EC; border-width: 1px; border-color: #E91E63;
+                                                Text { text: "DUP"; font-size: 8px; font-weight: 800; color: #880E4F;
+                                                       horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            Text {
+                                                text: "Duplicates Detected"; font-size: 9.5px; font-weight: 800;
+                                                letter-spacing: 0.6px; color: #880E4F; vertical-alignment: center;
+                                            }
+                                        }
+                                        HorizontalBox {
+                                            padding: 0px;
+                                            Text { text: "Flagged rows"; font-size: 10px; color: #37474F; horizontal-stretch: 1; vertical-alignment: center; }
+                                            Text { text: root.dash-duplicates; font-size: 10px; font-weight: 700; color: #C62828; vertical-alignment: center; }
+                                        }
+                                        Text { text: "Use the Duplicates filter to review"; font-size: 10px; color: #888888; }
+                                    }
+                                }
+
+                                // ── Suspense card (original: .sum-card with border-color:
+                                // #ba68c8, title color:#6a1b9a) — dash-suspense already IS
+                                // the ₹ amount in suspense (main.rs: fmt_amt(s.suspense_amount)),
+                                // not a row count, so no backend change was needed here; the
+                                // plain "Suspense" row above (a count-shaped SR, reusing the
+                                // same dash-suspense value) stays for its click-to-filter
+                                // behavior.
+                                if root.dash-has-suspense : Rectangle {
+                                    border-width: 1px; border-color: #BA68C8; border-radius: 6px;
+                                    background: #FFFFFF;
+                                    VerticalBox {
+                                        padding-top: 8px; padding-bottom: 8px;
+                                        padding-left: 10px; padding-right: 10px;
+                                        spacing: 4px;
+                                        Text {
+                                            text: "Suspense"; font-size: 9.5px; font-weight: 800;
+                                            letter-spacing: 0.6px; color: #6A1B9A;
+                                        }
+                                        HorizontalBox {
+                                            padding: 0px;
+                                            Text { text: "Amount in suspense"; font-size: 10px; color: #37474F; horizontal-stretch: 1; vertical-alignment: center; }
+                                            Text { text: root.dash-suspense; font-size: 10px; font-weight: 700; color: #7B1FA2; vertical-alignment: center; }
+                                        }
+                                    }
+                                }
 
                                 // ── Recurring parties ─────────────────────────────────────────────────
                                 if root.dash-parties.length > 0 : SDivider { title: "RECURRING PARTIES"; }
@@ -1696,6 +1797,9 @@ export component MainScreen inherits Rectangle {
             chart-expenses:  root.dash-chart-expenses;
             chart-cashflow:  root.dash-chart-cashflow;
             chart-vendors:   root.dash-chart-vendors;
+            chart-monthly-y-ticks:  root.dash-chart-monthly-y-ticks;
+            chart-cashflow-y-ticks: root.dash-chart-cashflow-y-ticks;
+            chart-vendors-x-ticks:  root.dash-chart-vendors-x-ticks;
             // Filter options
             filter-banks:    root.dash-filter-banks;
             filter-vendors:  root.dash-filter-vendors;

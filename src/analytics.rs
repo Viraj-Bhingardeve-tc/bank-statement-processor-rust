@@ -284,6 +284,11 @@ pub struct AnalyticsResult {
     pub monthly: MonthlyAgg,
     pub expenses: Vec<ExpHead>,
     pub cashflow: Vec<CashPoint>,
+    // Cash Flow Trend is min-max scaled (see CashPoint.norm), not 0-based
+    // like the other charts — its axis-label range needs the actual
+    // min/max balance the chart was scaled against, not just 0..max.
+    pub cashflow_min: f64,
+    pub cashflow_max: f64,
     pub vendors: Vec<VendorAgg>,
     pub insights: Insights,
 }
@@ -399,8 +404,19 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
         1
     };
     let sample: Vec<f64> = bal_txns.iter().step_by(step.max(1)).cloned().collect();
-    let min_b = sample.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_b = sample.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    // Guard against empty `sample`: the fold seeds (±INFINITY) are never
+    // finite balance values on their own, so min_b/max_b must not leak
+    // out as INFINITY/-INFINITY below — cashflow_min/max are consumed as
+    // Cash Flow Trend's axis-label range (see axis_tick_labels), and a
+    // non-finite value there would format as the literal text "inf".
+    let (min_b, max_b) = if sample.is_empty() {
+        (0.0, 0.0)
+    } else {
+        (
+            sample.iter().cloned().fold(f64::INFINITY, f64::min),
+            sample.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        )
+    };
     let range = (max_b - min_b).max(1.0);
     let cashflow: Vec<CashPoint> = sample
         .iter()
@@ -520,6 +536,8 @@ pub fn compute(txns: &[Transaction], opening_bal: Option<f64>) -> AnalyticsResul
         monthly,
         expenses,
         cashflow,
+        cashflow_min: min_b,
+        cashflow_max: max_b,
         vendors,
         insights,
     }
@@ -569,4 +587,110 @@ pub fn fmt_amt(v: Option<f64>) -> String {
 
 pub fn fmt_short_pub(v: f64) -> String {
     fmt_short(v)
+}
+
+// ── Chart axis labels (Monthly Credits vs Debits / Cash Flow Trend / Top
+// Vendors) ───────────────────────────────────────────────────────────────────
+// The old dashboard drew these three charts with Chart.js, whose `y`/`x`
+// scales auto-pick round tick values and format each with a fixed
+// `v => '₹' + (v/1000).toFixed(0) + 'K'` callback (dashboard.js:111,178,203)
+// — always thousands, never switching to L/Cr like fmt_short above. This
+// port hand-draws its own bars/line instead of using a charting library, so
+// there's no automatic axis scaling to lean on; these two functions
+// reproduce just enough of it (round the top of the scale up to a "nice"
+// 1/2/5/10×10ⁿ value, then format 5 evenly-spaced ticks the same way) to
+// match the old screenshots without depending on a charting crate.
+
+/// Round `raw_max` up to the nearest "nice" number (1, 2, 5, or 10 × 10ⁿ).
+/// Used both as the bar-height normalisation ceiling (so the tallest bar
+/// doesn't touch the very top of its chart, matching the old Chart.js
+/// look) and as the top value axis_tick_labels below formats.
+pub fn nice_axis_max(raw_max: f64) -> f64 {
+    if raw_max <= 0.0 {
+        return 1.0;
+    }
+    let exp = raw_max.log10().floor();
+    let base = 10f64.powf(exp);
+    let frac = raw_max / base;
+    let nice_frac = if frac <= 1.0 {
+        1.0
+    } else if frac <= 2.0 {
+        2.0
+    } else if frac <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice_frac * base
+}
+
+/// Five "₹NK" tick labels evenly spaced from `min` to `max`, bottom to top
+/// — the same 0%/25%/50%/75%/100% positions the existing chart grid lines
+/// already draw at (see MonthlyChart/CashFlowChart in dashboard.slint), so
+/// these line up with them without changing where those lines are drawn.
+pub fn axis_tick_labels(min: f64, max: f64) -> Vec<String> {
+    (0..=4)
+        .map(|i| {
+            let v = min + (max - min) * (i as f64 / 4.0);
+            format!("₹{:.0}K", v / 1_000.0)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── nice_axis_max ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn rounds_up_to_the_nearest_1_2_5_10_step() {
+        // 3.874×10⁶ sits above the "2" rung and at/below the "5" rung of
+        // the 1/2/5/10 ladder, so it rounds up to 5×10⁶ — not the nearest
+        // value in absolute terms, but the standard nice-number behavior.
+        assert_eq!(nice_axis_max(3_874_000.0), 5_000_000.0);
+        assert_eq!(nice_axis_max(1_400.0), 2_000.0);
+        assert_eq!(nice_axis_max(180.0), 200.0);
+        assert_eq!(nice_axis_max(60.0), 100.0);
+    }
+
+    #[test]
+    fn already_nice_values_are_left_unchanged() {
+        assert_eq!(nice_axis_max(5_000_000.0), 5_000_000.0);
+        assert_eq!(nice_axis_max(2_000.0), 2_000.0);
+    }
+
+    #[test]
+    fn zero_or_negative_max_never_produces_a_zero_or_negative_scale() {
+        // Used as a bar-height/normalisation divisor downstream — a 0 or
+        // negative result would divide-by-zero or invert bar heights.
+        assert_eq!(nice_axis_max(0.0), 1.0);
+        assert_eq!(nice_axis_max(-500.0), 1.0);
+    }
+
+    // ── axis_tick_labels ─────────────────────────────────────────────────────
+
+    #[test]
+    fn labels_are_evenly_spaced_in_thousands_from_min_to_max() {
+        let labels = axis_tick_labels(0.0, 4_000_000.0);
+        assert_eq!(
+            labels,
+            vec!["₹0K", "₹1000K", "₹2000K", "₹3000K", "₹4000K"]
+        );
+    }
+
+    #[test]
+    fn labels_honour_a_non_zero_floor_for_min_max_scaled_charts() {
+        // Cash Flow Trend isn't 0-based — it's min-max scaled.
+        let labels = axis_tick_labels(1_000_000.0, 3_000_000.0);
+        assert_eq!(
+            labels,
+            vec!["₹1000K", "₹1500K", "₹2000K", "₹2500K", "₹3000K"]
+        );
+    }
+
+    #[test]
+    fn always_five_labels() {
+        assert_eq!(axis_tick_labels(0.0, 100.0).len(), 5);
+    }
 }

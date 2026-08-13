@@ -254,8 +254,26 @@ fn apply_txn_filters<'a>(
 // ── Build Slint TxnRow model from filtered transaction slice ──────────────────
 #[cfg(feature = "slint-ui")]
 fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
-    txns.iter()
+    // Expense Head — same tally_group_engine call apply_parse_result already
+    // uses for the main Transactions table (below), just computed here too
+    // so search-result rows (this function's only caller) show the same
+    // value instead of an unconditional blank. Uses the raw narration (this
+    // function has no access to apply_parse_result's cleaned-narration
+    // cache) — matches what the `ledger` field below already does without
+    // cleaning either.
+    let tally_inputs: Vec<(String, String, bool, f64)> = txns
+        .iter()
         .map(|t| {
+            let is_credit = t.credit.is_some();
+            let amount = t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0);
+            (t.account_head.clone(), t.narration.clone(), is_credit, amount)
+        })
+        .collect();
+    let tally_groups = tally_group_engine::classify_batch(&tally_inputs, None);
+
+    txns.iter()
+        .enumerate()
+        .map(|(idx, t)| {
             let narr: String = t.narration.chars().take(80).collect();
             let has_gst = t.tags.iter().any(|g| g.to_uppercase().contains("GST"));
             let has_tax = t.tags.iter().any(|g| g.to_uppercase().contains("TAX"));
@@ -282,7 +300,10 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                     _ => 0,
                 }
             };
-            let review_text = if !val_ok { val_reasons.as_str() } else { "" };
+            // Original (app.js's reviewCell): a validation failure shows its
+            // reason, a passing row shows "✓" — never blank. This function
+            // previously left passing rows blank instead.
+            let review_text = if !val_ok { val_reasons.as_str() } else { "✓" };
             let status_display = if effective_needs_review
                 && matches!(t.status, parser::TransactionStatus::Unreviewed)
             {
@@ -301,7 +322,7 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                 balance: SharedString::from(fmt_cell(t.balance).as_str()),
                 vendor: SharedString::from(t.vendor.as_str()),
                 ledger: SharedString::from(t.account_head.as_str()),
-                expense_head: SharedString::from(""),
+                expense_head: SharedString::from(tally_groups[idx].as_str()),
                 status_text: SharedString::from(status_display),
                 tags: SharedString::from(t.tags.join(" ").as_str()),
                 review: SharedString::from(review_text),
@@ -546,7 +567,10 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
     h.set_dash_ins_cr_count(SharedString::from(ins.cr_count.as_str()));
     h.set_dash_ins_freq_vendor(SharedString::from(ins.freq_vendor.as_str()));
 
-    // Monthly chart — normalise bars
+    // Monthly chart — normalise bars against a "nice" rounded-up max (not
+    // the raw data max) so the tallest bar gets a little headroom and the
+    // axis ticks below land on round ₹ values — matching how the old
+    // dashboard's Chart.js axis auto-scaled (see analytics::nice_axis_max).
     let max_monthly = data
         .monthly
         .credits
@@ -554,6 +578,13 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .chain(data.monthly.debits.iter())
         .cloned()
         .fold(0.0f64, f64::max);
+    let monthly_nice_max = analytics::nice_axis_max(max_monthly);
+    h.set_dash_chart_monthly_y_ticks(slint::ModelRc::new(slint::VecModel::from(
+        analytics::axis_tick_labels(0.0, monthly_nice_max)
+            .into_iter()
+            .map(|s| SharedString::from(s.as_str()))
+            .collect::<Vec<_>>(),
+    )));
     let month_bars: Vec<DashMonthBar> = data
         .monthly
         .labels
@@ -562,7 +593,7 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .map(|(i, lbl)| {
             let cr = data.monthly.credits.get(i).cloned().unwrap_or(0.0);
             let dr = data.monthly.debits.get(i).cloned().unwrap_or(0.0);
-            let scale = if max_monthly > 0.0 { max_monthly } else { 1.0 };
+            let scale = if monthly_nice_max > 0.0 { monthly_nice_max } else { 1.0 };
             let (range_from, range_to) = data
                 .monthly
                 .keys
@@ -605,7 +636,19 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .collect();
     h.set_dash_chart_expenses(slint::ModelRc::new(slint::VecModel::from(exp_bars)));
 
-    // Cash flow
+    // Cash flow — min-max scaled (see CashPoint.norm), not 0-based like the
+    // other two charts, so its ticks span cashflow_min..cashflow_max rather
+    // than 0..max. Axis labels only round the *range* up to a nice size for
+    // readability; the line itself keeps its existing exact min/max scaling
+    // unchanged (touching the frame's top/bottom edges, as before) rather
+    // than being widened to match — a label-only adjustment, not a redraw.
+    let cf_nice_range = analytics::nice_axis_max(data.cashflow_max - data.cashflow_min);
+    h.set_dash_chart_cashflow_y_ticks(slint::ModelRc::new(slint::VecModel::from(
+        analytics::axis_tick_labels(data.cashflow_min, data.cashflow_min + cf_nice_range)
+            .into_iter()
+            .map(|s| SharedString::from(s.as_str()))
+            .collect::<Vec<_>>(),
+    )));
     let cf: Vec<DashCashPt> = data
         .cashflow
         .iter()
@@ -613,17 +656,25 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .collect();
     h.set_dash_chart_cashflow(slint::ModelRc::new(slint::VecModel::from(cf)));
 
-    // Vendors — normalise widths
+    // Vendors — normalise widths against a "nice" rounded-up max, same
+    // rationale as the monthly chart above.
     let max_vendor = data
         .vendors
         .iter()
         .map(|v| v.debit.max(v.credit))
         .fold(0.0f64, f64::max);
+    let vendor_nice_max = analytics::nice_axis_max(max_vendor);
+    h.set_dash_chart_vendors_x_ticks(slint::ModelRc::new(slint::VecModel::from(
+        analytics::axis_tick_labels(0.0, vendor_nice_max)
+            .into_iter()
+            .map(|s| SharedString::from(s.as_str()))
+            .collect::<Vec<_>>(),
+    )));
     let vbars: Vec<DashVendorBar> = data
         .vendors
         .iter()
         .map(|v| {
-            let scale = if max_vendor > 0.0 { max_vendor } else { 1.0 };
+            let scale = if vendor_nice_max > 0.0 { vendor_nice_max } else { 1.0 };
             DashVendorBar {
                 label: SharedString::from(v.name.as_str()),
                 debit_w: (v.debit / scale) as f32,
@@ -1206,7 +1257,9 @@ fn apply_parse_result(
                 }
             };
             let tally_group = tally_groups[idx].as_str();
-            let review_text = if !val_ok { val_reasons.as_str() } else { "" };
+            // Original (app.js's reviewCell): a validation failure shows its
+            // reason, a passing row shows "✓" — never blank.
+            let review_text = if !val_ok { val_reasons.as_str() } else { "✓" };
             let status_display = if effective_needs_review
                 && matches!(t.status, parser::TransactionStatus::Unreviewed)
             {
