@@ -3,9 +3,7 @@
 
 import { Button, VerticalBox, HorizontalBox, ComboBox,
          LineEdit, CheckBox, ScrollView, ListView } from "std-widgets.slint";
-import { DashboardScreen, DashMonthBar, DashExpBar, DashCashPt, DashVendorBar, TxnRow, OriginColor, Sidebar, TopHeader, DashPresetRange } from "dashboard.slint";
-import { Spacing, Radius, Type, FintechPalette, Badge, AppButton, Card } from "theme.slint";
-import { TxnPageHeader, TxnFilterCard, TxnStatusChip, TxnActiveFilterPill, TxnTable, SummarySection, TxnActionBar } from "transactions.slint";
+import { DashboardScreen, DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 // ── Batch monitor per-file row ────────────────────────────────────────────────
 export struct BatchFileRow {
@@ -27,16 +25,133 @@ export struct SummaryListRow {
     key:      string,
 }
 
-// TxnRow / OriginColor now live in dashboard.slint (imported above) — the new
-// redesigned Dashboard's "Recent Transactions" card needs the exact same
-// transaction-row data and origin-color convention the Transactions table
-// below already uses, so this is the single shared definition for both
-// instead of a second, duplicate struct.
+// ── Transaction row data struct ────────────────────────────────────────────────
+export struct TxnRow {
+    bank-name:    string,
+    account-no:   string,
+    date:         string,
+    narration:    string,
+    ref-no:       string,
+    debit:        string,
+    credit:       string,
+    balance:      string,
+    vendor:       string,
+    ledger:       string,
+    expense-head: string,
+    status-text:  string,
+    tags:         string,
+    review:       string,
+    // 0=white 1=hi-green 2=med-yellow 3=review-red 4=suspense-purple 5=dup-pink 6=manual-blue
+    row-color:    int,
+    has-gst:      bool,
+    has-tax:      bool,
+    has-dup-tag:  bool,
+}
 
-// TBtn/QBtn/FBtn (old toolbar/date-preset/status-filter buttons) removed —
-// Phase 2 UI redesign replaced every one of their call sites with
-// AppButton/TxnStatusChip (theme.slint / transactions.slint); nothing
-// instantiates them anymore.
+// ── Compact toolbar button (white bg, blue border — matches original .btn in toolbar) ─────
+// btn-primary: bg #1565C0 fg white. btn-ai: bg #6B2FB8 fg white font-weight 700.
+component TBtn inherits Rectangle {
+    in property <string> text:    "";
+    in property <bool>   enabled: true;
+    in property <color>  bg:      #FFFFFF;
+    in property <color>  fg:      #0A1929;
+    in property <int>    fw:      500;   // font-weight override (btn-ai needs 700)
+    callback clicked();
+
+    height: 28px; min-width: 58px;
+    background:    root.enabled ? root.bg : #FFFFFF28;
+    border-radius: 4px;
+    border-width:  1px;
+    border-color:  root.enabled ? (root.bg == #FFFFFF ? #90CAF9 : root.bg) : #FFFFFF20;
+    opacity:       root.enabled ? 1.0 : 0.4;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text; font-size: 12px; font-weight: root.fw;
+        color: root.enabled ? root.fg : root.fg;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// ── Date-preset quick button ───────────────────────────────────────────────────
+component QBtn inherits Rectangle {
+    in property <string> text:    "";
+    in property <bool>   active:  false;
+    in property <bool>   enabled: true;
+    callback clicked();
+
+    height: 24px; min-width: 62px;
+    background:    root.active ? #D4E8FF : #FFFFFF;
+    border-radius: 4px;
+    border-width:  1px;
+    border-color:  root.active ? #1565C0 : #B0C8E8;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checked: root.active;
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text; font-size: 10px;
+        color: root.active ? #1565C0 : (root.enabled ? #1565C0 : #90A8C0);
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// ── Transaction status filter button ──────────────────────────────────────────
+component FBtn inherits Rectangle {
+    in property <string> label:    "";
+    in property <string> count:    "";
+    in property <bool>   active:   false;
+    in property <color>  a-bg:     #1565C0;
+    in property <color>  a-fg:     white;
+    in property <color>  i-border: #90CAF9;
+    in property <color>  i-fg:     #555555;
+    callback clicked();
+
+    height: 22px; min-width: 50px;
+    background:    root.active ? root.a-bg : #FFFFFF;
+    border-radius: 3px;
+    border-width:  1px;
+    border-color:  root.active ? root.a-bg : root.i-border;
+    accessible-role: button;
+    accessible-label: root.count != "" ? root.label + " (" + root.count + ")" : root.label;
+    accessible-checked: root.active;
+
+    TouchArea { clicked => { root.clicked(); } }
+    HorizontalBox {
+        padding-left: 7px; padding-right: 7px;
+        padding-top: 0px; padding-bottom: 0px;
+        spacing: 3px; alignment: center;
+        Text {
+            text: root.label; font-size: 11px;
+            color: root.active ? root.a-fg : root.i-fg;
+            vertical-alignment: center;
+        }
+        // count badge: inactive=rgba(0,0,0,.15)=#00000026, active=rgba(255,255,255,.28)=#FFFFFF47
+        if root.count != "" : Rectangle {
+            height: 16px; min-width: 20px;
+            background:    root.active ? #FFFFFF47 : #00000026;
+            border-radius: 8px;
+            Text {
+                text: root.count; font-size: 9px; font-weight: 800;
+                color: root.active ? white : #37474F;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+    }
+}
 
 // ── Custom tab button (on dark #0D47A1 background) ────────────────────────────
 component VTab inherits Rectangle {
@@ -65,8 +180,37 @@ component VTab inherits Rectangle {
     }
 }
 
-// FootBtn (old footer action button) removed — Phase 2 replaced every call
-// site with AppButton (theme.slint) inside TxnActionBar.
+// ── Footer action button ───────────────────────────────────────────────────────
+// Original .btn: padding:5px 11px; font-size:12px; font-weight:500; border:1px solid #90CAF9; border-radius:4px; height≈27px
+component FootBtn inherits Rectangle {
+    in property <string> text:       "";
+    in property <bool>   enabled:    false;
+    in property <color>  bg:         #FFFFFF;
+    in property <color>  border-clr: #90CAF9;
+    in property <color>  fg:         #0A1929;
+    callback clicked();
+
+    height: 28px; min-width: 82px;
+    background:    root.enabled ? root.bg : #F5F5F5;
+    border-radius: 4px;
+    border-width:  1px;
+    border-color:  root.enabled ? root.border-clr : #E0E0E0;
+    opacity:       root.enabled ? 1.0 : 0.4;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.text; font-size: 12px; font-weight: 500;
+        color: root.enabled ? root.fg : #BDBDBD;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
 
 // ── Summary label / value row ──────────────────────────────────────────────────
 component SR inherits Rectangle {
@@ -94,9 +238,17 @@ component SR inherits Rectangle {
     }
 }
 
-// SDivider (old section-title divider) removed — Phase 2 replaced every
-// call site with SummarySection (transactions.slint), which supplies its
-// own title/card chrome; SR rows above still nest inside it unchanged.
+// ── Summary section title ──────────────────────────────────────────────────────
+// Original .sec-title: margin-top:11px; margin-bottom:3px; font-size:10px; font-weight:700; color:#1565C0; letter-spacing:.6px
+component SDivider inherits VerticalBox {
+    in property <string> title: "";
+    padding: 0px; spacing: 3px; height: 24px;
+    Rectangle { height: 1px; background: #BBDEFB; }
+    Text {
+        text: root.title; font-size: 10px; font-weight: 700;
+        color: #1565C0; letter-spacing: 0.6px;
+    }
+}
 
 // ── Modal action button ────────────────────────────────────────────────────────
 // Original .btn: padding:5px 11px; font-size:12px; border-radius:4px; height≈27px
@@ -177,12 +329,6 @@ component MFtr inherits Rectangle {
     }
 }
 
-<<<<<<< HEAD
-// TxnHeader / TxnTableRow (old table header + row components) removed —
-// Phase 2 replaced every call site with TxnTable/TxnDataHeader/TxnDataRow
-// (transactions.slint), which own the sticky header + synced horizontal-
-// scroll table now used by the Transactions screen below.
-=======
 // ── Transaction table header ───────────────────────────────────────────────────
 // Original: thead { background:#1565C0; } th { padding:7px 9px; font-weight:600; white-space:nowrap; border-right:1px solid #1976D2; }
 // Generated columns have font-style:italic. Debit header color:#FFCDD2, Credit:#C8E6C9
@@ -451,7 +597,6 @@ component TxnTableRow inherits Rectangle {
         }
     }
 }
->>>>>>> fix/old-ui-fidelity
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MainScreen
@@ -578,17 +723,6 @@ export component MainScreen inherits Rectangle {
     in property <string> dash-ins-freq-vendor: "—";
     // Dashboard filter callbacks
     callback dash-filter-changed(string, string, string, string, string);
-    // Dashboard redesign: quick-range chips in the new Period Filter Bar
-    // reuse Rust's existing preset_range() date math (same helper the
-    // Transactions tab's own Today/This Month/... buttons already call)
-    // instead of duplicating it in Slint. See dashboard.slint's
-    // PeriodFilterBar/DashboardScreen for where this is consumed.
-    callback dash-date-preset(string) -> DashPresetRange;
-    // Dashboard redesign: header search box — Rust does the actual
-    // substring matching (Slint's expression language has no string
-    // "contains") and returns matching rows via dash-search-rows below.
-    callback dash-search-changed(string);
-    in property <[TxnRow]> dash-search-rows: [];
     // ── Summary panel extra data ──────────────────────────────────────────────
     // Classification quality (fractions 0.0–1.0 for bar widths; counts as strings)
     in property <float>  dash-conf-hi-frac:   0.0;
@@ -647,18 +781,6 @@ export component MainScreen inherits Rectangle {
     // ── Internal state ─────────────────────────────────────────────────────────
     in-out property <bool>   show-dashboard:  true;
     in-out property <string> active-filter:   "all";
-    // Dashboard redesign — pure presentation state for the new Sidebar/
-    // TopHeader shell (hamburger collapse + header search text); doesn't
-    // touch any existing Transactions-tab state.
-    in-out property <bool>   dash-sidebar-collapsed: false;
-    in-out property <string> dash-search-text: "";
-    // Period Filter Bar state (Dashboard tab only) — two-way bound straight
-    // through to DashboardScreen's own dash-from/dash-to/*-idx properties.
-    in-out property <string> dash-pf-from: "";
-    in-out property <string> dash-pf-to:   "";
-    in-out property <int>    dash-pf-bank-idx:   0;
-    in-out property <int>    dash-pf-vendor-idx: 0;
-    in-out property <int>    dash-pf-head-idx:   0;
     // Bank filter — tracks ComboBox selection for chip display
     private property <string> sel-bank: "All Banks";
     // Vendor / ledger-head filter — set when a summary-panel row is clicked
@@ -718,7 +840,6 @@ export component MainScreen inherits Rectangle {
     in-out property <bool>   wiz-opt-narr:         true;   // include voucher narrations
     in-out property <bool>   wiz-opt-classified:   true;   // export only classified transactions
     in-out property <bool>   wiz-opt-skip-low:     false;  // skip low-confidence (<40%)
-    in-out property <bool>   wiz-opt-skip-dup:     false;  // Requirement #10: skip duplicate-flagged transactions
 
     // Edit client fields — in-out so Rust can read them back
     in-out property <string> edit-client-name:   "";
@@ -801,103 +922,255 @@ export component MainScreen inherits Rectangle {
     // login gate rather than duplicating the pricing UI here.
     callback change-plan();
 
-    // ── MAIN LAYOUT (Transactions tab) ──────────────────────────────────────
-    // Unchanged toolbar/date-bar/tab-switcher/content/footer shell — only
-    // instantiated on the Transactions tab now. The Dashboard tab gets its
-    // own Sidebar+Header shell below instead (Dashboard redesign); this
-    // branch and everything inside it is otherwise byte-for-byte the same
-    // as before the redesign.
-    if !root.show-dashboard : VerticalLayout {
+    // ── MAIN LAYOUT ───────────────────────────────────────────────────────────
+    VerticalLayout {
         padding: 0px; spacing: 0px;
         width: root.width; height: root.height;
 
-        // ─────────────────────────── PAGE HEADER ──────────────────────────────
-        // Redesigned (Phase 2): title/subtitle + the highest-frequency
-        // actions (client identity, load data). The rest of the old
-        // toolbar's actions (classify/rules/import/dedupe) now live in the
-        // compact workflow strip directly below — same callbacks, same
-        // bodies, just regrouped so nothing crowds a single row on a
-        // 1366px-wide window. Every click handler below is byte-identical
-        // to the old toolbar's.
-        TxnPageHeader {
-            title: "Transactions";
-            subtitle: "Review, classify and manage bank transactions";
+        // ─────────────────────────── TOOLBAR ──────────────────────────────────
+        // background: #1565C0, box-shadow: 0 2px 8px rgba(13,71,161,.40), border-bottom: 2px solid #0D47A1
+        Rectangle {
+            height: 50px; background: #1565C0;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #0D47A166;
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 2px;
 
-            Text { text: "Client:"; font-size: Type.small; color: FintechPalette.text-muted; vertical-alignment: center; font-weight: 600; }
-            ComboBox {
-                model: root.client-names; current-index: 0;
-                height: 32px; min-width: 160px;
-                selected(v) => { root.select-client(v); }
+            // Bottom border
+            Rectangle {
+                y: 48px; height: 2px; background: #0D47A1;
             }
-            AppButton { text: "+ New Client"; variant: "primary"; compact: true; clicked => { root.modal-state = "new-client"; } }
-            AppButton {
-                text: "Edit Client"; variant: "secondary"; compact: true;
-                clicked => {
-                    root.edit-client-name   = root.dash-client-name;
-                    root.edit-client-ledger = root.dash-client-ledger;
-                    root.modal-state = "edit-client";
+
+            HorizontalBox {
+                padding-left: 14px; padding-right: 14px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 10px; height: 48px;
+
+                // Scrollable-content region for every button except Logout,
+                // clipped so that on narrower/1536px screens an overflow of
+                // this (unchanged) button set can no longer push Logout
+                // past the visible window edge (UI fix, 2026-08-14). This
+                // wrapper only clips; none of the buttons, their order, or
+                // their spacing inside it were touched.
+                Rectangle {
+                    clip: true;
+                    horizontal-stretch: 1;
+
+                    HorizontalBox {
+                        padding: 0px; spacing: 10px; height: 48px;
+
+                        // Firm block — stacked vertically
+                        VerticalBox {
+                            padding: 0px; spacing: 0px; alignment: center;
+                            min-width: 155px; max-width: 155px;
+                            Text {
+                                text: "A S Havaldar";
+                                color: #FFFFFF; font-size: 16px; font-weight: 800;
+                                letter-spacing: 0.4px;
+                            }
+                            Text {
+                                text: "Bank Statement Processor";
+                                color: #BBDEFB; font-size: 11px; font-weight: 500;
+                                letter-spacing: 0.3px;
+                            }
+                        }
+
+                        // Client dropdown — capped with max-width so a long client
+                        // name can never blow out the rest of the toolbar (UI fix,
+                        // 2026-08-14: it previously only had a min-width, so it
+                        // stretched to whatever room was left, squeezing/overlapping
+                        // the buttons after it).
+                        Text { text: "Client:"; font-size: 12px; color: #E3F2FD; vertical-alignment: center; font-weight: 600; }
+                        ComboBox {
+                            model: root.client-names; current-index: 0;
+                            height: 28px; min-width: 160px; max-width: 200px;
+                            selected(v) => { root.select-client(v); }
+                        }
+                        // btn-primary: background #1565C0, color #fff (blue-on-blue in toolbar)
+                        TBtn { text: "+ New Client"; bg: #1565C0; fg: #FFFFFF; clicked => { root.modal-state = "new-client"; } }
+                        TBtn { text: "Edit Client"; bg: #0277BD; fg: #FFFFFF; clicked => {
+                            root.edit-client-name   = root.dash-client-name;
+                            root.edit-client-ledger = root.dash-client-ledger;
+                            root.modal-state = "edit-client";
+                        } }
+
+                        Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
+                        TBtn { text: "Load Single File"; clicked => { root.load-file(); } }
+                        TBtn { text: "Batch Process Folder"; enabled: !root.batch-running; clicked => { root.batch-folder(); } }
+
+                        Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
+                        TBtn {
+                            text: "Auto-Classify All";
+                            enabled: root.transaction-rows.length > 0;
+                            clicked => { root.auto-classify(); }
+                        }
+                        // .btn-ai { background: linear-gradient(#5C35C5,#7B1FA2); color:#fff; font-weight:700; letter-spacing:.04em }
+                        TBtn {
+                            text: "\u{2605} AI Classify";
+                            bg: #6B2FB8; fg: #FFFFFF; fw: 700;
+                            enabled: root.transaction-rows.length > 0;
+                            clicked => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
+                        }
+
+                        Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
+                        TBtn { text: "View Rules"; enabled: true; clicked => { root.view-rules(); root.modal-state = "view-rules"; } }
+
+                        // Extra breathing room between View Rules and Import History
+                        // (requested UI fix — the two otherwise sit as tight as every
+                        // other adjacent toolbar button pair via HorizontalBox's
+                        // uniform 10px spacing).
+                        Rectangle { width: 16px; }
+
+                        TBtn {
+                            text: "Import History";
+                            enabled: root.transaction-rows.length > 0;
+                            clicked => { root.modal-state = "import-history"; }
+                        }
+                        TBtn { text: "Import Ledgers"; enabled: true; clicked => { root.import-ledgers(); } }
+
+                        // Breathing room before Dedupe (requested UI fix — same
+                        // rationale as the View Rules/Import History gap above).
+                        Rectangle { width: 16px; }
+
+                        HorizontalBox {
+                            padding: 0px; spacing: 4px;
+                            CheckBox { text: "Dedupe"; checked <=> root.dedup-enabled; }
+                        }
+
+                        // .loaded-file { font-size:11px; color:#BBDEFB; font-style:italic }
+                        if root.status-file != "" : Text {
+                            text: root.status-file; color: #BBDEFB; font-size: 11px; font-italic: true;
+                            vertical-alignment: center; max-width: 180px;
+                        }
+                    }
                 }
-            }
-            Rectangle { width: 1px; height: 24px; background: FintechPalette.border; }
-            AppButton { text: "Load File"; variant: "primary"; compact: true; clicked => { root.load-file(); } }
-            AppButton {
-                text: "Batch Folder"; variant: "secondary"; compact: true;
-                enabled: !root.batch-running; clicked => { root.batch-folder(); }
+
+                // Logout — pinned to the extreme top-right of the header.
+                // Audit fix (2026-08-05): "logout" was already wired
+                // end-to-end (app.slint forwards it to logged-in = false)
+                // but nothing in the UI ever invoked it — there was no way
+                // to sign out short of quitting the app. Routed through
+                // the existing confirm modal like Reset Dedupe/Clear Logs,
+                // since it's a "leave your place" action worth a
+                // confirmation, not a destructive one.
+                //
+                // UI fix (2026-08-14): moved out of the flexible button row
+                // above and into this outer HorizontalBox as its own
+                // fixed-size trailing item. A box layout always grants a
+                // fixed/min-width item its space first, so Logout now stays
+                // pinned at the extreme right on any window width — on the
+                // 1536px screen this was reported on, the row of buttons no
+                // longer had enough room to also fit Logout via a shared
+                // horizontal-stretch spacer, which pushed it past the
+                // visible edge.
+                TBtn {
+                    text: "Logout"; bg: #546E7A; fg: #FFFFFF;
+                    clicked => {
+                        root.confirm-title = "Logout";
+                        root.confirm-message = "Sign out and return to the login screen?";
+                        root.confirm-action = "logout";
+                        root.confirm-payload = -1;
+                        root.modal-state = "confirm";
+                    }
+                }
             }
         }
 
-        // ─────────────────────────── WORKFLOW STRIP ───────────────────────────
-        // Compact secondary action row — same actions previously crammed
-        // into the toolbar, unchanged behavior, just visually separated
-        // from the page header above.
+        // ─────────────────────────── DATE RANGE BAR ───────────────────────────
+        // background: #EBF3FF, border-bottom: 1px solid #C5D9F0
         Rectangle {
-            height: 44px; background: FintechPalette.page-bg;
-            Rectangle { y: parent.height - 1px; height: 1px; background: FintechPalette.border; }
-            HorizontalBox {
-                padding-left: Spacing.section; padding-right: Spacing.section; spacing: Spacing.sm;
+            height: 36px; background: #EBF3FF;
 
-                AppButton {
-                    text: "Auto-Classify All"; variant: "secondary"; compact: true;
-                    enabled: root.transaction-rows.length > 0;
-                    clicked => { root.auto-classify(); }
+            // Bottom border
+            Rectangle { y: 35px; height: 1px; background: #C5D9F0; }
+
+            HorizontalBox {
+                padding-left: 12px; padding-right: 12px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 6px; height: 35px;
+
+                // .dr-label: font-size:11px; font-weight:700; color:#1565C0; text-transform:uppercase → "PERIOD:"
+                Text {
+                    text: "PERIOD:"; font-size: 11px;
+                    color: #1565C0; font-weight: 700; letter-spacing: 0.55px;
+                    vertical-alignment: center;
                 }
-                AppButton {
-                    text: "\u{2605} AI Classify"; variant: "ai"; compact: true;
-                    enabled: root.transaction-rows.length > 0;
-                    clicked => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
+
+                LineEdit {
+                    placeholder-text: "DD/MM/YYYY"; text: root.date-from;
+                    height: 26px; min-width: 100px; max-width: 100px; font-size: 11px;
+                    edited(v) => { root.date-from = v; }
                 }
-                Rectangle { width: 1px; height: 22px; background: FintechPalette.border; }
-                AppButton { text: "View Rules"; variant: "ghost"; compact: true; clicked => { root.view-rules(); root.modal-state = "view-rules"; } }
-                AppButton {
-                    text: "Import History"; variant: "ghost"; compact: true;
-                    enabled: root.transaction-rows.length > 0;
-                    clicked => { root.modal-state = "import-history"; }
+                Text { text: "\u{2013}"; color: #7B97B4; vertical-alignment: center; font-size: 13px; }
+                LineEdit {
+                    placeholder-text: "DD/MM/YYYY"; text: root.date-to;
+                    height: 26px; min-width: 100px; max-width: 100px; font-size: 11px;
+                    edited(v) => { root.date-to = v; }
                 }
-                AppButton { text: "Import Ledgers"; variant: "ghost"; compact: true; clicked => { root.import-ledgers(); } }
-                Rectangle { width: 1px; height: 22px; background: FintechPalette.border; }
-                HorizontalBox {
-                    padding: 0px; spacing: Spacing.xs;
-                    CheckBox { text: "Dedupe"; checked <=> root.dedup-enabled; }
+
+                // Apply: .btn.btn-sm.btn-primary → font-size:10px; padding:2px 7px; height:~24px
+                Rectangle {
+                    height: 24px; width: 52px;
+                    background: #1565C0; border-radius: 4px;
+                    TouchArea { clicked => { root.date-filter-apply(root.date-from, root.date-to); } }
+                    Text { text: "Apply"; font-size: 10px; font-weight: 500; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                // Clear: .btn.btn-sm → font-size:10px; padding:2px 7px; height:~24px
+                Rectangle {
+                    height: 24px; width: 46px;
+                    background: #FFFFFF; border-radius: 4px;
+                    border-width: 1px; border-color: #B0C8E8;
+                    TouchArea { clicked => { root.date-from = ""; root.date-to = ""; root.active-preset = ""; root.date-filter-apply("", ""); } }
+                    Text { text: "Clear"; font-size: 10px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                Rectangle { width: 1px; height: 18px; background: #C5D9F0; }
+
+                QBtn { text: "Today";      active: root.active-preset == "today";      enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "today";      root.date-preset("today"); } }
+                QBtn { text: "This Month"; active: root.active-preset == "this_month"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "this_month"; root.date-preset("this_month"); } }
+                QBtn { text: "Last Month"; active: root.active-preset == "last_month"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "last_month"; root.date-preset("last_month"); } }
+                QBtn { text: "Current FY"; active: root.active-preset == "current_fy"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "current_fy"; root.date-preset("current_fy"); } }
+                QBtn { text: "Prev FY";    active: root.active-preset == "prev_fy";    enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "prev_fy";    root.date-preset("prev_fy"); } }
+
+                // Active range chip — .dr-active-chip { background:#FF8F00; border-radius:12px }
+                if root.active-preset != "" : Rectangle {
+                    height: 20px;
+                    background: #FF8F00; border-radius: 10px;
+                    HorizontalBox {
+                        padding-left: 8px; padding-right: 6px;
+                        padding-top: 0px; padding-bottom: 0px; spacing: 4px;
+                        Text {
+                            text: root.active-preset == "today"      ? "Today" :
+                                  root.active-preset == "this_month" ? "This Month" :
+                                  root.active-preset == "last_month" ? "Last Month" :
+                                  root.active-preset == "current_fy" ? "Current FY" :
+                                  root.active-preset == "prev_fy"    ? "Prev FY" : root.active-preset;
+                            font-size: 10px; font-weight: 700; color: white;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            width: 14px; height: 14px; border-radius: 7px;
+                            background: #FFFFFF30;
+                            TouchArea { clicked => { root.active-preset = ""; root.date-filter-apply("", ""); } }
+                            Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
                 }
 
                 Rectangle { horizontal-stretch: 1; }
-
-                // .loaded-file
-                if root.status-file != "" : Text {
-                    text: root.status-file; color: FintechPalette.text-muted; font-size: Type.small; font-italic: true;
-                    vertical-alignment: center; max-width: 220px; overflow: elide;
-                }
             }
         }
 
         // ─────────────────────────── VIEW TABS ────────────────────────────────
-        // background: navy, border-bottom: 2px solid primary — colors
-        // aligned to the shared theme; structure/callbacks unchanged.
+        // background: #0D47A1 (deep blue), border-bottom: 2px solid #1565C0
         Rectangle {
-            height: 38px; background: FintechPalette.navy;
+            height: 38px; background: #0D47A1;
 
             // Bottom border
-            Rectangle { y: 36px; height: 2px; background: FintechPalette.primary; }
+            Rectangle { y: 36px; height: 2px; background: #1565C0; }
 
             HorizontalBox {
                 padding-left: 14px; padding-right: 14px;
@@ -918,149 +1191,194 @@ export component MainScreen inherits Rectangle {
             padding: 0px; spacing: 0px;
             width: parent.width; height: parent.height;
 
-                // ── Filter / control card (Phase 2 redesign) ───────────────────
-                // Merges the old Date Range Bar + Panel-header status
-                // filters/bank selector/compact toggle/add-row into one
-                // Card, as three rows — all bindings/callbacks unchanged,
-                // only the container and control styling are new.
+                // Panel header — .panel-hdr { padding:7px 12px; font-size:12px; background:#E3F2FD; }
                 Rectangle {
-                    background: FintechPalette.page-bg;
-                    VerticalBox {
-                        padding-left: Spacing.section; padding-right: Spacing.section;
-                        padding-top: Spacing.base; padding-bottom: Spacing.base;
-                        TxnFilterCard {
-                            // Row 1 — period controls (unchanged callbacks).
-                            HorizontalBox {
-                                padding: 0px; spacing: Spacing.sm;
-                                Text {
-                                    text: "PERIOD"; font-size: Type.micro; font-weight: 700;
-                                    color: FintechPalette.text-muted; letter-spacing: 0.6px;
-                                    vertical-alignment: center;
-                                }
-                                LineEdit {
-                                    placeholder-text: "DD/MM/YYYY"; text: root.date-from;
-                                    height: 32px; min-width: 104px; max-width: 104px; font-size: Type.small;
-                                    edited(v) => { root.date-from = v; }
-                                }
-                                Text { text: "\u{2013}"; color: FintechPalette.text-muted; vertical-alignment: center; font-size: Type.body; }
-                                LineEdit {
-                                    placeholder-text: "DD/MM/YYYY"; text: root.date-to;
-                                    height: 32px; min-width: 104px; max-width: 104px; font-size: Type.small;
-                                    edited(v) => { root.date-to = v; }
-                                }
-                                AppButton {
-                                    text: "Apply"; variant: "primary"; compact: true;
-                                    clicked => { root.date-filter-apply(root.date-from, root.date-to); }
-                                }
-                                AppButton {
-                                    text: "Clear"; variant: "secondary"; compact: true;
-                                    clicked => { root.date-from = ""; root.date-to = ""; root.active-preset = ""; root.date-filter-apply("", ""); }
-                                }
-                                Rectangle { width: 1px; height: 20px; background: FintechPalette.border; }
-                                TxnStatusChip { label: "Today";      active: root.active-preset == "today";      clicked => { root.active-preset = "today";      root.date-preset("today"); } }
-                                TxnStatusChip { label: "This Month"; active: root.active-preset == "this_month"; clicked => { root.active-preset = "this_month"; root.date-preset("this_month"); } }
-                                TxnStatusChip { label: "Last Month"; active: root.active-preset == "last_month"; clicked => { root.active-preset = "last_month"; root.date-preset("last_month"); } }
-                                TxnStatusChip { label: "Current FY"; active: root.active-preset == "current_fy"; clicked => { root.active-preset = "current_fy"; root.date-preset("current_fy"); } }
-                                TxnStatusChip { label: "Prev FY";    active: root.active-preset == "prev_fy";    clicked => { root.active-preset = "prev_fy";    root.date-preset("prev_fy"); } }
-                                if root.active-preset != "" : TxnActiveFilterPill {
-                                    label: root.active-preset == "today"      ? "Today" :
-                                           root.active-preset == "this_month" ? "This Month" :
-                                           root.active-preset == "last_month" ? "Last Month" :
-                                           root.active-preset == "current_fy" ? "Current FY" :
-                                           root.active-preset == "prev_fy"    ? "Prev FY" : root.active-preset;
-                                    accent: FintechPalette.warning;
-                                    remove => { root.active-preset = ""; root.date-filter-apply("", ""); }
-                                }
-                                Rectangle { horizontal-stretch: 1; }
-                            }
+                    height: 36px; background: #E3F2FD;
 
-                            // Row 2 — status chips (unchanged toggle-status/filter-changed calls).
-                            HorizontalBox {
-                                padding: 0px; spacing: Spacing.sm;
-                                TxnStatusChip { label: "All";          count: root.fc-all;        accent: FintechPalette.primary; active: !root.fs-unreviewed && !root.fs-suspense && !root.fs-high && !root.fs-dups && !root.fs-gst && !root.fs-review && !root.fs-credits && !root.fs-debits; clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
-                                TxnStatusChip { label: "Unreviewed";   count: root.fc-unreviewed; accent: FintechPalette.warning; active: root.fs-unreviewed; clicked => { root.toggle-status("unreviewed"); } }
-                                TxnStatusChip { label: "Suspense";     count: root.fc-suspense;   accent: FintechPalette.purple;  active: root.fs-suspense;   clicked => { root.toggle-status("suspense"); } }
-                                TxnStatusChip { label: "High Conf.";   count: root.fc-high;       accent: FintechPalette.success; active: root.fs-high;       clicked => { root.toggle-status("high"); } }
-                                TxnStatusChip { label: "Duplicates";   count: root.fc-duplicates; accent: #AD1457;                active: root.fs-dups;       clicked => { root.toggle-status("duplicates"); } }
-                                TxnStatusChip { label: "GST/Tax";      count: root.fc-gst;        accent: FintechPalette.teal;    active: root.fs-gst;        clicked => { root.toggle-status("gst"); } }
-                                TxnStatusChip { label: "Needs Review"; count: root.fc-review;      accent: FintechPalette.warning; active: root.fs-review;     clicked => { root.toggle-status("needs_review"); } }
-                                Rectangle { horizontal-stretch: 1; }
-                                Text {
-                                    text: root.fc-all != "0" ? root.fc-all + " transactions" : "No file loaded";
-                                    font-size: Type.small; color: FintechPalette.text-muted; vertical-alignment: center;
-                                }
-                            }
+                    // Bottom border
+                    Rectangle { y: 35px; height: 1px; background: #BBDEFB; }
 
-                            // Row 3 — bank / compact / add row (unchanged callbacks).
-                            HorizontalBox {
-                                padding: 0px; spacing: Spacing.sm;
-                                Text { text: "Bank"; font-size: Type.small; font-weight: 600; color: FintechPalette.text-muted; vertical-alignment: center; }
-                                ComboBox {
-                                    model: root.bank-names; height: 32px; min-width: 140px;
-                                    selected(v) => { root.sel-bank = v; root.bank-filter-changed(v); }
-                                }
-                                AppButton {
-                                    text: root.compact-mode ? "Compact \u{2713}" : "Compact";
-                                    variant: root.compact-mode ? "primary" : "secondary"; compact: true;
-                                    clicked => { root.compact-mode = !root.compact-mode; }
-                                }
-                                Rectangle { horizontal-stretch: 1; }
-                                Text { text: "(double-click to edit)"; font-size: Type.micro; color: FintechPalette.text-muted; vertical-alignment: center; }
-                                AppButton {
-                                    text: "+ Add Row"; variant: "secondary"; compact: true;
-                                    enabled: root.transaction-rows.length > 0;
-                                    clicked => {
-                                        root.add-date = ""; root.add-ref = ""; root.add-narr = "";
-                                        root.add-dr = ""; root.add-cr = "";
-                                        root.add-vendor = ""; root.add-head = "";
-                                        root.add-type-idx = 0;
-                                        root.add-row();
-                                        root.modal-state = "add-txn";
-                                    }
+                    HorizontalBox {
+                        padding-left: 12px; padding-right: 12px;
+                        padding-top: 0px; padding-bottom: 0px;
+                        spacing: 4px; height: 35px;
+
+                        Text {
+                            text: "Transactions"; font-size: 12px; font-weight: 600;
+                            color: #0D47A1; vertical-alignment: center;
+                        }
+                        Text {
+                            text: "(double-click to edit)"; font-size: 10px;
+                            color: #888888; vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            height: 24px; width: 68px;
+                            background: #FFFFFF; border-radius: 4px;
+                            border-width: 1px; border-color: #90CAF9;
+                            TouchArea {
+                                enabled: root.transaction-rows.length > 0;
+                                clicked => {
+                                    root.add-date = ""; root.add-ref = ""; root.add-narr = "";
+                                    root.add-dr = ""; root.add-cr = "";
+                                    root.add-vendor = ""; root.add-head = "";
+                                    root.add-type-idx = 0;
+                                    root.add-row();
+                                    root.modal-state = "add-txn";
                                 }
                             }
+                            Text {
+                                text: "+ Add Row"; font-size: 11px; color: #0A1929;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle { width: 1px; height: 26px; background: #BBDEFB; }
+
+                        // Inactive colors: border from .fbtn-* class; text from .fbtn { color:#555 } default
+                        // Except Needs Review: inline style="border-color:#e67e22;color:#e67e22"
+                        FBtn { label: "All";         count: root.fc-all;        active: !root.fs-unreviewed && !root.fs-suspense && !root.fs-high && !root.fs-dups && !root.fs-gst && !root.fs-review && !root.fs-credits && !root.fs-debits; a-bg: #1565C0; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.active-filter = "all"; root.filter-changed("all"); } }
+                        FBtn { label: "Unreviewed";  count: root.fc-unreviewed; active: root.fs-unreviewed; a-bg: #E65100; a-fg: white; i-border: #FFA726; i-fg: #555555; clicked => { root.toggle-status("unreviewed"); } }
+                        FBtn { label: "Suspense";    count: root.fc-suspense;   active: root.fs-suspense;   a-bg: #7B1FA2; a-fg: white; i-border: #90CAF9; i-fg: #555555; clicked => { root.toggle-status("suspense"); } }
+                        FBtn { label: "High Conf.";  count: root.fc-high;       active: root.fs-high;       a-bg: #1B5E20; a-fg: white; i-border: #43A047; i-fg: #555555; clicked => { root.toggle-status("high"); } }
+                        FBtn { label: "Duplicates";  count: root.fc-duplicates; active: root.fs-dups;       a-bg: #880E4F; a-fg: white; i-border: #E91E63; i-fg: #555555; clicked => { root.toggle-status("duplicates"); } }
+                        FBtn { label: "GST/Tax";     count: root.fc-gst;        active: root.fs-gst;        a-bg: #2E7D32; a-fg: white; i-border: #66BB6A; i-fg: #555555; clicked => { root.toggle-status("gst"); } }
+                        FBtn { label: "Needs Review"; count: root.fc-review;    active: root.fs-review;     a-bg: #E65100; a-fg: white; i-border: #E67E22; i-fg: #E67E22; clicked => { root.toggle-status("needs_review"); } }
+
+                        Rectangle { width: 1px; height: 26px; background: #BBDEFB; }
+                        Text { text: "Bank:"; font-size: 11px; color: #607D8B; vertical-alignment: center; }
+                        ComboBox {
+                            model: root.bank-names; height: 26px; min-width: 100px;
+                            selected(v) => { root.sel-bank = v; root.bank-filter-changed(v); }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.fc-all != "0" ? root.fc-all + " transactions" : "No file loaded";
+                            font-size: 11px; color: #90A4AE; vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            height: 24px; width: 60px;
+                            background: #FFFFFF; border-radius: 4px;
+                            border-width: 1px; border-color: #90CAF9;
+                            TouchArea { clicked => { root.compact-mode = !root.compact-mode; } }
+                            Text { text: "Compact"; font-size: 11px;
+                                   color: root.compact-mode ? #1565C0 : #546E7A;
+                                   horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
 
                 // ── Active filter chip bar (shown when any status/bank filter is on) ──────
-                // Same conditions/callbacks as before — restyled with the
-                // shared TxnActiveFilterPill instead of one-off pill markup.
                 if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits || (root.sel-bank != "All Banks" && root.sel-bank != "") || root.sel-vendor != "" || root.sel-head != "" : Rectangle {
-                    height: 40px; background: FintechPalette.page-bg;
-                    Rectangle { y: 0px; height: 1px; background: FintechPalette.border; width: parent.width; }
-                    HorizontalLayout {
-                        padding-left: Spacing.section; padding-right: Spacing.section;
-                        padding-top: 0px; padding-bottom: 0px; spacing: Spacing.sm; alignment: start;
-                        Text { text: "Filters:"; font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; vertical-alignment: center; }
-                        if root.fs-unreviewed : TxnActiveFilterPill { label: "Unreviewed"; accent: FintechPalette.warning; remove => { root.toggle-status("unreviewed"); } }
-                        if root.fs-suspense   : TxnActiveFilterPill { label: "Suspense";   accent: FintechPalette.purple;  remove => { root.toggle-status("suspense"); } }
-                        if root.fs-high       : TxnActiveFilterPill { label: "High Conf."; accent: FintechPalette.success; remove => { root.toggle-status("high"); } }
-                        if root.fs-dups       : TxnActiveFilterPill { label: "Duplicates"; accent: #AD1457;                remove => { root.toggle-status("duplicates"); } }
-                        if root.fs-gst        : TxnActiveFilterPill { label: "GST/Tax";    accent: FintechPalette.teal;    remove => { root.toggle-status("gst"); } }
-                        if root.fs-review     : TxnActiveFilterPill { label: "Needs Review"; accent: FintechPalette.warning; remove => { root.toggle-status("needs_review"); } }
-                        if root.fs-credits    : TxnActiveFilterPill { label: "Credits Only"; accent: FintechPalette.success; remove => { root.toggle-status("credits"); } }
-                        if root.fs-debits     : TxnActiveFilterPill { label: "Debits Only";  accent: FintechPalette.danger;  remove => { root.toggle-status("debits"); } }
-                        if root.sel-bank != "All Banks" && root.sel-bank != "" : TxnActiveFilterPill {
-                            label: root.sel-bank; accent: FintechPalette.navy;
-                            remove => { root.sel-bank = "All Banks"; root.bank-filter-changed("All Banks"); }
+                    height: 32px; background: #F8F9FA; border-width: 0px;
+                    Rectangle { y: 0px; height: 1px; background: #E0E0E0; width: parent.width; }
+                    HorizontalLayout { padding-left: 12px; padding-right: 12px; padding-top: 0px; padding-bottom: 0px; spacing: 6px; alignment: start;
+                        Text { text: "Filters:"; font-size: 10px; font-weight: 700; color: #607D8B; vertical-alignment: center; }
+                        if root.fs-unreviewed : Rectangle {
+                            height: 20px; border-radius: 10px; background: #E65100;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Unreviewed"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Unreviewed filter"; TouchArea { clicked => { root.toggle-status("unreviewed"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
                         }
-                        if root.sel-vendor != "" : TxnActiveFilterPill {
-                            label: root.sel-vendor; accent: FintechPalette.purple;
-                            remove => { root.sel-vendor = ""; root.vendor-filter-changed(""); }
+                        if root.fs-suspense : Rectangle {
+                            height: 20px; border-radius: 10px; background: #7B1FA2;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Suspense"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Suspense filter"; TouchArea { clicked => { root.toggle-status("suspense"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
                         }
-                        if root.sel-head != "" : TxnActiveFilterPill {
-                            label: root.sel-head; accent: FintechPalette.teal;
-                            remove => { root.sel-head = ""; root.head-filter-changed(""); }
+                        if root.fs-high : Rectangle {
+                            height: 20px; border-radius: 10px; background: #1B5E20;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "High Conf."; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove High Confidence filter"; TouchArea { clicked => { root.toggle-status("high"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-dups : Rectangle {
+                            height: 20px; border-radius: 10px; background: #880E4F;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Duplicates"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Duplicates filter"; TouchArea { clicked => { root.toggle-status("duplicates"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-gst : Rectangle {
+                            height: 20px; border-radius: 10px; background: #2E7D32;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "GST/Tax"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove GST/Tax filter"; TouchArea { clicked => { root.toggle-status("gst"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-review : Rectangle {
+                            height: 20px; border-radius: 10px; background: #E65100;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Needs Review"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Needs Review filter"; TouchArea { clicked => { root.toggle-status("needs_review"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-credits : Rectangle {
+                            height: 20px; border-radius: 10px; background: #2E7D32;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Credits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Credits Only filter"; TouchArea { clicked => { root.toggle-status("credits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.fs-debits : Rectangle {
+                            height: 20px; border-radius: 10px; background: #C62828;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: "Debits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Debits Only filter"; TouchArea { clicked => { root.toggle-status("debits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                            }
+                        }
+                        if root.sel-bank != "All Banks" && root.sel-bank != "" : Rectangle {
+                            height: 20px; border-radius: 10px; background: #0D47A1;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: root.sel-bank; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    accessible-role: button;
+                                    accessible-label: "Remove " + root.sel-bank + " bank filter";
+                                    TouchArea { clicked => { root.sel-bank = "All Banks"; root.bank-filter-changed("All Banks"); } }
+                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                        if root.sel-vendor != "" : Rectangle {
+                            height: 20px; border-radius: 10px; background: #6A1B9A;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: root.sel-vendor; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    accessible-role: button;
+                                    accessible-label: "Remove " + root.sel-vendor + " vendor filter";
+                                    TouchArea { clicked => { root.sel-vendor = ""; root.vendor-filter-changed(""); } }
+                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                        if root.sel-head != "" : Rectangle {
+                            height: 20px; border-radius: 10px; background: #00695C;
+                            HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
+                                Text { text: root.sel-head; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
+                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
+                                    accessible-role: button;
+                                    accessible-label: "Remove " + root.sel-head + " ledger filter";
+                                    TouchArea { clicked => { root.sel-head = ""; root.head-filter-changed(""); } }
+                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
                         }
                         Rectangle { horizontal-stretch: 1; }
-                        AppButton {
-                            text: "Clear All"; variant: "ghost"; compact: true;
-                            clicked => {
+                        Rectangle {
+                            height: 20px; border-radius: 10px; background: #ECEFF1; border-width: 1px; border-color: #B0BEC5;
+                            HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 0px;
+                                Text { text: "Clear All"; font-size: 10px; color: #546E7A; font-weight: 600; vertical-alignment: center; }
+                            }
+                            TouchArea { clicked => {
                                 root.sel-bank = "All Banks"; root.sel-vendor = ""; root.sel-head = "";
                                 root.active-filter = "all"; root.filter-changed("all");
                                 root.bank-filter-changed("All Banks"); root.vendor-filter-changed(""); root.head-filter-changed("");
-                            }
+                            } }
                         }
                     }
                 }
@@ -1069,56 +1387,64 @@ export component MainScreen inherits Rectangle {
                 HorizontalBox {
                     padding: 0px; spacing: 0px; vertical-stretch: 1;
 
-                    // Transaction table — redesigned TxnTable (sticky header,
-                    // synced horizontal+vertical scroll); same rows/compact/
-                    // click-index contract the old TxnHeader+ListView+
-                    // TxnTableRow trio exchanged with this screen.
+                    // Transaction table — white background
                     Rectangle {
-                        horizontal-stretch: 4; background: FintechPalette.card; clip: true;
+                        horizontal-stretch: 4; background: #FFFFFF; clip: true;
 
                         VerticalBox {
                             padding: 0px; spacing: 0px;
 
                             if root.transaction-rows.length == 0 : VerticalBox {
-                                alignment: center; spacing: Spacing.md;
+                                alignment: center; spacing: 12px;
                                 Text {
                                     text: "Select a client, then load a bank statement (Excel .xlsx / .xls)";
-                                    font-size: Type.h3; color: FintechPalette.text-muted; font-italic: true;
+                                    font-size: 13px; color: #AAAAAA; font-italic: true;
                                     horizontal-alignment: center; wrap: word-wrap;
                                 }
                             }
 
-                            if root.transaction-rows.length > 0 : TxnTable {
-                                vertical-stretch: 1;
-                                rows: root.transaction-rows;
-                                compact: root.compact-mode;
-                                selected-idx: root.dclick-pending-idx;
-                                row-clicked(i) => {
-                                    if root.dclick-pending-idx == i {
-                                        root.row-click(i);
-                                        root.etxn-vendor = "";
-                                        root.etxn-head   = "";
-                                        root.etxn-type-idx = 0;
-                                        root.modal-state = "edit-txn";
-                                        root.dclick-pending-idx = -1;
-                                    } else {
-                                        root.dclick-pending-idx = i;
+                            if root.transaction-rows.length > 0 : VerticalBox {
+                                vertical-stretch: 1; padding: 0px; spacing: 0px;
+                                // Sticky table header
+                                TxnHeader { }
+                                // Scrollable body with colored rows
+                                ListView {
+                                    vertical-stretch: 1;
+                                    for row[idx] in root.transaction-rows : TxnTableRow {
+                                        width: parent.width;
+                                        data: row;
+                                        row-idx: idx;
+                                        compact: root.compact-mode;
+                                        clicked(i) => {
+                                            if root.dclick-pending-idx == i {
+                                                root.row-click(i);
+                                                root.etxn-vendor = "";
+                                                root.etxn-head   = "";
+                                                root.etxn-type-idx = 0;
+                                                root.modal-state = "edit-txn";
+                                                root.dclick-pending-idx = -1;
+                                            } else {
+                                                root.dclick-pending-idx = i;
+                                            }
+                                        }
                                     }
                                 }
                             }
 
-                            // Colour key — restyled with the shared Badge
-                            // component; same six row-color/tag/status
-                            // legend entries as before.
-                            if root.transaction-rows.length > 0 : Rectangle {
-                                height: 32px; background: FintechPalette.page-bg;
-                                Rectangle { y: 0px; height: 1px; background: FintechPalette.border; }
+                            // Colour key — .colour-key { gap:18px; padding:5px 12px; background:#E3F2FD; font-size:11px; color:#0D47A1 }
+                            // .k { display:flex; align-items:center; gap:5px; }
+                            // .k::before { width:11px; height:11px; border-radius:2px; background:[color] }
+                            Rectangle {
+                                height: 28px; background: #E3F2FD;
+                                border-width: 0px;
+                                Rectangle { y: 0px; height: 1px; background: #BBDEFB; }
 
                                 HorizontalBox {
-                                    padding-left: Spacing.section; padding-right: Spacing.section;
-                                    padding-top: Spacing.xs; padding-bottom: Spacing.xs;
-                                    spacing: Spacing.base;
+                                    padding-left: 12px; padding-right: 12px;
+                                    padding-top: 5px; padding-bottom: 5px;
+                                    spacing: 18px;
 
+                                    // Row-colour key items: coloured square dot + dark text label
                                     for item in [
                                         {lbl: "High Conf.", dot: #A5D6A7},
                                         {lbl: "Medium",     dot: #FFF176},
@@ -1127,26 +1453,40 @@ export component MainScreen inherits Rectangle {
                                         {lbl: "Manual",     dot: #90CAF9},
                                         {lbl: "Duplicate",  dot: #F8BBD0},
                                     ] : HorizontalBox {
-                                        padding: 0px; spacing: Spacing.xs; alignment: center;
-                                        Rectangle { width: 10px; height: 10px; border-radius: 3px; background: item.dot; }
-                                        Text { text: item.lbl; font-size: Type.micro; color: FintechPalette.text-muted; vertical-alignment: center; }
+                                        padding: 0px; spacing: 5px; alignment: center;
+                                        Rectangle { width: 11px; height: 11px; border-radius: 2px; background: item.dot; }
+                                        Text { text: item.lbl; font-size: 11px; color: #0D47A1; vertical-alignment: center; }
                                     }
 
-                                    Rectangle { width: 1px; height: 16px; background: FintechPalette.border; }
+                                    // Pipe separator text
+                                    Text { text: "|"; font-size: 11px; color: #90CAF9; vertical-alignment: center; }
 
+                                    // Tag badges: .txn-tag style (font-size:9.5px; background+border)
                                     for tag in [
-                                        {lbl: "GST", fg: #1B5E20, bg: #C8E6C9},
-                                        {lbl: "TAX", fg: #BF360C, bg: #FFE0B2},
-                                        {lbl: "DUP", fg: #880E4F, bg: #FCE4EC},
-                                    ] : Badge { text: tag.lbl; fg: tag.fg; bg: tag.bg; }
+                                        {lbl: "GST", bg: #C8E6C9, fg: #1B5E20, bc: #66BB6A},
+                                        {lbl: "TAX", bg: #FFE0B2, fg: #BF360C, bc: #FFA726},
+                                        {lbl: "DUP", bg: #FCE4EC, fg: #880E4F, bc: #E91E63},
+                                    ] : Rectangle {
+                                        height: 16px; min-width: 28px;
+                                        background: tag.bg; border-radius: 3px;
+                                        border-width: 1px; border-color: tag.bc;
+                                        Text { text: tag.lbl; font-size: 10px; color: tag.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
 
-                                    Rectangle { width: 1px; height: 16px; background: FintechPalette.border; }
+                                    // Pipe separator text
+                                    Text { text: "|"; font-size: 11px; color: #90CAF9; vertical-alignment: center; }
 
+                                    // Status chips: .status-chip style (rounded pills)
                                     for chip in [
-                                        {lbl: "HIGH",     fg: #1B5E20, bg: #C8E6C9},
-                                        {lbl: "REVIEW",   fg: #B71C1C, bg: #FFCDD2},
-                                        {lbl: "SUSPENSE", fg: #6A1B9A, bg: #E1BEE7},
-                                    ] : Badge { text: chip.lbl; fg: chip.fg; bg: chip.bg; }
+                                        {lbl: "HIGH",     bg: #C8E6C9, fg: #1B5E20, bc: #81C784},
+                                        {lbl: "REVIEW",   bg: #FFCDD2, fg: #B71C1C, bc: #EF9A9A},
+                                        {lbl: "SUSPENSE", bg: #E1BEE7, fg: #6A1B9A, bc: #BA68C8},
+                                    ] : Rectangle {
+                                        height: 16px; min-width: 34px;
+                                        background: chip.bg; border-radius: 8px;
+                                        border-width: 1px; border-color: chip.bc;
+                                        Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
 
                                     Rectangle { horizontal-stretch: 1; }
                                 }
@@ -1154,45 +1494,42 @@ export component MainScreen inherits Rectangle {
                         }
                     }
 
-                    // Summary panel — redesigned (Phase 2): Card-based
-                    // sections instead of one long divider-separated list.
-                    // Every SR/value/callback below is unchanged; only the
-                    // grouping/chrome around them is new.
+                    // Summary panel — background: #F0F7FF, width: 270px
                     Rectangle {
-                        width: 280px;
-                        background: FintechPalette.page-bg;
+                        width: 270px;
+                        background: #F0F7FF;
                         clip: true;
-                        Rectangle { x: 0px; y: 0px; width: 1px; height: parent.height; background: FintechPalette.border; }
+                        // Left border only (matches original border-left: 1px solid #BBDEFB)
+                        Rectangle { x: 0px; y: 0px; width: 1px; height: parent.height; background: #BBDEFB; }
 
                         ScrollView {
                             width: parent.width; height: parent.height;
 
                             VerticalBox {
-                                padding: Spacing.md; spacing: Spacing.md; width: 280px - Spacing.md * 2;
+                                padding: 12px; spacing: 5px; width: 258px;
 
+                                // .sum-hdr { font-weight:800; font-size:13px; color:#0A1929; padding-bottom:8px; border-bottom:3px solid #1565C0; margin-bottom:10px }
                                 Text {
-                                    text: "Summary"; font-size: Type.h2; font-weight: 800;
-                                    color: FintechPalette.text;
+                                    text: "Summary"; font-size: 13px; font-weight: 800;
+                                    color: #0A1929;
+                                }
+                                Rectangle { height: 8px; }  // padding-bottom:8px before border
+                                Rectangle { height: 3px; background: #1565C0; }
+
+                                // .sum-placeholder { color:#aaa; font-style:italic; font-size:12px; margin-top:20px; text-align:center }
+                                if root.transaction-rows.length == 0 : Rectangle { height: 20px; }
+                                if root.transaction-rows.length == 0 : Text {
+                                    text: "No data loaded";
+                                    font-size: 12px; color: #AAAAAA; font-italic: true;
+                                    horizontal-alignment: center; wrap: word-wrap;
                                 }
 
-                                if root.transaction-rows.length == 0 : Card {
-                                    height: 60px;
-                                    Text {
-                                        text: "No data loaded";
-                                        font-size: Type.small; color: FintechPalette.text-muted; font-italic: true;
-                                        horizontal-alignment: center; vertical-alignment: center; width: parent.width;
-                                    }
-                                }
+                                if root.transaction-rows.length > 0 : SDivider { title: "CLIENT"; }
+                                SR { lbl: "Name";    val: root.dash-client-name != "" ? root.dash-client-name : "\u{2014}"; vcol: #37474F; }
+                                SR { lbl: "Bank";    val: root.dash-bank-name   != "" ? root.dash-bank-name   : "\u{2014}"; vcol: #37474F; }
+                                SR { lbl: "Account"; val: root.dash-account-no  != "" ? root.dash-account-no  : "\u{2014}"; vcol: #37474F; }
+                                SR { lbl: "Period";  val: root.dash-period;  vcol: #546E7A; }
 
-<<<<<<< HEAD
-                                if root.transaction-rows.length > 0 : SummarySection {
-                                    title: "CLIENT";
-                                    SR { lbl: "Name";    val: root.dash-client-name != "" ? root.dash-client-name : "\u{2014}"; vcol: #37474F; }
-                                    SR { lbl: "Bank";    val: root.dash-bank-name   != "" ? root.dash-bank-name   : "\u{2014}"; vcol: #37474F; }
-                                    SR { lbl: "Account"; val: root.dash-account-no  != "" ? root.dash-account-no  : "\u{2014}"; vcol: #37474F; }
-                                    SR { lbl: "Period";  val: root.dash-period;  vcol: #546E7A; }
-                                }
-=======
                                 // ── Top stat tiles (original: 4-tile .sum-stats-grid right
                                 // after client info — Transactions/To Review/Duplicates/GST-Tax,
                                 // each a sum-link that drills into that filter except the plain
@@ -1234,79 +1571,42 @@ export component MainScreen inherits Rectangle {
                                 SR { lbl: "Total Payments";  val: root.dash-debits;       vcol: #C62828; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "debits";       root.drill-filter("debits"); } }
                                 SR { lbl: "Closing Balance"; val: root.dash-closing;      vcol: #1565C0; }
                                 SR { lbl: "Calc. Closing";   val: root.dash-calc-closing; vcol: #546E7A; }
->>>>>>> fix/old-ui-fidelity
 
-                                if root.transaction-rows.length > 0 : SummarySection {
-                                    title: "BALANCES";
-                                    SR { lbl: "Opening Balance"; val: root.dash-opening;      vcol: FintechPalette.primary; }
-                                    SR { lbl: "Total Receipts";  val: root.dash-credits;      vcol: FintechPalette.success; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "credits";      root.drill-filter("credits"); } }
-                                    SR { lbl: "Total Payments";  val: root.dash-debits;       vcol: FintechPalette.danger;  clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "debits";       root.drill-filter("debits"); } }
-                                    SR { lbl: "Closing Balance"; val: root.dash-closing;      vcol: FintechPalette.primary; }
-                                    SR { lbl: "Calc. Closing";   val: root.dash-calc-closing; vcol: #546E7A; }
-
-                                    if root.dash-has-mismatch : Rectangle {
-                                        height: 36px; background: #FFEBEE; border-radius: Radius.md;
-                                        Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: FintechPalette.danger; border-radius: Radius.md; }
-                                        HorizontalBox {
-                                            padding-left: Spacing.md; padding-right: Spacing.md;
-                                            padding-top: 0px; padding-bottom: 0px; spacing: Spacing.xs;
-                                            Text { text: "\u{2717} MISMATCH"; font-size: Type.body; font-weight: 800; color: #B71C1C; vertical-alignment: center; horizontal-stretch: 1; }
-                                            Text { text: root.dash-mismatch; font-size: Type.small; font-weight: 700; color: FintechPalette.danger; vertical-alignment: center; }
-                                        }
-                                    }
-                                    if !root.dash-has-mismatch : Rectangle {
-                                        height: 36px; background: #E8F5E9; border-radius: Radius.md;
-                                        Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: FintechPalette.success; border-radius: Radius.md; }
-                                        HorizontalBox {
-                                            padding-left: Spacing.md; padding-right: Spacing.md; padding-top: 0px; padding-bottom: 0px;
-                                            Text { text: "\u{2713} RECONCILED"; font-size: Type.body; font-weight: 800; color: #1B5E20; vertical-alignment: center; }
-                                        }
-                                    }
-                                }
-
-                                if root.transaction-rows.length > 0 : SummarySection {
-                                    title: "TRANSACTIONS";
+                                // .recon-card.mismatch { background:#ffebee; border-left:4px solid #c62828; border-radius:6px; padding:10px 12px }
+                                if root.dash-has-mismatch : Rectangle {
+                                    height: 36px; background: #FFEBEE;
+                                    border-radius: 6px;
+                                    // Left accent border (4px)
+                                    Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #C62828; border-radius: 6px; }
                                     HorizontalBox {
-                                        padding: 0px; spacing: Spacing.xs;
-                                        // Requirement #4: these three cards are Summary hyperlinks too —
-                                        // TOTAL restores all transactions, CREDITS/DEBITS mirror the
-                                        // "Total Receipts"/"Total Payments" rows above. Same drill-filter
-                                        // callback as every other clickable Summary item — no new mechanism.
-                                        for s in [
-                                            {v: root.dash-txn-count,    lbl: "TOTAL",   filter: "all"},
-                                            {v: root.dash-credit-count, lbl: "CREDITS", filter: "credits"},
-                                            {v: root.dash-debit-count,  lbl: "DEBITS",  filter: "debits"},
-                                        ] : Rectangle {
-                                            horizontal-stretch: 1; height: 50px;
-                                            background: FintechPalette.page-bg; border-radius: Radius.md;
-                                            border-width: 1px; border-color: FintechPalette.border;
-                                            accessible-role: button;
-                                            accessible-label: s.lbl + ": " + s.v;
-                                            VerticalBox {
-                                                padding: Spacing.xs; spacing: 2px; alignment: center;
-                                                Text { text: s.v; font-size: Type.h3; font-weight: 800; color: FintechPalette.primary; horizontal-alignment: center; overflow: elide; }
-                                                Text { text: s.lbl; font-size: 8px; color: FintechPalette.text-muted; letter-spacing: 0.4px; horizontal-alignment: center; }
-                                            }
-                                            TouchArea {
-                                                x: 0; y: 0; width: parent.width; height: parent.height;
-                                                mouse-cursor: pointer;
-                                                clicked => {
-                                                    root.show-dashboard = false;
-                                                    root.active-filter = s.filter;
-                                                    root.drill-filter(s.filter);
-                                                }
-                                            }
+                                        padding-left: 14px; padding-right: 12px;
+                                        padding-top: 0px; padding-bottom: 0px; spacing: 6px;
+                                        Text {
+                                            text: "\u{2717} MISMATCH"; font-size: 13px; font-weight: 800;
+                                            color: #B71C1C; vertical-alignment: center; horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: root.dash-mismatch; font-size: 11px; font-weight: 700;
+                                            color: #C62828; vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                // .recon-card.ok { background:#e8f5e9; border-left:4px solid #2e7d32; border-radius:6px; padding:10px 12px }
+                                if !root.dash-has-mismatch && root.transaction-rows.length > 0 : Rectangle {
+                                    height: 36px; background: #E8F5E9;
+                                    border-radius: 6px;
+                                    // Left accent border (4px)
+                                    Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #2E7D32; border-radius: 6px; }
+                                    HorizontalBox {
+                                        padding-left: 14px; padding-right: 12px;
+                                        padding-top: 0px; padding-bottom: 0px;
+                                        Text {
+                                            text: "\u{2713} RECONCILED"; font-size: 13px; font-weight: 800;
+                                            color: #1B5E20; vertical-alignment: center;
                                         }
                                     }
                                 }
 
-<<<<<<< HEAD
-                                if root.transaction-rows.length > 0 : SummarySection {
-                                    title: "REVIEW STATUS";
-                                    SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "unreviewed";   root.drill-filter("unreviewed"); } }
-                                    SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: FintechPalette.warning; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "needs_review"; root.drill-filter("needs_review"); } }
-                                    if root.dash-has-suspense : SR { lbl: "Suspense"; val: root.dash-suspense; vcol: FintechPalette.purple; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense"; root.drill-filter("suspense"); } }
-=======
                                 // Pending-classification badge (original: .pending-badge —
                                 // background #fff3e0/color #e65100 when pending>0, else
                                 // background #e8f5e9/color #2e7d32). "Pending" there means
@@ -1328,31 +1628,19 @@ export component MainScreen inherits Rectangle {
                                         font-size: 12px; font-weight: 600; color: #2E7D32;
                                         horizontal-alignment: center; vertical-alignment: center;
                                     }
->>>>>>> fix/old-ui-fidelity
                                 }
 
-                                if root.transaction-rows.length > 0 : SummarySection {
-                                    title: "OTHER";
-                                    SR { lbl: "Duplicates"; val: root.dash-duplicates; vcol: #C2185B; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "duplicates"; root.drill-filter("duplicates"); } }
-                                    SR { lbl: "GST / Tax";  val: root.dash-gst-count;  vcol: FintechPalette.purple; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "gst";        root.drill-filter("gst"); } }
-                                    SR { lbl: "Vendors";    val: root.dash-vendors;    vcol: #546E7A; }
-                                }
+                                SDivider { title: "REVIEW STATUS"; }
+                                SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "unreviewed";   root.drill-filter("unreviewed"); } }
+                                SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: #E65100; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "needs_review"; root.drill-filter("needs_review"); } }
+                                if root.dash-has-suspense : SR { lbl: "Suspense"; val: root.dash-suspense; vcol: #7B1FA2; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense"; root.drill-filter("suspense"); } }
+
+                                SDivider { title: "OTHER"; }
+                                SR { lbl: "Duplicates"; val: root.dash-duplicates; vcol: #C2185B; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "duplicates"; root.drill-filter("duplicates"); } }
+                                SR { lbl: "GST / Tax";  val: root.dash-gst-count;  vcol: #6A1B9A; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "gst";        root.drill-filter("gst"); } }
+                                SR { lbl: "Vendors";    val: root.dash-vendors;    vcol: #546E7A; }
 
                                 // ── Classification Quality card ───────────────────────────────────────
-<<<<<<< HEAD
-                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : SummarySection {
-                                    title: "CLASSIFICATION QUALITY";
-                                    Rectangle {
-                                        height: 10px; border-radius: Radius.sm; clip: true; background: #FFCDD2;
-                                        Rectangle { x: 0; y: 0; height: parent.height; background: #A5D6A7; width: parent.width * root.dash-conf-hi-frac; }
-                                        Rectangle { x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #FFF176; width: parent.width * root.dash-conf-med-frac; }
-                                    }
-                                    HorizontalBox {
-                                        padding: 0px; spacing: Spacing.xs;
-                                        Badge { text: "HIGH " + root.dash-conf-hi-count;  fg: #1B5E20; bg: #C8E6C9; }
-                                        Badge { text: "MED "  + root.dash-conf-med-count; fg: #F57F17; bg: #FFF9C4; }
-                                        Badge { text: "LOW "  + root.dash-conf-lo-count;  fg: #C62828; bg: #FFCDD2; }
-=======
                                 if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : SDivider { title: "CLASSIFICATION QUALITY"; }
                                 if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : Rectangle {
                                     // Original: .conf-bar-hi #388E3C, .conf-bar-med #EF6C00, .conf-bar-lo #C62828
@@ -1366,37 +1654,50 @@ export component MainScreen inherits Rectangle {
                                     Rectangle {
                                         x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #EF6C00;
                                         width: parent.width * root.dash-conf-med-frac;
->>>>>>> fix/old-ui-fidelity
                                     }
-                                    if root.dash-cq-ai != "0" : SR { lbl: "\u{2726} AI classified"; val: root.dash-cq-ai;   vcol: FintechPalette.purple; }
-                                    if root.dash-cq-rule != "0" : SR { lbl: "Rule matched";         val: root.dash-cq-rule; vcol: FintechPalette.primary; }
-                                    if root.dash-cq-kw != "0" : SR { lbl: "Keyword heuristic";      val: root.dash-cq-kw;   vcol: #555555; }
                                 }
+                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : HorizontalBox {
+                                    padding: 0px; spacing: 4px;
+                                    for chip in [
+                                        { lbl: "HIGH " + root.dash-conf-hi-count,  bg: #C8E6C9, fg: #1B5E20, bc: #81C784 },
+                                        { lbl: "MED "  + root.dash-conf-med-count, bg: #FFF9C4, fg: #F57F17, bc: #FFD54F },
+                                        { lbl: "LOW "  + root.dash-conf-lo-count,  bg: #FFCDD2, fg: #C62828, bc: #EF9A9A },
+                                    ] : Rectangle {
+                                        height: 18px; horizontal-stretch: 1;
+                                        background: chip.bg; border-radius: 4px;
+                                        border-width: 1px; border-color: chip.bc;
+                                        Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+                                if root.dash-cq-ai != "0" : SR { lbl: "\u{2726} AI classified";   val: root.dash-cq-ai;   vcol: #7B1FA2; }
+                                if root.dash-cq-rule != "0" : SR { lbl: "Rule matched";       val: root.dash-cq-rule; vcol: #1565C0; }
+                                if root.dash-cq-kw != "0" : SR { lbl: "Keyword heuristic"; val: root.dash-cq-kw;   vcol: #555555; }
 
                                 // ── Per Account breakdown ─────────────────────────────────────────────
-                                if root.dash-per-account.length > 0 : SummarySection {
-                                    title: "PER ACCOUNT";
-                                    for a in root.dash-per-account : Rectangle {
-                                        height: 34px;
-                                        VerticalLayout {
-                                            padding: 0px; spacing: 1px; width: parent.width; height: parent.height;
-                                            Text { text: a.lbl; font-size: Type.small; font-weight: 700; color: FintechPalette.primary; overflow: elide; vertical-alignment: center; }
-                                            Text { text: a.val; font-size: Type.micro; color: #555555; vertical-alignment: center; }
+                                if root.dash-per-account.length > 0 : SDivider { title: "PER ACCOUNT"; }
+                                for a in root.dash-per-account : Rectangle {
+                                    height: 34px;
+                                    VerticalLayout {
+                                        padding: 0px; spacing: 1px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: a.lbl; font-size: 11px; font-weight: 700; color: #0D47A1;
+                                            overflow: elide; vertical-alignment: center;
                                         }
-                                        TouchArea {
-                                            x: 0; y: 0; width: parent.width; height: parent.height;
-                                            mouse-cursor: pointer;
-                                            clicked => { root.sel-bank = a.key; root.bank-filter-changed(a.key); }
+                                        Text {
+                                            text: a.val; font-size: 9px; color: #555555; vertical-alignment: center;
                                         }
+                                    }
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-bank = a.key; root.bank-filter-changed(a.key); }
                                     }
                                 }
 
                                 // ── GST / Tax amounts ─────────────────────────────────────────────────
-                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SummarySection {
-                                    title: "GST / TAX";
-                                    SR { lbl: "GST Paid";        val: root.dash-gst-paid; vcol: FintechPalette.danger; }
-                                    SR { lbl: "GST Recv./Refund"; val: root.dash-gst-recv; vcol: FintechPalette.success; }
-                                }
+                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SDivider { title: "GST / TAX"; }
+                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Paid";        val: root.dash-gst-paid; vcol: #C62828; }
+                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Recv./Refund"; val: root.dash-gst-recv; vcol: #2E7D32; }
 
                                 // ── Duplicates Detected card (original: .sum-card with
                                 // border-color:#f48fb1, title color:#880e4f) — a standalone
@@ -1458,62 +1759,72 @@ export component MainScreen inherits Rectangle {
                                 }
 
                                 // ── Recurring parties ─────────────────────────────────────────────────
-                                if root.dash-parties.length > 0 : SummarySection {
-                                    title: "RECURRING PARTIES";
-                                    for p in root.dash-parties : Rectangle {
-                                        height: 20px;
-                                        HorizontalLayout {
-                                            padding: 0px; spacing: Spacing.xs; width: parent.width; height: parent.height;
-                                            Text { text: p.lbl; font-size: Type.small; color: FintechPalette.primary; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
-                                            Text { text: p.val; font-size: Type.micro; color: #555555; vertical-alignment: center; }
+                                if root.dash-parties.length > 0 : SDivider { title: "RECURRING PARTIES"; }
+                                for p in root.dash-parties : Rectangle {
+                                    height: 18px;
+                                    HorizontalLayout {
+                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: p.lbl; font-size: 11px; color: #0D47A1; horizontal-stretch: 1;
+                                            overflow: elide; vertical-alignment: center;
                                         }
-                                        TouchArea {
-                                            x: 0; y: 0; width: parent.width; height: parent.height;
-                                            mouse-cursor: pointer;
-                                            clicked => { root.sel-vendor = p.key; root.vendor-filter-changed(p.key); }
+                                        Text {
+                                            text: p.val; font-size: 10px; color: #555555; vertical-alignment: center;
                                         }
+                                    }
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-vendor = p.key; root.vendor-filter-changed(p.key); }
                                     }
                                 }
 
                                 // ── Receipts by Ledger ────────────────────────────────────────────────
-                                if root.dash-rec-ledgers.length > 0 : SummarySection {
-                                    title: "RECEIPTS BY LEDGER";
-                                    for r in root.dash-rec-ledgers : Rectangle {
-                                        height: 20px;
-                                        HorizontalLayout {
-                                            padding: 0px; spacing: Spacing.xs; width: parent.width; height: parent.height;
-                                            Text { text: r.lbl; font-size: Type.micro; color: #37474F; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
-                                            Text { text: r.val; font-size: Type.micro; color: FintechPalette.success; font-weight: 600; vertical-alignment: center; }
+                                if root.dash-rec-ledgers.length > 0 : SDivider { title: "RECEIPTS BY LEDGER"; }
+                                for r in root.dash-rec-ledgers : Rectangle {
+                                    height: 18px;
+                                    HorizontalLayout {
+                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: r.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
+                                            overflow: elide; vertical-alignment: center;
                                         }
-                                        TouchArea {
-                                            x: 0; y: 0; width: parent.width; height: parent.height;
-                                            mouse-cursor: pointer;
-                                            clicked => { root.sel-head = r.key; root.head-filter-changed(r.key); }
+                                        Text {
+                                            text: r.val; font-size: 10px; color: #2E7D32; font-weight: 600; vertical-alignment: center;
                                         }
+                                    }
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-head = r.key; root.head-filter-changed(r.key); }
                                     }
                                 }
 
                                 // ── Payments by Ledger ────────────────────────────────────────────────
-                                if root.dash-pay-ledgers.length > 0 : SummarySection {
-                                    title: "PAYMENTS BY LEDGER";
-                                    for p in root.dash-pay-ledgers : Rectangle {
-                                        height: 20px;
-                                        HorizontalLayout {
-                                            padding: 0px; spacing: Spacing.xs; width: parent.width; height: parent.height;
-                                            Text { text: p.lbl; font-size: Type.micro; color: #37474F; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
-                                            Text { text: p.val; font-size: Type.micro; color: FintechPalette.danger; font-weight: 600; vertical-alignment: center; }
+                                if root.dash-pay-ledgers.length > 0 : SDivider { title: "PAYMENTS BY LEDGER"; }
+                                for p in root.dash-pay-ledgers : Rectangle {
+                                    height: 18px;
+                                    HorizontalLayout {
+                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
+                                        Text {
+                                            text: p.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
+                                            overflow: elide; vertical-alignment: center;
                                         }
-                                        TouchArea {
-                                            x: 0; y: 0; width: parent.width; height: parent.height;
-                                            mouse-cursor: pointer;
-                                            clicked => { root.sel-head = p.key; root.head-filter-changed(p.key); }
+                                        Text {
+                                            text: p.val; font-size: 10px; color: #C62828; font-weight: 600; vertical-alignment: center;
                                         }
+                                    }
+                                    TouchArea {
+                                        x: 0; y: 0; width: parent.width; height: parent.height;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.sel-head = p.key; root.head-filter-changed(p.key); }
                                     }
                                 }
 
+                                Rectangle { height: 6px; }
                                 if root.status-bank != "" : Text {
-                                    text: root.status-bank; font-size: Type.micro;
-                                    color: FintechPalette.text-muted; horizontal-alignment: center; wrap: word-wrap;
+                                    text: root.status-bank; font-size: 10px;
+                                    color: #90A4AE; horizontal-alignment: center; wrap: word-wrap;
                                 }
                                 Rectangle { vertical-stretch: 1; }
                             }
@@ -1522,13 +1833,6 @@ export component MainScreen inherits Rectangle {
                 }
             }
 
-<<<<<<< HEAD
-        // The Dashboard itself no longer lives here — this whole VerticalLayout
-        // (Toolbar/DateBar/Tabs/content/Footer) is now only instantiated
-        // `if !root.show-dashboard`, so a "show-dashboard" branch inside it
-        // could never run. See the new Sidebar+Header+DashboardScreen shell
-        // below, added as a sibling `if root.show-dashboard` branch instead.
-=======
         // ─────────────────────────── DASHBOARD ────────────────────────────────
         if root.show-dashboard : DashboardScreen {
             width: parent.width; height: parent.height;
@@ -1585,188 +1889,44 @@ export component MainScreen inherits Rectangle {
                 root.drill-filter("all");
             }
         }
->>>>>>> fix/old-ui-fidelity
 
         } // end content wrapper Rectangle
 
-        // ─────────────────────────── ACTION BAR ───────────────────────────────
-        // Redesigned (Phase 2): grouped AppButton variants — Export/Reconcile
-        // primary, Re-import secondary, Reset Dedupe danger, Batch Monitor/
-        // Audit Trail/Settings ghost — same callbacks/bodies as before.
-        TxnActionBar {
-            height: 56px;
+        // ─────────────────────────── FOOTER ───────────────────────────────────
+        // background: #E3F2FD, border-top: 2px solid #BBDEFB
+        Rectangle {
+            height: 44px; background: #E3F2FD;
 
-            AppButton { text: "Export to Excel";    variant: "primary"; compact: true; enabled: root.transaction-rows.length > 0; clicked => { root.modal-state = "excel-export"; } }
-            AppButton { text: "\u{21D3} Export for Accounting"; variant: "primary"; compact: true; enabled: root.transaction-rows.length > 0; clicked => { root.wiz-step = 1; root.wiz-state-idx = root.settings-state-idx; root.modal-state = "export-wizard"; } }
-            AppButton { text: "Quick Tally XML";     variant: "primary"; compact: true; enabled: root.transaction-rows.length > 0; clicked => { root.modal-state = "tally-export"; } }
-            AppButton { text: "Re-import Excel";     variant: "secondary"; compact: true; enabled: root.transaction-rows.length > 0; clicked => { root.reimport-excel(); } }
-            AppButton {
-                text: "Reset Dedupe History"; variant: "danger"; compact: true;
-                enabled: root.transaction-rows.length > 0;
-                clicked => {
+            // Top border
+            Rectangle { y: 0px; height: 2px; background: #BBDEFB; }
+
+            HorizontalBox {
+                padding-left: 14px; padding-right: 14px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 8px; y: 2px; height: 42px;
+
+                // Green buttons
+                FootBtn { text: "Export to Excel";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "excel-export"; } }
+                // &#8659; = ⇓ (U+21D3 DOWNWARDS DOUBLE ARROW) from original HTML
+                FootBtn { text: "\u{21D3} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.wiz-state-idx = root.settings-state-idx; root.modal-state = "export-wizard"; } }
+                FootBtn { text: "Quick Tally XML";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "tally-export"; } }
+                FootBtn { text: "Re-import Excel";        enabled: root.transaction-rows.length > 0; clicked => { root.reimport-excel(); } }
+                FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => {
                     root.confirm-title = "Reset Dedupe History";
-                    // Requirement #10: this action also re-runs within-session
-                    // duplicate detection (dup_flag/DUP tags on the currently
-                    // loaded rows) — the message previously only mentioned
-                    // clearing cross-import history, understating what it does.
-                    root.confirm-message = "Clear cross-import dedupe history and re-check the loaded transactions for duplicates?";
+                    root.confirm-message = "Clear all dedupe history for this client?";
                     root.confirm-action = "reset-dedupe";
                     root.confirm-payload = -1;
                     root.modal-state = "confirm";
-                }
-            }
+                } }
 
-            Rectangle { width: 1px; height: 26px; background: FintechPalette.border; }
+                Rectangle { width: 1px; height: 28px; background: #90CAF9; }
 
-            AppButton { text: "Reconcile";     variant: "primary"; compact: true; enabled: root.transaction-rows.length > 0; clicked => { root.modal-state = "reconcile"; } }
-            AppButton { text: "Batch Monitor"; variant: "ghost"; compact: true; clicked => { root.modal-state = "batch-monitor"; } }
-            AppButton { text: "Audit Trail";   variant: "ghost"; compact: true; clicked => { root.modal-state = "audit-trail";  } }
-            AppButton { text: "Settings";      variant: "ghost"; compact: true; clicked => { root.modal-state = "settings";     } }
+                FootBtn { text: "Reconcile";     enabled: root.transaction-rows.length > 0; bg: #7E57C2; border-clr: #7E57C2; fg: #FFFFFF; clicked => { root.modal-state = "reconcile"; } }
+                FootBtn { text: "Batch Monitor"; enabled: true; clicked => { root.modal-state = "batch-monitor"; } }
+                FootBtn { text: "Audit Trail";   enabled: true; clicked => { root.modal-state = "audit-trail";  } }
+                FootBtn { text: "Settings";      enabled: true; clicked => { root.modal-state = "settings";     } }
 
-            Rectangle { horizontal-stretch: 1; }
-
-            // Audit fix (2026-08-05): "logout" was already wired
-            // end-to-end (app.slint forwards it to logged-in = false)
-            // but nothing in the UI ever invoked it — there was no way
-            // to sign out short of quitting the app. Routed through
-            // the existing confirm modal like Reset Dedupe/Clear Logs
-            // above, since it's a "leave your place" action worth a
-            // confirmation, not a destructive one.
-            AppButton {
-                text: "Logout"; variant: "secondary"; compact: true;
-                clicked => {
-                    root.confirm-title = "Logout";
-                    root.confirm-message = "Sign out and return to the login screen?";
-                    root.confirm-action = "logout";
-                    root.confirm-payload = -1;
-                    root.modal-state = "confirm";
-                }
-            }
-        }
-    }
-
-    // ─────────────────────────── DASHBOARD (redesigned shell) ─────────────────
-    // New persistent Sidebar + TopHeader chrome, Dashboard tab only — see the
-    // "MAIN LAYOUT (Transactions tab)" comment above for why the two shells
-    // are now mutually-exclusive sibling branches instead of nested inside
-    // one shared layout. Every handler below routes to functionality that
-    // already exists elsewhere in this file (the exact same modal-state
-    // values / callbacks the Transactions toolbar and footer already use) —
-    // no new backend behavior, only new routing to old behavior.
-    if root.show-dashboard : HorizontalLayout {
-        width: root.width; height: root.height;
-        padding: 0px; spacing: 0px;
-
-        if !root.dash-sidebar-collapsed : Sidebar {
-            bank-name:  root.dash-bank-name;
-            account-no: root.dash-account-no;
-            period:     root.dash-period;
-            nav-transactions => { root.show-dashboard = false; }
-            nav-ai-classify  => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
-            nav-rules        => { root.view-rules(); root.modal-state = "view-rules"; }
-            // Clients / Vendors-Ledgers: no dedicated screen exists for
-            // either — the real client tools (dropdown, +New/Edit Client)
-            // and per-account/party breakdowns live in the Transactions
-            // tab's toolbar/summary panel, so route there.
-            nav-clients      => { root.show-dashboard = false; }
-            nav-vendors      => { root.show-dashboard = false; }
-            nav-import       => { root.load-file(); }
-            nav-reports      => { root.wiz-step = 1; root.wiz-state-idx = root.settings-state-idx; root.modal-state = "export-wizard"; }
-            nav-reconcile    => { root.modal-state = "reconcile"; }
-            nav-batch        => { root.modal-state = "batch-monitor"; }
-            nav-settings     => { root.modal-state = "settings"; }
-            change-clicked   => { root.show-dashboard = false; }
-        }
-
-        VerticalLayout {
-            padding: 0px; spacing: 0px;
-            horizontal-stretch: 1;
-
-            TopHeader {
-                needs-review-count: root.dash-needs-review;
-                // Real window width (root here is MainScreen's own root,
-                // sized by the window — not derived from TopHeader's
-                // layout), so TopHeader can tell 1280px-class windows
-                // apart from 1366px+ without a binding loop on its own
-                // width. See compact-header in dashboard.slint.
-                viewport-width: root.width;
-                sidebar-collapsed <=> root.dash-sidebar-collapsed;
-                search-text <=> root.dash-search-text;
-                search-changed(v) => { root.dash-search-changed(v); }
-                new-client-clicked => { root.modal-state = "new-client"; }
-                logout-clicked => {
-                    root.confirm-title = "Logout";
-                    root.confirm-message = "Sign out and return to the login screen?";
-                    root.confirm-action = "logout";
-                    root.confirm-payload = -1;
-                    root.modal-state = "confirm";
-                }
-                // Reuses the exact same "needs review" drill-down the
-                // Summary panel's own "Needs Review" row already performs
-                // (see the `SR { lbl: "Needs Review"; ... }` row above).
-                notifications-clicked => { root.show-dashboard = false; root.active-filter = "needs_review"; root.drill-filter("needs_review"); }
-                qa-import-clicked      => { root.load-file(); }
-                qa-ai-classify-clicked => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
-                qa-rules-clicked       => { root.view-rules(); root.modal-state = "view-rules"; }
-                qa-reconcile-clicked   => { root.modal-state = "reconcile"; }
-                qa-reports-clicked     => { root.wiz-step = 1; root.wiz-state-idx = root.settings-state-idx; root.modal-state = "export-wizard"; }
-            }
-
-            DashboardScreen {
-                vertical-stretch: 1;
-                opening-balance: root.dash-opening;
-                total-credits:   root.dash-credits;
-                total-debits:    root.dash-debits;
-                closing-balance: root.dash-closing;
-                net-cash-flow:   root.dash-net-flow;
-                txn-count:       root.dash-txn-count;
-                vendor-count:    root.dash-vendors;
-                top-expense:     root.dash-top-expense;
-                top-expense-amt: root.dash-top-exp-amt;
-                credit-count:    root.dash-credit-count;
-                debit-count:     root.dash-debit-count;
-                has-data:        root.dash-has-data;
-                chart-monthly:    root.dash-chart-monthly;
-                chart-expenses:   root.dash-chart-expenses;
-                chart-cashflow:   root.dash-chart-cashflow;
-                chart-vendors:    root.dash-chart-vendors;
-                transaction-rows: root.transaction-rows;
-                filter-banks:    root.dash-filter-banks;
-                filter-vendors:  root.dash-filter-vendors;
-                filter-heads:    root.dash-filter-heads;
-                dash-from       <=> root.dash-pf-from;
-                dash-to         <=> root.dash-pf-to;
-                dash-bank-idx   <=> root.dash-pf-bank-idx;
-                dash-vendor-idx <=> root.dash-pf-vendor-idx;
-                dash-head-idx   <=> root.dash-pf-head-idx;
-                search-text: root.dash-search-text;
-                search-results: root.dash-search-rows;
-                ins-max-dr:       root.dash-ins-max-dr;
-                ins-max-dr-narr:  root.dash-ins-max-dr-narr;
-                ins-max-cr:       root.dash-ins-max-cr;
-                ins-max-cr-narr:  root.dash-ins-max-cr-narr;
-                ins-avg-dr:       root.dash-ins-avg-dr;
-                ins-avg-cr:       root.dash-ins-avg-cr;
-                ins-dr-count:     root.dash-ins-dr-count;
-                ins-cr-count:     root.dash-ins-cr-count;
-                ins-freq-vendor:  root.dash-ins-freq-vendor;
-                dash-filter-changed(f, t, b, v, h) => { root.dash-filter-changed(f, t, b, v, h); }
-                dash-date-preset(p) => { return root.dash-date-preset(p); }
-                card-credits-clicked => { root.show-dashboard = false; root.active-filter = "credits"; root.drill-filter("credits"); }
-                card-debits-clicked  => { root.show-dashboard = false; root.active-filter = "debits";  root.drill-filter("debits"); }
-                card-txns-clicked    => { root.show-dashboard = false; root.active-filter = "all";     root.drill-filter("all"); }
-                view-all-clicked     => { root.show-dashboard = false; root.active-filter = "all";     root.drill-filter("all"); }
-                qa-import-clicked       => { root.load-file(); }
-                qa-ai-classify-clicked  => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
-                qa-rules-clicked        => { root.view-rules(); root.modal-state = "view-rules"; }
-                qa-reconcile-clicked    => { root.modal-state = "reconcile"; }
-                qa-reports-clicked      => { root.wiz-step = 1; root.wiz-state-idx = root.settings-state-idx; root.modal-state = "export-wizard"; }
-                // No dedicated "AI Insights" screen exists — the Insights
-                // strip is already part of this same Dashboard page, so
-                // this reuses the one real AI feature in the app (the same
-                // AI-classify consent flow as the card above it) rather
-                // than inventing a second screen.
-                qa-insights-clicked     => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
+                Rectangle { horizontal-stretch: 1; }
             }
         }
     }
@@ -1920,25 +2080,7 @@ export component MainScreen inherits Rectangle {
                     }
                 }
                 MFtr {
-                    // Requirement #12 fix: `settings-save` (provider/key/
-                    // enabled) had a complete, working Rust handler and DB/
-                    // keyring persistence layer, but nothing in the UI ever
-                    // called it — the provider and API key typed here were
-                    // used for this one run and then lost, forcing the user
-                    // to retype the key every session despite the app
-                    // already loading a persisted key at startup. Saving
-                    // here, right when the user actually uses it, closes
-                    // that loop with the existing mechanism instead of
-                    // inventing a new one.
-                    MBtn { text: "\u{2605} Start AI Classification"; bg: #6B2FB8; fg: white; clicked => {
-                        root.modal-state = "";
-                        root.settings-save(
-                            root.ai-provider-idx == 1 ? "1" : root.ai-provider-idx == 2 ? "2" : "0",
-                            root.ai-api-key,
-                            true
-                        );
-                        root.ai-classify();
-                    } }
+                    MBtn { text: "\u{2605} Start AI Classification"; bg: #6B2FB8; fg: white; clicked => { root.modal-state = ""; root.ai-classify(); } }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
@@ -1949,8 +2091,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 470px) / 2; y: (parent.height - 510px) / 2;
-            width: 470px; height: 510px; background: white; border-radius: 8px;
+            x: (parent.width - 470px) / 2; y: (parent.height - 480px) / 2;
+            width: 470px; height: 480px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -1977,7 +2119,6 @@ export component MainScreen inherits Rectangle {
                     CheckBox { text: "Include narrations in vouchers"; checked <=> root.wiz-opt-narr; }
                     CheckBox { text: "Include Opening Balance journal entry"; checked <=> root.wiz-opt-ob; }
                     CheckBox { text: "Skip low-confidence entries (<40%)"; checked <=> root.wiz-opt-skip-low; }
-                    CheckBox { text: "Skip duplicate-flagged transactions"; checked <=> root.wiz-opt-skip-dup; }
                 }
                 MFtr {
                     MBtn { text: "Export Tally XML"; bg: #2E7D32; fg: white; clicked => { root.modal-state = ""; root.export-tally(); } }
@@ -2344,16 +2485,7 @@ export component MainScreen inherits Rectangle {
                 MHdr { title: "Batch Processing Monitor"; close => { root.modal-state = ""; } }
                 VerticalBox { padding: 14px; spacing: 8px; vertical-stretch: 1;
                     HorizontalBox { padding: 0px; spacing: 8px;
-                        // Requirement #11 fix: this was previously labeled
-                        // "Start Batch" but never started anything — it only
-                        // ever re-reads the current session's results
-                        // (`open-batch-monitor` → `do-batch-monitor`). Now
-                        // that finish_batch/batch-start auto-refresh this
-                        // table on their own, this button is purely a manual
-                        // refresh, so it's labeled to match. Use the
-                        // toolbar's "Batch Process Folder" to actually start
-                        // a batch (per the hint text below when empty).
-                        MBtn { text: "Refresh"; bg: #1565C0; clicked => { root.open-batch-monitor(); } }
+                        MBtn { text: "Start Batch"; bg: #1565C0; clicked => { root.open-batch-monitor(); } }
                         MBtn {
                             text: root.batch-paused ? "Resume" : "Pause";
                             bg: #F5F5F5; fg: root.batch-running ? #37474F : #BDBDBD;
@@ -3010,18 +3142,6 @@ export component MainScreen inherits Rectangle {
                             }
                         }
                     }
-                    // Requirement #10: flagged duplicates were previously
-                    // always included with no way to exclude them.
-                    Rectangle {
-                        height: 44px; background: #F8FAFF; border-radius: 7px; border-width: 1px; border-color: #E0EBF5;
-                        HorizontalBox { padding-left: 10px; padding-right: 10px; padding-top: 0px; padding-bottom: 0px; spacing: 10px;
-                            CheckBox { checked <=> root.wiz-opt-skip-dup; toggled => { root.export-preview(); } }
-                            VerticalBox { padding: 0px; spacing: 1px; alignment: center; horizontal-stretch: 1;
-                                Text { text: "Skip duplicate-flagged transactions"; font-size: 12px; font-weight: 600; color: #1A237E; }
-                                Text { text: "Excludes rows the duplicate detector flagged — review the Duplicates filter first"; font-size: 10px; color: #6B84A0; }
-                            }
-                        }
-                    }
                 }
 
                 // Wizard footer
@@ -3080,18 +3200,14 @@ export component MainScreen inherits Rectangle {
                                 Text { text: "This feature may send transaction narrations and related accounting data to third-party AI platforms for automated classification. Confidentiality of data may be compromised if sensitive, financial, personal, or proprietary business information is submitted to external AI systems."; font-size: 12px; color: #4E342E; wrap: word-wrap; vertical-alignment: center; horizontal-stretch: 1; }
                             }
                         }
-                        // What is transmitted — matches ai_classifier::classify_with_ai's
-                        // actual request body exactly (narration text only; see
-                        // `build_user_prompt`/the batch construction in ai_classifier.rs),
-                        // so this disclosure never claims more — or less — than what is
-                        // really sent.
+                        // What is transmitted
                         Rectangle {
                             background: #FAFAFA; border-radius: 5px; border-width: 1px; border-color: #E0E0E0;
                             VerticalBox { padding: 10px; spacing: 4px;
                                 Text { text: "WHAT IS TRANSMITTED"; font-size: 11px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
-                                Text { text: "\u{2022} Transaction narration / description text only"; font-size: 12px; color: #37474F; }
+                                Text { text: "\u{2022} Transaction narration / description text\n\u{2022} Transaction amounts (debit / credit values)\n\u{2022} Extracted vendor or party names"; font-size: 12px; color: #37474F; }
                                 Rectangle { height: 28px; background: #F1F8E9; border-radius: 4px; border-width: 1px; border-color: #AED581;
-                                    HorizontalBox { padding: 6px; Text { text: "\u{2713}  Amounts, vendor names, account numbers, IFSC codes, bank names and balances are not transmitted."; font-size: 11px; color: #2E7D32; vertical-alignment: center; } }
+                                    HorizontalBox { padding: 6px; Text { text: "\u{2713}  Account numbers, IFSC codes, bank names and balances are not transmitted."; font-size: 11px; color: #2E7D32; vertical-alignment: center; } }
                                 }
                             }
                         }
