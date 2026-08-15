@@ -1,15 +1,7 @@
-// dashboard.slint — Redesigned Dashboard (fintech SaaS visual style) +
-// shared data types also used by the Transactions table in main_screen.slint.
-//
-// UI-only redesign: every value shown here still comes from the exact same
-// Rust-computed properties the previous version bound (dash-credits,
-// chart-monthly, chart-expenses, chart-vendors, transaction-rows, etc.) — no
-// new business logic, no invented numbers. See main.rs's push_dashboard /
-// push_summary_extras for where these are actually computed; this file only
-// changes how they're laid out and drawn.
+// dashboard.slint — Native dashboard with real charts, filters, insights.
+// Matches the original Electron dashboard: 8 stat cards, 4 charts (2×2), insights strip.
 
 import { VerticalBox, HorizontalBox, ScrollView, ComboBox, LineEdit } from "std-widgets.slint";
-import { Spacing, Radius, Type, FintechPalette, PiePalette, Badge, AppButton, Card } from "theme.slint";
 
 // ── Data structs ───────────────────────────────────────────────────────────────
 export struct DashMonthBar {
@@ -28,11 +20,6 @@ export struct DashExpBar {
     amount-str: string,
     color-idx:  int,      // 0-9 → PIE_PALETTE
     pct:        int,      // integer percent
-    // Cumulative percent *before* this segment (0..100) — precomputed in
-    // Rust as a running sum over the same already-computed `pct` values, so
-    // the donut chart can place each segment's arc without doing running
-    // totals inside the UI layer.
-    start-pct:  int,
 }
 
 export struct DashCashPt {
@@ -45,184 +32,134 @@ export struct DashVendorBar {
     credit-w:   float,
     debit-str:  string,
     credit-str: string,
-    // Added for the redesigned Dashboard's "Top Vendors / Customers" table
-    // (net position + a Vendor/Customer label) — computed in Rust from the
-    // exact same already-aggregated debit/credit totals this struct already
-    // carries (main.rs's push_dashboard), not a new calculation.
-    net-str:    string,
-    net-is-positive: bool,
-    kind:       string, // "Vendor" | "Customer" — derived from credit vs debit dominance
 }
 
-// ── Transaction row data struct ────────────────────────────────────────────────
-// Moved here (from main_screen.slint) so the redesigned Dashboard's "Recent
-// Transactions" card can bind the exact same per-transaction data the
-// Transactions table itself uses — one definition, imported back into
-// main_screen.slint, instead of a second duplicate struct.
-export struct TxnRow {
-    bank-name:    string,
-    account-no:   string,
-    date:         string,
-    narration:    string,
-    ref-no:       string,
-    debit:        string,
-    credit:       string,
-    balance:      string,
-    vendor:       string,
-    ledger:       string,
-    expense-head: string,
-    // Requirement #7: classification confidence tier — "HIGH" / "MEDIUM" /
-    // "LOW" — reusing the exact same thresholds already used by the Summary
-    // panel's "Classification Quality" breakdown (analytics::confidence_tier),
-    // and the reason/evidence that produced the current classification
-    // (analytics::classification_basis), derived from the transaction's own
-    // classification_source/status — never fabricated. Distinct from
-    // status-text/review below (Review Status), and from ledger/expense-head.
-    classification-type:  string,
-    classification-basis: string,
-    status-text:  string,
-    tags:         string,
-    review:       string,
-    // 0=white 1=hi-green 2=med-yellow 3=review-red 4=suspense-purple 5=dup-pink 6=manual-blue
-    row-color:    int,
-    has-gst:      bool,
-    has-tax:      bool,
-    has-dup-tag:  bool,
-    // Requirement #5: true when `narration` above is actually the cleaned/
-    // derived text (narration_cleaner), not the bank's raw imported string —
-    // lets the table color that one cell as system-generated instead of
-    // always treating the whole column as imported.
-    narration-is-generated: bool,
+// ── Palette helper (matches JS PIE_PALETTE) ───────────────────────────────────
+global PiePalette {
+    pure public function color(idx: int) -> color {
+        idx == 0 ? #1565C0 :
+        idx == 1 ? #2E7D32 :
+        idx == 2 ? #6A1B9A :
+        idx == 3 ? #AD1457 :
+        idx == 4 ? #BF360C :
+        idx == 5 ? #00695C :
+        idx == 6 ? #E65100 :
+        idx == 7 ? #F57F17 :
+        idx == 8 ? #0277BD :
+        #4E342E
+    }
 }
 
-// ── Origin color coding (Requirement #5) ────────────────────────────────────
-// Actual imported bank-statement values keep the table's normal dark/black
-// text; values the app classifies, derives, or otherwise generates after
-// import are colored dark blue instead. Moved here alongside TxnRow for the
-// same reason — the Dashboard's Recent Transactions card needs it too.
-export global OriginColor {
-    out property <color> generated: #0D47A1; // system-created/derived data
-    out property <color> imported:  #0A1929; // actual imported bank-statement data
-}
-
-// Result of a quick date-preset lookup ("Today"/"This Month"/...) — Rust
-// still owns the actual date-range math (main.rs's existing `preset_range`,
-// already used by the Transactions screen's own preset buttons); this just
-// carries its answer back into the Dashboard's period filter.
-export struct DashPresetRange {
-    from: string,
-    to:   string,
-}
-
-// FintechPalette / PiePalette now live in theme.slint (imported above) —
-// the shared design system this whole app will draw from, not just the
-// Dashboard. Same field names/values as before, so every existing
-// `FintechPalette.xxx` / `PiePalette.color(...)` reference below is
-// unaffected.
-
-// ── KPI card ─────────────────────────────────────────────────────────────────
-// Fixed height (not min-height) so all six cards in the KPI row are always
-// pixel-identical regardless of content length — per the design system's
-// "no card visually larger than another" rule. Optional `trend` is left
-// blank unless a caller passes real period-over-period data; nothing here
-// invents one when the underlying Rust property doesn't provide it.
-component KpiCard inherits Card {
+// ── Stat card ──────────────────────────────────────────────────────────────────
+// Original: border-radius:10px; padding:13px 15px; border-left:4px solid; box-shadow:0 2px 6px rgba(0,0,0,.07)
+// dash-card-lbl: font-size:10px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:.07em; margin-bottom:5px
+// dash-card-val: font-size:15px; font-weight:700; color:#0D47A1
+component StatCard inherits Rectangle {
     in property <string> title:     "Label";
-    in property <string> value:     "\u{2014}";
+    in property <string> value:     "₹ —";
     in property <string> sub:       "";
-    in property <string> trend:     "";
-    in property <bool>   trend-up:  true;
-    in property <string> icon:      "\u{25CF}";
-    in property <color>  icon-bg:   FintechPalette.primary;
+    in property <color>  accent:    #1565C0;
     in property <bool>   clickable: false;
     callback clicked();
 
-    height: 116px;
+    background:    #FFFFFF;
+    border-radius: 10px;
+    min-height:    78px;
+    drop-shadow-blur:     6px;
+    drop-shadow-color:    #00000012;
+    drop-shadow-offset-y: 2px;
 
-    if root.clickable : TouchArea {
-        mouse-cursor: pointer;
+    ta := TouchArea {
+        enabled: root.clickable;
+        mouse-cursor: root.clickable ? pointer : default;
         clicked => { root.clicked(); }
     }
 
-    VerticalBox {
-        padding: Spacing.card; spacing: Spacing.sm;
-        HorizontalBox {
-            padding: 0px; spacing: Spacing.sm;
-            Rectangle {
-                width: 34px; height: 34px; border-radius: Radius.pill;
-                background: root.icon-bg;
-                Text { text: root.icon; color: white; font-size: Type.h3; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-            }
+    HorizontalBox {
+        padding-top: 13px; padding-bottom: 13px;
+        padding-left: 15px; padding-right: 15px;
+        spacing: 10px;
+        // Left accent border (4px strip)
+        Rectangle { width: 4px; background: root.accent; border-radius: 2px; }
+        VerticalBox {
+            spacing: 5px; alignment: center;
             Text {
-                text: root.title; font-size: Type.small; font-weight: 700;
-                color: FintechPalette.text-muted; vertical-alignment: center;
-                horizontal-stretch: 1; overflow: elide;
+                text: root.title; color: #888888;
+                font-size: 10px; font-weight: 700;
+                letter-spacing: 0.7px;
             }
-            if root.trend != "" : Badge {
-                text: root.trend;
-                fg: root.trend-up ? FintechPalette.success : FintechPalette.danger;
-                bg: root.trend-up ? #E8F6ED : #FDECEC;
+            Text { text: root.value; color: #0D47A1; font-size: 15px; font-weight: 700; }
+            if root.sub != "" : Text {
+                text: root.sub; color: #999999; font-size: 10px;
             }
-        }
-        Text {
-            text: root.value; font-size: Type.h1; font-weight: 800;
-            color: FintechPalette.text; overflow: elide;
-            vertical-stretch: 1; vertical-alignment: bottom;
-        }
-        if root.sub != "" : Text {
-            text: root.sub; font-size: Type.small; color: FintechPalette.text-muted; overflow: elide;
         }
     }
 }
 
 // ── Chart card wrapper ─────────────────────────────────────────────────────────
-component ChartCard inherits Card {
+// Original: border-radius:10px; padding:14px; box-shadow:0 2px 6px rgba(0,0,0,.07)
+// dash-chart-title: font-size:11px; font-weight:700; color:#37474F; text-transform:uppercase; letter-spacing:.07em; margin-bottom:10px
+component ChartCard inherits Rectangle {
     in property <string> chart-title: "";
+    background:    #FFFFFF;
+    border-radius: 10px;
+    drop-shadow-blur:     6px;
+    drop-shadow-color:    #00000012;
+    drop-shadow-offset-y: 2px;
     clip: true;
 
     VerticalBox {
-        padding: Spacing.card; spacing: Spacing.md;
-        HorizontalBox {
-            padding: 0px; spacing: Spacing.sm;
-            Text {
-                text: root.chart-title;
-                font-size: Type.h2; font-weight: 700; color: FintechPalette.text;
-                horizontal-stretch: 1; vertical-alignment: center;
-            }
-            @children
+        padding: 14px; spacing: 10px;
+        Text {
+            text: root.chart-title;
+            font-size: 11px; font-weight: 700; color: #37474F;
+            letter-spacing: 0.7px;
         }
+        @children
     }
 }
 
-// ── Insight card (kept from the previous design — preserved functionality,
-// just restyled) ────────────────────────────────────────────────────────────
-component InsCard inherits Card {
+// ── Insight card ───────────────────────────────────────────────────────────────
+// Original: border-radius:8px; padding:11px 14px; border-top:3px solid #0D47A1; box-shadow:0 1px 4px rgba(0,0,0,.07)
+// dash-ins-lbl: font-size:10px; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px
+// dash-ins-val: font-size:13px; font-weight:700; color:#0D47A1
+// dash-ins-sub: font-size:9px; color:#aaa
+component InsCard inherits Rectangle {
     in property <string> label: "Label";
-    in property <string> value: "\u{2014}";
+    in property <string> value: "—";
     in property <string> sub:   "";
-    in property <color>  vcol:  FintechPalette.primary;
+    in property <color>  vcol:  #0D47A1;
 
+    background:    #FFFFFF;
+    border-radius: 8px;
     horizontal-stretch: 1;
+    drop-shadow-blur:     4px;
+    drop-shadow-color:    #00000012;
+    drop-shadow-offset-y: 1px;
 
+    // Top border: 3px solid #0D47A1
     Rectangle {
         x: 0; y: 0; width: parent.width; height: 3px;
-        background: root.vcol;
-        border-radius: Radius.lg;
+        background: #0D47A1;
+        border-radius: 8px;  // only top corners
     }
 
     VerticalBox {
-        padding: Spacing.md;
-        spacing: Spacing.xs;
+        padding-top: 14px;   // 11px content + 3px for top border
+        padding-bottom: 11px;
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 4px;
         Text {
-            text: root.label; font-size: Type.micro; font-weight: 700;
-            color: FintechPalette.text-muted; letter-spacing: 0.5px;
+            text: root.label; font-size: 10px; font-weight: 700;
+            color: #888888; letter-spacing: 0.6px;
         }
         Text {
-            text: root.value; font-size: Type.body; font-weight: 700;
+            text: root.value; font-size: 13px; font-weight: 700;
             color: root.vcol;
         }
         if root.sub != "" : Text {
-            text: root.sub; font-size: Type.micro; color: FintechPalette.text-muted; wrap: word-wrap;
+            text: root.sub; font-size: 9px; color: #AAAAAA; wrap: word-wrap;
         }
     }
 }
@@ -263,39 +200,46 @@ component MonthlyChart inherits Rectangle {
         vertical-stretch: 1;
         horizontal-stretch: 1;
 
+        // Y-axis grid lines + bars
         Rectangle {
             vertical-stretch: 1;
             clip: true;
 
+            // Grid lines at 25%, 50%, 75%, 100%
             for pct in [0.25, 0.5, 0.75, 1.0] : Rectangle {
                 x: 0px; width: parent.width;
                 y: parent.height * (1 - pct);
                 height: 1px;
-                background: FintechPalette.border;
+                background: #E3F2FD;
             }
 
+            // Bars
             if data.length > 0 : HorizontalBox {
-                padding: 0px; spacing: 4px;
+                padding: 0px; spacing: 2px;
                 for bar in root.data : Rectangle {
                     horizontal-stretch: 1;
                     accessible-role: button;
                     accessible-label: bar.label + ": credit " + bar.credit-str + ", debit " + bar.debit-str;
 
+                    // Credit bar (left, green)
                     Rectangle {
                         x: 1px;
                         width: (parent.width / 2) - 2px;
                         height: bar.credit-h * (parent.height - 2px);
                         y: parent.height - self.height - 1px;
-                        background: FintechPalette.success;
-                        border-radius: 3px;
+                        background: #2E7D32;
+                        border-radius: 2px;
+                        opacity: 0.75;
                     }
+                    // Debit bar (right, red)
                     Rectangle {
                         x: parent.width / 2 + 1px;
                         width: (parent.width / 2) - 2px;
                         height: bar.debit-h * (parent.height - 2px);
                         y: parent.height - self.height - 1px;
-                        background: FintechPalette.danger;
-                        border-radius: 3px;
+                        background: #C62828;
+                        border-radius: 2px;
+                        opacity: 0.75;
                     }
                     TouchArea {
                         x: 0px; y: 0px; width: parent.width; height: parent.height;
@@ -304,21 +248,17 @@ component MonthlyChart inherits Rectangle {
                     }
                 }
             }
-            if data.length == 0 : Text {
-                text: "No transactions loaded yet";
-                font-size: Type.small; color: FintechPalette.text-muted;
-                horizontal-alignment: center; vertical-alignment: center;
-            }
         }
 
+        // X-axis labels row
         Rectangle {
             height: 18px;
             HorizontalBox {
-                padding: 0px; spacing: Spacing.xs;
+                padding: 0px; spacing: 2px;
                 for bar in root.data : Text {
                     horizontal-stretch: 1;
                     text: bar.label;
-                    font-size: Type.micro; color: FintechPalette.text-muted;
+                    font-size: 9px; color: #78909C;
                     horizontal-alignment: center; vertical-alignment: center;
                 }
             }
@@ -327,107 +267,13 @@ component MonthlyChart inherits Rectangle {
     }
 }
 
-// ── Expense donut chart ───────────────────────────────────────────────────────
-// Same `DashExpBar` data the previous horizontal-bar version used (label, pct,
-// amount-str, color-idx) plus `start-pct` (a plain running-sum of the already-
-// computed percentages, added in Rust purely for arc placement) — drawn as a
-// ring of Path segments with a plain circle punched out of the middle for the
-// center total. No new accounting math: `pct`/`amount-str` are exactly what
-// main.rs already computed for the old chart.
-component DonutChart inherits Rectangle {
+// ── Expense horizontal bar chart ───────────────────────────────────────────────
+component ExpenseChart inherits Rectangle {
     in property <[DashExpBar]> data: [];
-    in property <string> center-label: "Total";
-    in property <string> center-value: "";
 
     if data.length == 0 : Text {
         text: "No expense data — classify transactions";
-        font-size: Type.small; color: FintechPalette.text-muted;
-        horizontal-alignment: center; vertical-alignment: center;
-        wrap: word-wrap;
-    }
-
-    if data.length > 0 : HorizontalBox {
-        padding: 0px; spacing: 16px;
-
-        Rectangle {
-            width: 150px; height: 150px;
-
-            for item in root.data : Path {
-                width: 100%; height: 100%;
-                viewbox-width: 100; viewbox-height: 100;
-                fill: PiePalette.color(item.color-idx);
-                commands: "M 50 50 L "
-                    + (50 + 48 * Math.sin(item.start-pct * 3.6deg)) + " "
-                    + (50 - 48 * Math.cos(item.start-pct * 3.6deg))
-                    + " A 48 48 0 " + (item.pct > 50 ? 1 : 0) + " 1 "
-                    + (50 + 48 * Math.sin((item.start-pct + item.pct) * 3.6deg)) + " "
-                    + (50 - 48 * Math.cos((item.start-pct + item.pct) * 3.6deg))
-                    + " Z";
-            }
-
-            // Punch the center hole + show the total, matching the reference's
-            // donut-with-center-label look.
-            Rectangle {
-                width: 56%; height: 56%;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                border-radius: self.width / 2;
-                background: FintechPalette.card;
-                VerticalBox {
-                    alignment: center; padding: 0px; spacing: 1px;
-                    Text {
-                        text: root.center-label; font-size: Type.micro; color: FintechPalette.text-muted;
-                        horizontal-alignment: center; wrap: word-wrap;
-                    }
-                    Text {
-                        text: root.center-value; font-size: Type.h3; font-weight: 800;
-                        color: FintechPalette.text; horizontal-alignment: center;
-                    }
-                }
-            }
-        }
-
-        // Legend with percentages + amounts beside the chart.
-        ScrollView {
-            vertical-stretch: 1;
-            VerticalBox {
-                padding: 0px; spacing: Spacing.md; alignment: start;
-                for item in root.data : HorizontalBox {
-                    padding: 0px; spacing: Spacing.sm;
-                    Rectangle {
-                        width: 10px; height: 10px; border-radius: 3px;
-                        y: 3px;
-                        background: PiePalette.color(item.color-idx);
-                    }
-                    Text {
-                        text: item.label; font-size: Type.small; font-weight: 600;
-                        color: FintechPalette.text; horizontal-stretch: 1; overflow: elide;
-                    }
-                    Text {
-                        text: item.pct + "%"; font-size: Type.small; font-weight: 700;
-                        color: FintechPalette.text-muted; horizontal-alignment: right;
-                    }
-                    Text {
-                        text: "(" + item.amount-str + ")"; font-size: Type.micro;
-                        color: FintechPalette.text-muted; horizontal-alignment: right;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── Recent Transactions list (Dashboard card) ─────────────────────────────────
-// Shows the first N rows of the exact same `transaction-rows` model the
-// Transactions screen uses — "recent" in the sense of "however the table is
-// currently ordered", not a new sort the Dashboard invents.
-component RecentTxnList inherits Rectangle {
-    in property <[TxnRow]> rows: [];
-    in property <int> max-rows: 8;
-
-    if rows.length == 0 : Text {
-        text: "No transactions loaded yet";
-        font-size: Type.small; color: FintechPalette.text-muted;
+        font-size: 11px; color: #B0BEC5;
         horizontal-alignment: center; vertical-alignment: center;
     }
 
@@ -527,65 +373,55 @@ component CashFlowChart inherits Rectangle {
         horizontal-stretch: 1;
 
         Rectangle {
-            height: 30px;
-            HorizontalBox {
-                padding-left: Spacing.sm; padding-right: Spacing.sm; padding-top: 0px; padding-bottom: 0px; spacing: Spacing.sm;
-                Text { text: "Date";      font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 66px; }
-                Text { text: "Narration"; font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; horizontal-stretch: 1; }
-                Text { text: "Ref";       font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 76px; overflow: elide; }
-                Text { text: "Type";      font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 56px; }
-                Text { text: "Debit";     font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 62px; horizontal-alignment: right; }
-                Text { text: "Credit";    font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 62px; horizontal-alignment: right; }
-                Text { text: "Balance";   font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 68px; horizontal-alignment: right; }
-                Text { text: "Review";    font-size: Type.micro; font-weight: 700; color: FintechPalette.text-muted; width: 80px; }
-            }
-        }
-        Rectangle { height: 1px; background: FintechPalette.border; }
-        for row[idx] in root.rows : Rectangle {
-            visible: idx < root.max-rows;
-            height: idx < root.max-rows ? 36px : 0px;
+            vertical-stretch: 1;
             clip: true;
-            background: Math.mod(idx, 2) == 0 ? FintechPalette.card : #F8FAFD;
-            HorizontalBox {
-                padding-left: Spacing.sm; padding-right: Spacing.sm; padding-top: 0px; padding-bottom: 0px; spacing: Spacing.sm;
-                Text { text: row.date; font-size: Type.small; color: OriginColor.imported; width: 66px; vertical-alignment: center; overflow: elide; }
-                Text { text: row.narration; font-size: Type.small; color: OriginColor.imported; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
-                Text { text: row.ref-no == "" ? "\u{2014}" : row.ref-no; font-size: Type.small; color: OriginColor.imported; width: 76px; vertical-alignment: center; overflow: elide; }
-                Text {
-                    text: row.debit != "" ? "Expense" : "Income";
-                    font-size: Type.micro; font-weight: 700;
-                    color: row.debit != "" ? FintechPalette.danger : FintechPalette.success;
-                    width: 56px; vertical-alignment: center;
-                }
-                Text { text: row.debit; font-size: Type.small; font-weight: 600; color: FintechPalette.danger; width: 62px; horizontal-alignment: right; vertical-alignment: center; }
-                Text { text: row.credit; font-size: Type.small; font-weight: 600; color: FintechPalette.success; width: 62px; horizontal-alignment: right; vertical-alignment: center; }
-                Text { text: row.balance; font-size: Type.small; font-weight: 600; color: FintechPalette.text; width: 68px; horizontal-alignment: right; vertical-alignment: center; }
-                Rectangle {
-                    width: 80px;
-                    Badge {
+            background: #F8FBFF;
+
+            // Grid lines
+            for pct in [0.25, 0.5, 0.75] : Rectangle {
+                x: 0px; width: parent.width;
+                y: parent.height * (1 - pct);
+                height: 1px; background: #E3F2FD;
+            }
+
+            // Sparkline area (filled bars)
+            if data.length > 0 : HorizontalBox {
+                padding: 0px; spacing: 0px;
+                for pt in root.data : Rectangle {
+                    horizontal-stretch: 1;
+
+                    // Fill area
+                    Rectangle {
                         x: 0px;
-                        text: row.has-dup-tag ? "Duplicate"
-                            : row.row-color == 3 ? "Needs Review"
-                            : row.status-text == "classified" ? "Reviewed"
-                            : "Unreviewed";
-                        fg: row.has-dup-tag ? #880E4F
-                            : row.row-color == 3 ? #B71C1C
-                            : row.status-text == "classified" ? #1B5E20
-                            : #E65100;
-                        bg: row.has-dup-tag ? #FCE4EC
-                            : row.row-color == 3 ? #FFEBEE
-                            : row.status-text == "classified" ? #E8F5E9
-                            : #FFF3E0;
+                        width: parent.width;
+                        height: pt.h * parent.height;
+                        y: parent.height - self.height;
+                        background: #1565C033;
+                    }
+                    // Top line
+                    Rectangle {
+                        x: 0px; width: parent.width;
+                        y: parent.height * (1 - pt.h);
+                        height: 2px;
+                        background: #1565C0;
                     }
                 }
             }
+
+            if data.length == 0 : Text {
+                text: "No balance data available";
+                font-size: 11px; color: #B0BEC5;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
         }
+
+        Rectangle { height: 8px; }
     }
     }
 }
 
-// ── Top Vendors / Customers list (Dashboard card) ─────────────────────────────
-component TopVendorsList inherits Rectangle {
+// ── Top vendors horizontal bar ─────────────────────────────────────────────────
+component VendorsChart inherits Rectangle {
     in property <[DashVendorBar]> data: [];
     // 5 "₹NK" labels, index 0 = left (₹0K) … index 4 = right (nice-rounded
     // max) — original: Chart.js x-axis, dashboard.js:203.
@@ -593,9 +429,8 @@ component TopVendorsList inherits Rectangle {
 
     if data.length == 0 : Text {
         text: "No vendor data — classify transactions";
-        font-size: Type.small; color: FintechPalette.text-muted;
+        font-size: 11px; color: #B0BEC5;
         horizontal-alignment: center; vertical-alignment: center;
-        wrap: word-wrap;
     }
 
     if data.length > 0 : VerticalBox {
@@ -604,16 +439,53 @@ component TopVendorsList inherits Rectangle {
         ScrollView {
         vertical-stretch: 1;
         VerticalBox {
-            padding: 0px; spacing: Spacing.xs; alignment: center;
-            Text {
-                text: root.title; font-size: Type.body; font-weight: 700;
-                color: root.highlighted ? white : FintechPalette.text;
-                overflow: elide;
-            }
-            Text {
-                text: root.subtitle; font-size: Type.micro;
-                color: root.highlighted ? #FFFFFFC0 : FintechPalette.text-muted;
-                overflow: elide; wrap: word-wrap;
+            padding: 2px; spacing: 5px;
+            for v in root.data : Rectangle {
+                height: 32px;
+
+                // Vendor label
+                Text {
+                    x: 0px; y: 0px; width: 90px; height: 16px;
+                    text: v.label;
+                    font-size: 10px; color: #37474F;
+                    overflow: elide; vertical-alignment: center;
+                }
+
+                // Debit bar
+                Rectangle {
+                    x: 95px; y: 2px;
+                    width: (parent.width - 95px) * v.debit-w;
+                    height: 12px;
+                    background: #C62828;
+                    border-radius: 2px;
+                    opacity: 0.75;
+                }
+                // Debit label
+                Text {
+                    x: 97px + (parent.width - 95px) * v.debit-w;
+                    y: 2px; height: 12px; width: 70px;
+                    text: v.debit-str;
+                    font-size: 9px; color: #C62828;
+                    vertical-alignment: center;
+                }
+
+                // Credit bar
+                Rectangle {
+                    x: 95px; y: 18px;
+                    width: (parent.width - 95px) * v.credit-w;
+                    height: 12px;
+                    background: #2E7D32;
+                    border-radius: 2px;
+                    opacity: 0.75;
+                }
+                // Credit label
+                Text {
+                    x: 97px + (parent.width - 95px) * v.credit-w;
+                    y: 18px; height: 12px; width: 70px;
+                    text: v.credit-str;
+                    font-size: 9px; color: #2E7D32;
+                    vertical-alignment: center;
+                }
             }
         }
         }
@@ -641,39 +513,33 @@ component TopVendorsList inherits Rectangle {
 // ── Dashboard screen ───────────────────────────────────────────────────────────
 export component DashboardScreen inherits Rectangle {
 
-    // ── Summary data (unchanged interface — same properties Rust already sets) ─
-    in property <string> opening-balance:  "\u{20B9} \u{2014}";
-    in property <string> total-credits:    "\u{20B9} \u{2014}";
-    in property <string> total-debits:     "\u{20B9} \u{2014}";
-    in property <string> closing-balance:  "\u{20B9} \u{2014}";
-    in property <string> net-cash-flow:    "\u{20B9} \u{2014}";
-    in property <string> txn-count:        "\u{2014}";
-    in property <string> vendor-count:     "\u{2014}";
-    in property <string> top-expense:      "\u{2014}";
+    // ── Summary data ──────────────────────────────────────────────────────────
+    in property <string> opening-balance:  "₹ —";
+    in property <string> total-credits:    "₹ —";
+    in property <string> total-debits:     "₹ —";
+    in property <string> closing-balance:  "₹ —";
+    in property <string> net-cash-flow:    "₹ —";
+    in property <string> txn-count:        "—";
+    in property <string> vendor-count:     "—";
+    in property <string> top-expense:      "—";
     in property <string> top-expense-amt:  "";
-    // New for the redesign's KPI row — same counts already shown in the
-    // Summary panel's TOTAL/CREDITS/DEBITS cards (dash-credit-count /
-    // dash-debit-count), just forwarded here too.
-    in property <string> credit-count:     "\u{2014}";
-    in property <string> debit-count:      "\u{2014}";
 
-    // ── Insight strip (unchanged — preserved, just restyled) ────────────────────
-    in property <string> ins-max-dr:       "\u{2014}";
+    // ── Insight strip ─────────────────────────────────────────────────────────
+    in property <string> ins-max-dr:       "—";
     in property <string> ins-max-dr-narr:  "";
-    in property <string> ins-max-cr:       "\u{2014}";
+    in property <string> ins-max-cr:       "—";
     in property <string> ins-max-cr-narr:  "";
-    in property <string> ins-avg-dr:       "\u{2014}";
-    in property <string> ins-avg-cr:       "\u{2014}";
+    in property <string> ins-avg-dr:       "—";
+    in property <string> ins-avg-cr:       "—";
     in property <string> ins-dr-count:     "";
     in property <string> ins-cr-count:     "";
-    in property <string> ins-freq-vendor:  "\u{2014}";
+    in property <string> ins-freq-vendor:  "—";
 
-    // ── Chart / table data (unchanged interface) ─────────────────────────────
+    // ── Chart data ────────────────────────────────────────────────────────────
     in property <[DashMonthBar]>  chart-monthly:   [];
     in property <[DashExpBar]>    chart-expenses:  [];
     in property <[DashCashPt]>    chart-cashflow:  [];
     in property <[DashVendorBar]> chart-vendors:   [];
-    in property <[TxnRow]>        transaction-rows: [];
 
     // ── Chart axis-tick labels (5 each, bottom/left → top/right) ─────────────
     in property <[string]> chart-monthly-y-ticks:  [];
@@ -685,150 +551,229 @@ export component DashboardScreen inherits Rectangle {
     in property <[string]> filter-vendors: ["All Vendors"];
     in property <[string]> filter-heads:   ["All Expense Heads"];
 
+    // ── Data flag ─────────────────────────────────────────────────────────────
     in property <bool> has-data: false;
 
-    // ── Filter state (unchanged — the new Period Filter Bar in main_screen.slint
-    // reads/writes these same properties directly on this instance instead of
-    // duplicating the state) ──────────────────────────────────────────────────
+    // ── Filter state ──────────────────────────────────────────────────────────
     in-out property <string> dash-from:         "";
     in-out property <string> dash-to:           "";
     in-out property <int>    dash-bank-idx:      0;
     in-out property <int>    dash-vendor-idx:    0;
     in-out property <int>    dash-head-idx:      0;
-    // Header search box text (set by the TopHeader in main_screen.slint).
-    // Slint's expression language has no string "contains" — the actual
-    // substring matching happens in Rust (do-dash-search, reusing the same
-    // build_txn_rows() helper the normal transaction-rows already go
-    // through) and comes back here as search-results.
-    in-out property <string> search-text:        "";
-    in property <[TxnRow]> search-results:       [];
 
-    // ── Callbacks (unchanged, plus new quick-action/view-all ones) ───────────
+    // ── Callbacks ─────────────────────────────────────────────────────────────
     callback dash-filter-changed(string, string, string, string, string);
-    // Backs the Period Filter Bar's quick-range chips (Today/This Month/...) —
-    // forwarded all the way to Rust's existing preset_range() helper so the
-    // date math isn't duplicated here; see PeriodFilterBar above.
-    callback dash-date-preset(string) -> DashPresetRange;
+    // (from, to, bank, vendor, head) — Rust re-aggregates on this
     callback card-credits-clicked();
     callback card-debits-clicked();
     callback card-txns-clicked();
-    // "View All" buttons — all reuse the exact same "switch to Transactions,
-    // clear the drill-down filter" action already wired for the Total
-    // Transactions stat card, since there's no separate dedicated screen for
-    // "all recent transactions" or "all vendors" to navigate to.
-    callback view-all-clicked();
-    // Quick action cards — forwarded to MainScreen's existing callbacks
-    // (load-file, the AI consent flow, view-rules, reconcile, export, ...).
-    // No new backend behavior: same actions the toolbar/footer already expose.
-    callback qa-import-clicked();
-    callback qa-ai-classify-clicked();
-    callback qa-rules-clicked();
-    callback qa-reconcile-clicked();
-    callback qa-reports-clicked();
-    callback qa-insights-clicked();
 
-    background: FintechPalette.page-bg;
+    background: #F0F7FF;
 
-    ScrollView {
-        width: 100%; height: 100%;
+    VerticalBox {
+        padding: 0px; spacing: 0px;
 
-        VerticalBox {
-            padding: Spacing.section; spacing: Spacing.section;
-            width: parent.visible-width;
+        // ── Filter bar ─────────────────────────────────────────────────────
+        // Original: background:#fff; border-radius:8px; padding:10px 14px; box-shadow:0 1px 4px rgba(0,0,0,.07); gap:10px
+        // dash-fg label: font-size:10px; font-weight:700; color:#666; text-transform:uppercase; letter-spacing:.06em
+        Rectangle {
+            height: 56px; background: #FFFFFF;
+            border-width: 0px;
+            drop-shadow-blur: 4px;
+            drop-shadow-color: #00000012;
+            drop-shadow-offset-y: 1px;
 
-            // ── Period filter bar ───────────────────────────────────────────
-            PeriodFilterBar {
-                filter-banks:   root.filter-banks;
-                filter-vendors: root.filter-vendors;
-                filter-heads:   root.filter-heads;
-                from-text  <=> root.dash-from;
-                to-text    <=> root.dash-to;
-                bank-idx   <=> root.dash-bank-idx;
-                vendor-idx <=> root.dash-vendor-idx;
-                head-idx   <=> root.dash-head-idx;
-                date-preset(p) => { return root.dash-date-preset(p); }
-                apply => {
-                    root.dash-filter-changed(
-                        root.dash-from, root.dash-to,
-                        root.filter-banks[root.dash-bank-idx],
-                        root.filter-vendors[root.dash-vendor-idx],
-                        root.filter-heads[root.dash-head-idx]);
+            HorizontalBox {
+                padding-left: 14px; padding-right: 14px;
+                padding-top: 0px; padding-bottom: 0px;
+                spacing: 10px;
+
+                VerticalBox {
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "FROM"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                    LineEdit {
+                        placeholder-text: "DD/MM/YYYY"; height: 26px;
+                        min-width: 96px; max-width: 96px; font-size: 12px;
+                        text: root.dash-from;
+                        edited(v) => {
+                            root.dash-from = v;
+                            root.dash-filter-changed(root.dash-from, root.dash-to,
+                                root.filter-banks[root.dash-bank-idx],
+                                root.filter-vendors[root.dash-vendor-idx],
+                                root.filter-heads[root.dash-head-idx]);
+                        }
+                    }
                 }
+                VerticalBox {
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "TO"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                    LineEdit {
+                        placeholder-text: "DD/MM/YYYY"; height: 26px;
+                        min-width: 96px; max-width: 96px; font-size: 12px;
+                        text: root.dash-to;
+                        edited(v) => {
+                            root.dash-to = v;
+                            root.dash-filter-changed(root.dash-from, root.dash-to,
+                                root.filter-banks[root.dash-bank-idx],
+                                root.filter-vendors[root.dash-vendor-idx],
+                                root.filter-heads[root.dash-head-idx]);
+                        }
+                    }
+                }
+                VerticalBox {
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "BANK"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                    ComboBox {
+                        model: root.filter-banks; height: 26px; min-width: 120px;
+                        current-index: root.dash-bank-idx;
+                        selected => {
+                            root.dash-bank-idx = self.current-index;
+                            root.dash-filter-changed(root.dash-from, root.dash-to,
+                                root.filter-banks[self.current-index],
+                                root.filter-vendors[root.dash-vendor-idx],
+                                root.filter-heads[root.dash-head-idx]);
+                        }
+                    }
+                }
+                VerticalBox {
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "VENDOR / LEDGER"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                    ComboBox {
+                        model: root.filter-vendors; height: 26px; min-width: 130px;
+                        current-index: root.dash-vendor-idx;
+                        selected => {
+                            root.dash-vendor-idx = self.current-index;
+                            root.dash-filter-changed(root.dash-from, root.dash-to,
+                                root.filter-banks[root.dash-bank-idx],
+                                root.filter-vendors[self.current-index],
+                                root.filter-heads[root.dash-head-idx]);
+                        }
+                    }
+                }
+                VerticalBox {
+                    padding: 0px; spacing: 3px; alignment: center;
+                    Text { text: "EXPENSE HEAD"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                    ComboBox {
+                        model: root.filter-heads; height: 26px; min-width: 130px;
+                        current-index: root.dash-head-idx;
+                        selected => {
+                            root.dash-head-idx = self.current-index;
+                            root.dash-filter-changed(root.dash-from, root.dash-to,
+                                root.filter-banks[root.dash-bank-idx],
+                                root.filter-vendors[root.dash-vendor-idx],
+                                root.filter-heads[self.current-index]);
+                        }
+                    }
+                }
+
+                // Reset button
+                Rectangle {
+                    y: (parent.height - 26px) / 2;
+                    height: 26px; width: 54px;
+                    background: #F5F5F5; border-radius: 4px;
+                    border-width: 1px; border-color: #D0D0D0;
+                    accessible-role: button;
+                    accessible-label: "Reset filters";
+                    TouchArea {
+                        clicked => {
+                            root.dash-from = "";
+                            root.dash-to = "";
+                            root.dash-bank-idx = 0;
+                            root.dash-vendor-idx = 0;
+                            root.dash-head-idx = 0;
+                            root.dash-filter-changed("", "", "", "", "");
+                        }
+                    }
+                    Text { text: "Reset"; font-size: 11px; color: #546E7A;
+                           horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
             }
+        }
 
-            // ── No-data placeholder ───────────────────────────────────────
-            if !root.has-data : Card {
-                height: 120px;
-                Text {
-                    text: "No transaction data. Load a bank statement to see analytics.";
-                    font-size: Type.h3; color: FintechPalette.text-muted;
-                    horizontal-alignment: center; vertical-alignment: center;
-                    wrap: word-wrap;
-                }
-            }
+        // ── Scrollable content ──────────────────────────────────────────────
+        ScrollView {
+            vertical-stretch: 1;
+            width: parent.width;
 
-            // ── 6 KPI cards ────────────────────────────────────────────────
-            if root.has-data : HorizontalBox {
-                spacing: Spacing.base;
-                KpiCard {
-                    title: "Total Credits"; value: root.total-credits;
-                    sub: root.credit-count + " Transactions";
-                    icon: "\u{2193}"; icon-bg: FintechPalette.success;
-                    horizontal-stretch: 1; clickable: true;
-                    clicked => { root.card-credits-clicked(); }
-                }
-                KpiCard {
-                    title: "Total Debits"; value: root.total-debits;
-                    sub: root.debit-count + " Transactions";
-                    icon: "\u{2191}"; icon-bg: FintechPalette.danger;
-                    horizontal-stretch: 1; clickable: true;
-                    clicked => { root.card-debits-clicked(); }
-                }
-                KpiCard {
-                    title: "Net Cash Flow"; value: root.net-cash-flow;
-                    sub: "This Period";
-                    icon: "\u{223F}"; icon-bg: FintechPalette.primary;
-                    horizontal-stretch: 1;
-                }
-                KpiCard {
-                    title: "Opening Balance"; value: root.opening-balance;
-                    sub: "Start of period";
-                    icon: "\u{1F3E6}"; icon-bg: FintechPalette.purple;
-                    horizontal-stretch: 1;
-                }
-                KpiCard {
-                    title: "Closing Balance"; value: root.closing-balance;
-                    sub: "End of period";
-                    icon: "\u{1F4C5}"; icon-bg: FintechPalette.warning;
-                    horizontal-stretch: 1;
-                }
-                KpiCard {
-                    title: "Total Transactions"; value: root.txn-count;
-                    sub: "This Period";
-                    icon: "\u{2261}"; icon-bg: FintechPalette.teal;
-                    horizontal-stretch: 1; clickable: true;
-                    clicked => { root.card-txns-clicked(); }
-                }
-            }
+            VerticalBox {
+                padding: 16px; spacing: 14px;
+                width: parent.visible-width;
 
-            // ── Charts row: Monthly bar + Expense donut ───────────────────
-            if root.has-data : HorizontalBox {
-                spacing: Spacing.base; height: 300px;
+                // ── 8 Summary cards ──────────────────────────────────────────
+                HorizontalBox {
+                    spacing: 10px;
+                    StatCard {
+                        title: "Total Credits"; value: root.total-credits;
+                        accent: #2E7D32; horizontal-stretch: 1; clickable: true;
+                        clicked => { root.card-credits-clicked(); }
+                    }
+                    StatCard {
+                        title: "Total Debits"; value: root.total-debits;
+                        accent: #C62828; horizontal-stretch: 1; clickable: true;
+                        clicked => { root.card-debits-clicked(); }
+                    }
+                    StatCard {
+                        title: "Net Cash Flow"; value: root.net-cash-flow;
+                        accent: #37474F; horizontal-stretch: 1;
+                    }
+                    StatCard {
+                        title: "Opening Balance"; value: root.opening-balance;
+                        accent: #1565C0; horizontal-stretch: 1;
+                    }
+                    StatCard {
+                        title: "Closing Balance"; value: root.closing-balance;
+                        accent: #F57F17; horizontal-stretch: 1;
+                    }
+                    StatCard {
+                        title: "Total Transactions"; value: root.txn-count;
+                        accent: #6A1B9A; horizontal-stretch: 1; clickable: true;
+                        clicked => { root.card-txns-clicked(); }
+                    }
+                    StatCard {
+                        title: "Vendors / Customers"; value: root.vendor-count;
+                        accent: #00695C; horizontal-stretch: 1;
+                    }
+                    StatCard {
+                        title: "Top Expense Category"; value: root.top-expense;
+                        sub: root.top-expense-amt;
+                        accent: #E65100; horizontal-stretch: 1;
+                    }
+                }
 
-                ChartCard {
-                    horizontal-stretch: 2;
-                    chart-title: "Monthly Credits vs Debits";
+                // ── No-data placeholder ───────────────────────────────────────
+                if !root.has-data : Rectangle {
+                    height: 80px;
+                    Text {
+                        text: "No transaction data. Load a bank statement to see analytics.";
+                        font-size: 15px; color: #AAAAAA;
+                        horizontal-alignment: center; vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
 
-                    VerticalBox {
-                        padding: 0px; spacing: Spacing.sm; vertical-stretch: 1;
+                // ── Charts 2×2 grid ───────────────────────────────────────────
+                if root.has-data : HorizontalBox {
+                    spacing: 12px; height: 260px;
+
+                    // Monthly Credits vs Debits (2fr)
+                    ChartCard {
+                        horizontal-stretch: 2;
+                        chart-title: "MONTHLY CREDITS VS DEBITS";
+
+                        // Legend
                         HorizontalBox {
-                            padding: 0px; spacing: Spacing.md; height: 16px;
-                            Rectangle { width: 12px; height: 12px; border-radius: 3px; background: FintechPalette.success; }
-                            Text { text: "Credits"; font-size: Type.micro; color: FintechPalette.text; vertical-alignment: center; }
-                            Rectangle { width: 12px; height: 12px; border-radius: 3px; background: FintechPalette.danger; }
-                            Text { text: "Debits"; font-size: Type.micro; color: FintechPalette.text; vertical-alignment: center; }
+                            padding: 0px; spacing: 10px; height: 16px;
+                            Rectangle { width: 12px; height: 12px; border-radius: 2px;
+                                        background: #2E7D32; opacity: 0.75; }
+                            Text { text: "Credits"; font-size: 10px; color: #37474F; vertical-alignment: center; }
+                            Rectangle { width: 12px; height: 12px; border-radius: 2px;
+                                        background: #C62828; opacity: 0.75; }
+                            Text { text: "Debits"; font-size: 10px; color: #37474F; vertical-alignment: center; }
                             Rectangle { horizontal-stretch: 1; }
                         }
+
                         MonthlyChart {
                             data: root.chart-monthly;
                             y-ticks: root.chart-monthly-y-ticks;
@@ -843,41 +788,16 @@ export component DashboardScreen inherits Rectangle {
                             }
                         }
                     }
-                }
 
-                ChartCard {
-                    horizontal-stretch: 1;
-                    chart-title: "Expense Head Breakdown";
-                    Rectangle {
-                        height: 24px;
-                        TouchArea { mouse-cursor: pointer; clicked => { root.view-all-clicked(); } }
-                        Text { text: "View All"; font-size: Type.small; font-weight: 700; color: FintechPalette.primary; horizontal-alignment: right; vertical-alignment: center; }
-                    }
-                    DonutChart {
-                        data: root.chart-expenses;
-                        center-label: "Top: " + root.top-expense;
-                        center-value: root.top-expense-amt == "" ? "\u{2014}" : root.top-expense-amt;
-                        vertical-stretch: 1;
-                    }
-                }
-            }
+                    // Expense Head Breakdown (1fr)
+                    ChartCard {
+                        horizontal-stretch: 1;
+                        chart-title: "EXPENSE HEAD BREAKDOWN";
 
-            // ── Recent Transactions + Top Vendors row ─────────────────────
-            if root.has-data : HorizontalBox {
-                spacing: Spacing.base; height: 340px;
-
-                ChartCard {
-                    horizontal-stretch: 2;
-                    chart-title: "Recent Transactions";
-                    Rectangle {
-                        height: 24px;
-                        TouchArea { mouse-cursor: pointer; clicked => { root.view-all-clicked(); } }
-                        Text { text: "View All"; font-size: Type.small; font-weight: 700; color: FintechPalette.primary; horizontal-alignment: right; vertical-alignment: center; }
-                    }
-                    RecentTxnList {
-                        rows: root.search-text == "" ? root.transaction-rows : root.search-results;
-                        max-rows: 6;
-                        vertical-stretch: 1;
+                        ExpenseChart {
+                            data: root.chart-expenses;
+                            vertical-stretch: 1;
+                        }
                     }
                 }
 
@@ -920,329 +840,42 @@ export component DashboardScreen inherits Rectangle {
                         }
                     }
                 }
-            }
 
-            // ── Insights strip (preserved from the previous design) ────────
-            if root.has-data : HorizontalBox {
-                spacing: Spacing.base;
-                InsCard { label: "HIGHEST DEBIT";  value: root.ins-max-dr; sub: root.ins-max-dr-narr; vcol: FintechPalette.danger; }
-                InsCard { label: "HIGHEST CREDIT"; value: root.ins-max-cr; sub: root.ins-max-cr-narr; vcol: FintechPalette.success; }
-                InsCard { label: "AVG. DEBIT VALUE";  value: root.ins-avg-dr; sub: root.ins-dr-count; vcol: FintechPalette.text; }
-                InsCard { label: "AVG. CREDIT VALUE"; value: root.ins-avg-cr; sub: root.ins-cr-count; vcol: FintechPalette.text; }
-                InsCard { label: "MOST FREQUENT VENDOR"; value: root.ins-freq-vendor; horizontal-stretch: 1.5; vcol: FintechPalette.primary; }
-            }
-
-            // ── Quick action cards ─────────────────────────────────────────
-            HorizontalBox {
-                spacing: Spacing.base;
-                QuickActionCard {
-                    title: "Import Bank Statement"; subtitle: "Upload & import data";
-                    icon: "\u{2191}"; icon-bg: FintechPalette.primary;
-                    clicked => { root.qa-import-clicked(); }
-                }
-                QuickActionCard {
-                    title: "AI Auto Classify"; subtitle: "Smart transaction categorization";
-                    icon: "\u{2605}"; icon-bg: FintechPalette.purple;
-                    clicked => { root.qa-ai-classify-clicked(); }
-                }
-                QuickActionCard {
-                    title: "Manage Rules"; subtitle: "Create & edit classification rules";
-                    icon: "\u{2699}"; icon-bg: FintechPalette.teal;
-                    clicked => { root.qa-rules-clicked(); }
-                }
-                QuickActionCard {
-                    title: "Bank Reconciliation"; subtitle: "Reconcile your transactions";
-                    icon: "\u{21C4}"; icon-bg: FintechPalette.warning;
-                    clicked => { root.qa-reconcile-clicked(); }
-                }
-                QuickActionCard {
-                    title: "Generate Reports"; subtitle: "Export & download reports";
-                    icon: "\u{1F4C4}"; icon-bg: #5D4037;
-                    clicked => { root.qa-reports-clicked(); }
-                }
-                QuickActionCard {
-                    title: "AI Insights"; subtitle: "View smart insights";
-                    icon: "\u{2728}"; icon-bg: FintechPalette.navy;
-                    highlighted: true;
-                    clicked => { root.qa-insights-clicked(); }
+                // ── Insights strip ────────────────────────────────────────────
+                if root.has-data : HorizontalBox {
+                    spacing: 10px;
+                    InsCard {
+                        label: "HIGHEST DEBIT";
+                        value: root.ins-max-dr;
+                        sub: root.ins-max-dr-narr;
+                        vcol: #C62828;
+                    }
+                    InsCard {
+                        label: "HIGHEST CREDIT";
+                        value: root.ins-max-cr;
+                        sub: root.ins-max-cr-narr;
+                        vcol: #2E7D32;
+                    }
+                    InsCard {
+                        label: "AVG. DEBIT VALUE";
+                        value: root.ins-avg-dr;
+                        sub: root.ins-dr-count;
+                        vcol: #37474F;
+                    }
+                    InsCard {
+                        label: "AVG. CREDIT VALUE";
+                        value: root.ins-avg-cr;
+                        sub: root.ins-cr-count;
+                        vcol: #37474F;
+                    }
+                    InsCard {
+                        label: "MOST FREQUENT VENDOR";
+                        value: root.ins-freq-vendor;
+                        horizontal-stretch: 1.5;
+                        vcol: #1565C0;
+                    }
                 }
             }
         }
-    }
-}
-
-// ── Sidebar nav item ────────────────────────────────────────────────────────
-component NavItem inherits Rectangle {
-    in property <string> label: "";
-    in property <string> badge: "";
-    in property <bool>   active: false;
-    callback clicked();
-
-    height: 40px;
-    border-radius: Radius.md;
-    background: root.active ? #FFFFFF1E : transparent;
-
-    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
-
-    HorizontalBox {
-        padding-left: Spacing.md; padding-right: Spacing.sm; padding-top: 0px; padding-bottom: 0px;
-        spacing: Spacing.sm;
-        Rectangle {
-            width: 3px; height: 18px; border-radius: 2px;
-            background: root.active ? FintechPalette.primary : transparent;
-        }
-        Text {
-            text: root.label; font-size: Type.body;
-            font-weight: root.active ? 700 : 500;
-            color: root.active ? white : #B8C4DC;
-            vertical-alignment: center; horizontal-stretch: 1; overflow: elide;
-        }
-        if root.badge != "" : Badge { text: root.badge; fg: white; bg: FintechPalette.success; }
-    }
-}
-
-// ── Sidebar (Dashboard-tab-only chrome) ────────────────────────────────────
-// Persistent left navigation for the redesigned Dashboard shell. Every nav
-// item below routes to functionality that already exists in the app (the
-// Transactions tab's own toolbar/footer actions and modals) — see the click
-// handlers wired up where this is instantiated in main_screen.slint. This
-// component itself carries no business logic, just layout + callbacks.
-export component Sidebar inherits Rectangle {
-    in property <string> bank-name:  "";
-    in property <string> account-no: "";
-    in property <string> period:     "";
-
-    callback nav-transactions();
-    callback nav-ai-classify();
-    callback nav-rules();
-    callback nav-clients();
-    callback nav-vendors();
-    callback nav-import();
-    callback nav-reports();
-    callback nav-reconcile();
-    callback nav-batch();
-    callback nav-settings();
-    callback change-clicked();
-
-    width: 240px;
-    background: FintechPalette.navy;
-
-    VerticalBox {
-        padding: 0px; spacing: 0px;
-
-        // Logo / firm block
-        Rectangle {
-            height: 64px;
-            VerticalBox {
-                padding-left: Spacing.base; padding-right: Spacing.base; alignment: center; spacing: Spacing.xs;
-                Text { text: "A S Havaldar"; color: white; font-size: Type.h2; font-weight: 800; }
-                Text { text: "Bank Statement Processor"; color: #93A5C7; font-size: Type.micro; font-weight: 500; }
-            }
-        }
-        Rectangle { height: 1px; background: #FFFFFF1A; }
-
-        ScrollView {
-            vertical-stretch: 1;
-            VerticalBox {
-                padding: Spacing.md; spacing: Spacing.xs; alignment: start;
-                NavItem { label: "Dashboard"; active: true; }
-                NavItem { label: "Transactions"; clicked => { root.nav-transactions(); } }
-                NavItem { label: "AI Classify"; badge: "New"; clicked => { root.nav-ai-classify(); } }
-                NavItem { label: "Rules Engine"; clicked => { root.nav-rules(); } }
-                NavItem { label: "Clients"; clicked => { root.nav-clients(); } }
-                NavItem { label: "Vendors / Ledgers"; clicked => { root.nav-vendors(); } }
-                NavItem { label: "Import Data"; clicked => { root.nav-import(); } }
-                NavItem { label: "Reports"; clicked => { root.nav-reports(); } }
-                NavItem { label: "Bank Reconciliation"; clicked => { root.nav-reconcile(); } }
-                NavItem { label: "Batch Processing"; clicked => { root.nav-batch(); } }
-                NavItem { label: "Settings"; clicked => { root.nav-settings(); } }
-            }
-        }
-
-        // Bottom bank/account/period info block
-        Rectangle {
-            height: 100px;
-            Rectangle { y: 0px; height: 1px; background: #FFFFFF1A; }
-            VerticalBox {
-                padding: Spacing.md; spacing: Spacing.xs;
-                Text { text: root.bank-name == "" ? "No bank loaded" : root.bank-name; color: white; font-size: Type.small; font-weight: 700; overflow: elide; }
-                Text { text: root.account-no == "" ? "\u{2014}" : root.account-no; color: #93A5C7; font-size: Type.micro; overflow: elide; }
-                Text { text: root.period; color: #93A5C7; font-size: Type.micro; overflow: elide; wrap: word-wrap; }
-                Rectangle {
-                    height: 24px; width: 64px;
-                    border-radius: Radius.sm; border-width: 1px; border-color: #FFFFFF33;
-                    TouchArea { mouse-cursor: pointer; clicked => { root.change-clicked(); } }
-                    Text { text: "Change"; font-size: Type.micro; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-        }
-        Rectangle {
-            height: 24px;
-            Text { text: "v 1.0.0"; font-size: 8px; color: #5E6F94; horizontal-alignment: center; vertical-alignment: center; }
-        }
-    }
-}
-
-// ── Quick Actions dropdown menu item ────────────────────────────────────────
-component QuickMenuItem inherits Rectangle {
-    in property <string> text: "";
-    callback clicked();
-    height: 32px;
-    background: ta.has-hover ? FintechPalette.page-bg : transparent;
-    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
-    Text { text: root.text; font-size: Type.small; color: FintechPalette.text; vertical-alignment: center; x: Spacing.md; }
-}
-
-// ── Top header (Dashboard-tab-only chrome) ──────────────────────────────────
-export component TopHeader inherits Rectangle {
-    in property <string> title:    "Dashboard";
-    in property <string> subtitle: "Overview of your business";
-    in property <string> needs-review-count: "0";
-    in-out property <bool> sidebar-collapsed: false;
-    in-out property <string> search-text: "";
-
-    callback new-client-clicked();
-    callback logout-clicked();
-    callback notifications-clicked();
-    callback sidebar-toggled();
-    // Fired on every keystroke — forwarded through to Rust (do-dash-search)
-    // which does the actual substring matching over the loaded
-    // transactions and returns TxnRow results for the Recent Transactions
-    // card; see DashboardScreen's search-results doc comment.
-    callback search-changed(string);
-    // Quick Actions menu — same five actions as the bottom quick-action
-    // cards, just reachable from the header too.
-    callback qa-import-clicked();
-    callback qa-ai-classify-clicked();
-    callback qa-rules-clicked();
-    callback qa-reconcile-clicked();
-    callback qa-reports-clicked();
-
-    property <bool> qa-menu-open: false;
-    // Narrow the outer padding and inter-control gaps once the *window* is
-    // 1280px-class. Driven off viewport-width (set by MainScreen from its
-    // own root.width, i.e. the real window size) rather than root.width
-    // here: TopHeader's own width is derived from this same layout's
-    // spacing, so gating on it would be a binding loop (spacing ->
-    // layout-info -> width -> spacing). viewport-width is an external
-    // input, so no cycle. Trips at 1280px windows, not at 1366px+ — search
-    // box sizing (240/380/420) is untouched; this only reclaims space
-    // previously spent on whitespace between the fixed-size right-side
-    // controls.
-    in property <length> viewport-width: 1440px;
-    property <bool> compact-header: root.viewport-width < 1320px;
-
-    background: FintechPalette.card;
-    height: 68px;
-
-    Rectangle { y: parent.height - 1px; height: 1px; background: FintechPalette.border; }
-
-    HorizontalBox {
-        padding-left: root.compact-header ? Spacing.sm : Spacing.section;
-        padding-right: root.compact-header ? Spacing.sm : Spacing.section;
-        spacing: root.compact-header ? Spacing.xs : Spacing.md;
-
-        // ── Left: hamburger + title (natural width) ─────────────────────────
-        HorizontalBox {
-            padding: 0px; spacing: Spacing.md;
-            Rectangle {
-                width: 32px; height: 32px; border-radius: Radius.md;
-                background: FintechPalette.page-bg;
-                TouchArea { mouse-cursor: pointer; clicked => { root.sidebar-collapsed = !root.sidebar-collapsed; root.sidebar-toggled(); } }
-                Text { text: "\u{2630}"; font-size: Type.body; color: FintechPalette.text; horizontal-alignment: center; vertical-alignment: center; }
-            }
-            VerticalBox {
-                padding: 0px; spacing: 0px; alignment: center;
-                Text { text: root.title; font-size: Type.h1; font-weight: 800; color: FintechPalette.text; max-width: 200px; overflow: elide; }
-                Text { text: root.subtitle; font-size: Type.small; color: FintechPalette.text-muted; max-width: 200px; overflow: elide; }
-            }
-        }
-
-        // ── Center: global search, true center via equal stretch spacers ────
-        // Flexible instead of a hard 420px: shrinks down to min-width on
-        // narrow windows (sidebar + right-side controls otherwise force
-        // the header wider than the available content column at
-        // 1280/1366px), grows back up to max-width on wide ones. The two
-        // equal-stretch spacers keep it centered at every size in between.
-        Rectangle { horizontal-stretch: 1; }
-        Rectangle {
-            min-width: 240px; preferred-width: 380px; max-width: 420px; height: 36px;
-            horizontal-stretch: 1;
-            background: FintechPalette.page-bg; border-radius: Radius.md;
-            border-width: 1px; border-color: FintechPalette.border;
-            HorizontalBox {
-                padding-left: Spacing.md; padding-right: Spacing.md; spacing: Spacing.sm;
-                Text { text: "\u{1F50D}"; font-size: Type.small; color: FintechPalette.text-muted; vertical-alignment: center; }
-                LineEdit {
-                    placeholder-text: "Search transactions, clients, vendors...";
-                    text: root.search-text;
-                    horizontal-stretch: 1;
-                    edited(v) => { root.search-text = v; root.search-changed(v); }
-                }
-            }
-        }
-        Rectangle { horizontal-stretch: 1; }
-
-        // ── Right: actions + profile (natural width) ─────────────────────────
-        AppButton { text: "+ New Client"; variant: "primary"; compact: true; clicked => { root.new-client-clicked(); } }
-
-        Rectangle {
-            height: 32px; width: 122px;
-            background: FintechPalette.card; border-radius: Radius.md;
-            border-width: 1px; border-color: FintechPalette.border;
-            TouchArea { mouse-cursor: pointer; clicked => { root.qa-menu-open = !root.qa-menu-open; } }
-            HorizontalBox {
-                padding-left: Spacing.md; padding-right: Spacing.sm; spacing: Spacing.xs;
-                Text { text: "Quick Actions"; font-size: Type.micro; font-weight: 700; color: FintechPalette.text; horizontal-stretch: 1; vertical-alignment: center; }
-                Text { text: "\u{25BE}"; font-size: Type.micro; color: FintechPalette.text-muted; vertical-alignment: center; }
-            }
-            if root.qa-menu-open : Rectangle {
-                y: 36px; x: -80px; width: 200px;
-                background: FintechPalette.card; border-radius: Radius.md;
-                border-width: 1px; border-color: FintechPalette.border;
-                drop-shadow-blur: 14px; drop-shadow-color: #0A1F4430; drop-shadow-offset-y: 4px;
-                z: 20;
-                VerticalBox {
-                    padding: Spacing.xs; spacing: 0px;
-                    QuickMenuItem { text: "Import Bank Statement"; clicked => { root.qa-menu-open = false; root.qa-import-clicked(); } }
-                    QuickMenuItem { text: "AI Auto Classify";      clicked => { root.qa-menu-open = false; root.qa-ai-classify-clicked(); } }
-                    QuickMenuItem { text: "Manage Rules";          clicked => { root.qa-menu-open = false; root.qa-rules-clicked(); } }
-                    QuickMenuItem { text: "Bank Reconciliation";   clicked => { root.qa-menu-open = false; root.qa-reconcile-clicked(); } }
-                    QuickMenuItem { text: "Generate Reports";      clicked => { root.qa-menu-open = false; root.qa-reports-clicked(); } }
-                }
-            }
-        }
-
-        // Notification bell — badge reuses the existing "needs review" count
-        // (already computed by Rust for the Summary panel) rather than a
-        // fabricated notification count; click drills into those rows on
-        // the Transactions tab, same as the Summary panel's own
-        // "Needs Review" row already does.
-        Rectangle {
-            width: 32px; height: 32px; border-radius: Radius.md;
-            background: FintechPalette.page-bg;
-            TouchArea { mouse-cursor: pointer; clicked => { root.notifications-clicked(); } }
-            Text { text: "\u{1F514}"; font-size: Type.body; horizontal-alignment: center; vertical-alignment: center; }
-            if root.needs-review-count != "0" && root.needs-review-count != "" : Rectangle {
-                x: 18px; y: -2px; width: 16px; height: 16px; border-radius: Radius.pill;
-                background: FintechPalette.danger;
-                Text { text: root.needs-review-count; font-size: 8px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
-            }
-        }
-
-        Rectangle { width: 1px; height: 30px; background: FintechPalette.border; }
-
-        Rectangle {
-            width: 34px; height: 34px; border-radius: Radius.pill;
-            background: FintechPalette.navy;
-            Text { text: "AS"; font-size: Type.small; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
-        }
-        VerticalBox {
-            padding: 0px; spacing: 0px; alignment: center;
-            Text { text: "A S Havaldar"; font-size: Type.small; font-weight: 700; color: FintechPalette.text; }
-            Text { text: "Admin"; font-size: Type.micro; color: FintechPalette.text-muted; }
-        }
-
-        AppButton { text: "Logout"; variant: "secondary"; compact: true; clicked => { root.logout-clicked(); } }
     }
 }

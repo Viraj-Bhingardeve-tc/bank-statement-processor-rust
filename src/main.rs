@@ -300,40 +300,10 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                 &t.status.to_string()
             };
             // Ledger for Posting: same fallback rule already used by the CSV/Tally
-            // exporters (export::excel::posting_ledger) — account head if the
-            // transaction was classified into one, else the vendor/customer name
-            // itself acts as the party ledger, else "Unclassified".
+            // exporters (export::excel::posting_ledger) and apply_parse_result
+            // below — account head if the transaction was classified into one,
+            // else the vendor/customer name itself acts as the party ledger.
             let ledger = export::excel::posting_ledger(t);
-            // Expense Head: the Tally income/expense group (e.g. "Indirect
-            // Expenses", "Sundry Creditors") the app's existing classification
-            // engine assigns to this account head — same call used for ledger
-            // auto-seeding elsewhere in this file.
-            //
-            // Requirement #2 (Sundry Debtors/Creditors): a bare party ledger —
-            // a vendor/customer name was extracted but no account head was
-            // ever assigned — is decided from that evidence first (customer
-            // receipt → Debtor, vendor payment → Creditor) via
-            // `tally_group_engine::party_group`, matching what the CSV/Tally
-            // exporters already do. `classify`'s own amount-threshold fallback
-            // only runs when there's no such evidence (an account head is
-            // already set, or no vendor name was ever found), so it never
-            // overwrites a real Direct/Indirect Income, Bank Charges, Salary,
-            // etc. classification.
-            let expense_head = tally_group_engine::party_group(
-                &t.account_head,
-                &t.vendor,
-                matches!(t.txn_type, parser::VoucherType::Receipt),
-            )
-            .map(|g| g.to_string())
-            .unwrap_or_else(|| {
-                tally_group_engine::classify(
-                    &t.account_head,
-                    &t.narration,
-                    t.credit.is_some(),
-                    t.credit.unwrap_or(0.0) + t.debit.unwrap_or(0.0),
-                    None,
-                )
-            });
             TxnRow {
                 bank_name: SharedString::from(t.bank_name.as_str()),
                 account_no: SharedString::from(t.account_no.as_str()),
@@ -344,7 +314,7 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                 credit: SharedString::from(fmt_cell(t.credit).as_str()),
                 balance: SharedString::from(fmt_cell(t.balance).as_str()),
                 vendor: SharedString::from(t.vendor.as_str()),
-                ledger: SharedString::from(t.account_head.as_str()),
+                ledger: SharedString::from(ledger),
                 expense_head: SharedString::from(tally_groups[idx].as_str()),
                 status_text: SharedString::from(status_display),
                 tags: SharedString::from(t.tags.join(" ").as_str()),
@@ -353,9 +323,6 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                 has_gst,
                 has_tax,
                 has_dup_tag: has_dup,
-                // This builder always shows the raw imported narration verbatim
-                // (see `narr` above) — never the cleaned/derived text.
-                narration_is_generated: false,
             }
         })
         .collect()
@@ -645,27 +612,19 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .iter()
         .map(|e| e.amount)
         .fold(0.0f64, f64::max);
-    // Running cumulative percent, purely for the donut chart's arc geometry
-    // (Dashboard redesign) — each segment's start angle, not a new figure.
-    let mut cum_pct: i32 = 0;
     let exp_bars: Vec<DashExpBar> = data
         .expenses
         .iter()
-        .map(|e| {
-            let start_pct = cum_pct;
-            cum_pct += e.pct;
-            DashExpBar {
-                label: SharedString::from(e.label.as_str()),
-                w: (if max_exp > 0.0 {
-                    e.amount / max_exp
-                } else {
-                    0.0
-                }) as f32,
-                amount_str: SharedString::from(fmt_amt(Some(e.amount)).as_str()),
-                color_idx: e.color_idx,
-                pct: e.pct,
-                start_pct,
-            }
+        .map(|e| DashExpBar {
+            label: SharedString::from(e.label.as_str()),
+            w: (if max_exp > 0.0 {
+                e.amount / max_exp
+            } else {
+                0.0
+            }) as f32,
+            amount_str: SharedString::from(fmt_amt(Some(e.amount)).as_str()),
+            color_idx: e.color_idx,
+            pct: e.pct,
         })
         .collect();
     h.set_dash_chart_expenses(slint::ModelRc::new(slint::VecModel::from(exp_bars)));
@@ -729,9 +688,6 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
                     }
                     .as_str(),
                 ),
-                net_str: SharedString::from(analytics::fmt_short_pub(net.abs()).as_str()),
-                net_is_positive: net >= 0.0,
-                kind: SharedString::from(if v.credit >= v.debit { "Customer" } else { "Vendor" }),
             }
         })
         .collect();
@@ -1343,10 +1299,6 @@ fn apply_parse_result(
                 // account head if classified, else the vendor name is the ledger.
                 ledger: SharedString::from(export::excel::posting_ledger(t)),
                 expense_head: SharedString::from(tally_group),
-                classification_type: SharedString::from(analytics::confidence_tier(t.confidence)),
-                classification_basis: SharedString::from(
-                    analytics::classification_basis(t).as_str(),
-                ),
                 status_text: SharedString::from(status_display),
                 tags: SharedString::from(t.tags.join(" ").as_str()),
                 review: SharedString::from(review_text),
@@ -1354,7 +1306,6 @@ fn apply_parse_result(
                 has_gst,
                 has_tax,
                 has_dup_tag: has_dup,
-                narration_is_generated,
             }
         })
         .collect();
@@ -3594,7 +3545,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_narrations: h.get_wiz_opt_narr(),
                     include_ob: h.get_wiz_opt_ob(),
                     skip_low_conf: h.get_wiz_opt_skip_low(),
-                    skip_duplicates: h.get_wiz_opt_skip_dup(),
+                    // The old-UI export wizard modal has no "skip duplicates"
+                    // checkbox (that control doesn't exist in this UI
+                    // restoration) — defaults to false, the same behavior as
+                    // before this option existed. The underlying export
+                    // filter itself is untouched.
+                    skip_duplicates: false,
                 };
                 // Requirement #9-F.6: never hand back a silent, empty export.
                 if export::tally::count_preview(&st.transactions, &opts).total == 0 {
@@ -3713,7 +3669,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_narrations: h.get_wiz_opt_narr(),
                     only_classified: h.get_wiz_opt_classified(),
                     skip_low_conf: h.get_wiz_opt_skip_low(),
-                    skip_duplicates: h.get_wiz_opt_skip_dup(),
+                    // The old-UI export wizard modal has no "skip duplicates"
+                    // checkbox (that control doesn't exist in this UI
+                    // restoration) — defaults to false, the same behavior as
+                    // before this option existed. The underlying export
+                    // filter itself is untouched.
+                    skip_duplicates: false,
                 };
 
                 let validation = export::accounting::validate(&st.transactions, &opts);
@@ -3840,7 +3801,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     include_narrations: h.get_wiz_opt_narr(),
                     only_classified: h.get_wiz_opt_classified(),
                     skip_low_conf: h.get_wiz_opt_skip_low(),
-                    skip_duplicates: h.get_wiz_opt_skip_dup(),
+                    // The old-UI export wizard modal has no "skip duplicates"
+                    // checkbox (that control doesn't exist in this UI
+                    // restoration) — defaults to false, the same behavior as
+                    // before this option existed. The underlying export
+                    // filter itself is untouched.
+                    skip_duplicates: false,
                 };
 
                 let validation = export::accounting::validate(&st.transactions, &opts);
@@ -6549,56 +6515,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 push_dashboard(&h, &filtered_txns, opening);
                 log::info!("[DashFilter] filtered to {} txns", filtered_txns.len());
-            });
-        }
-
-        // ── Dashboard redesign: period-preset lookup ────────────────────────────
-        // A pure lookup (no state mutation) backing the new Period Filter
-        // Bar's Today/This Month/Last Month/Current FY/Prev FY chips —
-        // reuses the exact same preset_range() helper on_do_date_preset
-        // already uses for the Transactions tab, just returning the answer
-        // instead of also mutating the Transactions filter/rebuilding rows.
-        {
-            app.on_do_dash_date_preset(move |preset| -> DashPresetRange {
-                let (from, to) = preset_range(preset.as_str());
-                DashPresetRange {
-                    from: SharedString::from(from.as_str()),
-                    to: SharedString::from(to.as_str()),
-                }
-            });
-        }
-
-        // ── Dashboard redesign: header search box ───────────────────────────────
-        // Real substring match over the currently-loaded transactions
-        // (narration/vendor/reference, case-insensitive) — Slint's own
-        // expression language has no string "contains", so this is done in
-        // Rust and the results sent back as ordinary TxnRow rows via the
-        // same build_txn_rows() helper the Transactions table itself uses.
-        {
-            let handle = app.as_weak();
-            let state_ref = app_state.clone();
-            app.on_do_dash_search(move |query| {
-                let h = match handle.upgrade() {
-                    Some(h) => h,
-                    None => return,
-                };
-                let q = query.to_string().to_lowercase();
-                let st = state_ref.lock().unwrap();
-                let matches: Vec<&parser::Transaction> = if q.trim().is_empty() {
-                    Vec::new()
-                } else {
-                    st.transactions
-                        .iter()
-                        .filter(|t| {
-                            t.narration.to_lowercase().contains(&q)
-                                || t.vendor.to_lowercase().contains(&q)
-                                || t.reference.to_lowercase().contains(&q)
-                        })
-                        .collect()
-                };
-                let rows = build_txn_rows(&matches);
-                drop(st);
-                h.set_dash_search_rows(std::rc::Rc::new(slint::VecModel::from(rows)).into());
             });
         }
 

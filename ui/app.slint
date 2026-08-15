@@ -7,8 +7,8 @@
 // login.slint's header) only touches the one cosmetic line below.
 
 import { LoginScreen } from "login.slint";
-import { MainScreen, BatchFileRow, SummaryListRow } from "main_screen.slint";
-import { DashMonthBar, DashExpBar, DashCashPt, DashVendorBar, TxnRow, DashPresetRange } from "dashboard.slint";
+import { MainScreen, TxnRow, BatchFileRow, SummaryListRow } from "main_screen.slint";
+import { DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 export component AppWindow inherits Window {
     title:            "A S Havaldar — Bank Statement Processor";
@@ -108,7 +108,6 @@ export component AppWindow inherits Window {
     in-out property <bool>   wiz-opt-narr:        true;
     in-out property <bool>   wiz-opt-classified:  true;
     in-out property <bool>   wiz-opt-skip-low:    false;
-    in-out property <bool>   wiz-opt-skip-dup:    false;
 
     // ── Import History records (set by Rust in do-import-history) ────────────
     // Each entry: "FILE\tDATE\tCOUNT" tab-separated
@@ -281,14 +280,6 @@ export component AppWindow inherits Window {
     callback do-pdf-pwd-cancel();
     callback do-ai-cancel();
     callback do-dash-filter(string, string, string, string, string);
-    // Dashboard redesign — quick-range chips in the new Period Filter Bar
-    // reuse Rust's existing preset_range() date math instead of
-    // reimplementing it in Slint (see main.rs's on_do_dash_date_preset).
-    callback do-dash-date-preset(string) -> DashPresetRange;
-    // Dashboard redesign: header search box (real substring match done in
-    // Rust — see main.rs's on_do_dash_search doc comment).
-    callback do-dash-search(string);
-    in property <[TxnRow]> dash-search-rows: [];
     // Client management
     callback do-select-client(string);
     callback do-delete-client();
@@ -386,7 +377,6 @@ export component AppWindow inherits Window {
         wiz-opt-narr        <=> root.wiz-opt-narr;
         wiz-opt-classified  <=> root.wiz-opt-classified;
         wiz-opt-skip-low    <=> root.wiz-opt-skip-low;
-        wiz-opt-skip-dup    <=> root.wiz-opt-skip-dup;
         import-records:   root.import-records;
         rule-records:     root.rule-records;
         status-bank:       root.status-bank;
@@ -471,9 +461,6 @@ export component AppWindow inherits Window {
         dash-ins-cr-count:    root.dash-ins-cr-count;
         dash-ins-freq-vendor: root.dash-ins-freq-vendor;
         dash-filter-changed(f, t, b, v, h) => { root.do-dash-filter(f, t, b, v, h); }
-        dash-date-preset(p) => { return root.do-dash-date-preset(p); }
-        dash-search-changed(v) => { root.do-dash-search(v); }
-        dash-search-rows: root.dash-search-rows;
 
         edit-client-name   <=> root.edit-client-name;
         edit-client-ledger <=> root.edit-client-ledger;
