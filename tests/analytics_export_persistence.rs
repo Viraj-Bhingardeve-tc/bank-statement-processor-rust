@@ -356,6 +356,7 @@ fn tally_xml_export_is_well_formed_and_contains_real_amounts() {
         include_narrations: true,
         include_ob: false,
         skip_low_conf: false,
+        skip_duplicates: false,
     };
     let xml = tally::generate(&txns, &opts, Some(10000.0));
 
@@ -394,6 +395,7 @@ fn generic_xml_accounting_export_validates_cleanly_for_real_data() {
         include_narrations: true,
         only_classified: false,
         skip_low_conf: false,
+        skip_duplicates: false,
     };
     let xml = accounting::generate(&txns, &opts, Some(10000.0));
     assert!(
