@@ -1,13 +1,19 @@
-//! Integration tests for the three real import pipelines (PDF, Excel, OCR)
+//! Integration tests for the real import pipelines (PDF, Excel, CSV, OCR)
 //! against real bank-statement fixtures copied from the old Electron app's
 //! own `assets/` folder (`tests/fixtures/bank_statements/`) — the same files
 //! that app's own test/demo data used, across 11 different banks.
 //!
-//! CSV bank-statement import and real OCR-image fixtures are deliberately
-//! **not** exercised here — see the module-level doc comments on
-//! `csv_bank_statement_import_is_not_implemented_in_either_app` and
-//! `ocr_pipeline_has_no_real_image_fixture_available` below for exactly why,
-//! rather than silently omitting them.
+//! CSV bank-statement import (`parser::csv_parser`) has no real-bank fixture
+//! file available (none exists anywhere in either repo), so its coverage
+//! here is synthetic — mechanics-level tests already live in
+//! `parser::csv_parser`'s own `#[cfg(test)]` module; the tests below only
+//! confirm the public `parser::csv_parser::parse_csv_file` entry point
+//! integrates end-to-end the same way `excel_parser`/`pdf_parser` already
+//! do in this file.
+//!
+//! Real OCR-image fixtures are deliberately **not** exercised here — see the
+//! module-level doc comment on `ocr_pipeline_has_no_real_image_fixture_available`
+//! below for exactly why, rather than silently omitting them.
 
 use std::path::{Path, PathBuf};
 
@@ -304,22 +310,68 @@ Date        Narration                          Withdrawal   Deposit   Balance
     );
 }
 
-/// CSV bank-statement transaction import (as opposed to CSV *ledger name*
-/// import, which is a separate, already-implemented feature covered in
-/// `ledger_reconciliation_errors.rs`) does not exist in either application.
-/// Verified directly: the old app's file-picker filters never include
-/// `.csv` for statement loading (only for the ledger-import dialog), and
-/// Rust's equivalent `rfd::FileDialog` filters in `main.rs` list
-/// `pdf/xlsx/xls/xlsm/png/jpg/jpeg/tiff/tif/bmp` with no `.csv`. A fresh
-/// search of both repos also found zero `.csv` bank-statement sample files
-/// anywhere to use as a fixture even if the feature existed.
-///
-/// This test exists so "CSV import" is not silently missing from the suite
-/// — it documents the gap in a way that shows up in `cargo test` output
-/// (skipped, not failed) rather than requiring a reader to already know
-/// this from the audit.
+/// End-to-end through the public `parser::csv_parser::parse_csv_file` entry
+/// point (as opposed to `parser::csv_parser`'s own unit tests, which call
+/// its private helpers directly) — a real file on disk, read, header-
+/// detected, and turned into transactions, the same integration shape as
+/// this file's Excel/PDF tests. CSV *ledger name* import (a separate,
+/// already-implemented feature) is unaffected — see
+/// `ledger_reconciliation_errors.rs`.
 #[test]
-#[ignore = "CSV bank-statement import is not implemented in either app (0% parity item, not a regression) — no feature exists to test, and no real fixture exists anywhere in either repo to test it with"]
-fn csv_bank_statement_import_is_not_implemented_in_either_app() {
-    unreachable!("intentionally not implemented — see #[ignore] reason");
+fn csv_bank_statement_import_produces_real_debit_and_credit_transactions() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!(
+        "bsp_import_pipeline_csv_test_{}.csv",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        "Date,Narration,Ref No.,Withdrawal Amt.,Deposit Amt.,Balance\r\n\
+         02/01/2024,NEFT/RTG234567891/RATAN TATA/AXIS0001234,RTG234567891,,50000.00,135000.00\r\n\
+         03/01/2024,ATM WDL/ATM123456/HDFC BANK ATM,ATM123456,10000.00,,125000.00\r\n",
+    )
+    .unwrap();
+
+    let result = parser::csv_parser::parse_csv_file(&path).expect("a well-formed CSV must parse");
+    let real_txns: Vec<_> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+
+    assert_eq!(real_txns.len(), 2, "expected 2 real transactions");
+    assert!(
+        real_txns.iter().any(|t| t.debit.is_some()),
+        "expected at least one debit row"
+    );
+    assert!(
+        real_txns.iter().any(|t| t.credit.is_some()),
+        "expected at least one credit row"
+    );
+    assert_eq!(real_txns[0].date, "02/01/2024");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Mirrors this file's own `parsing_garbage_bytes_as_a_pdf_does_not_panic`/
+/// `parsing_an_empty_excel_file_does_not_panic` pattern (see
+/// `ledger_reconciliation_errors.rs`) for the CSV path: a file with no
+/// recognizable Date/Narration/Debit/Credit table must fail loudly, not
+/// silently import zero rows as if it had succeeded.
+#[test]
+fn csv_bank_statement_import_rejects_a_file_with_no_recognizable_columns() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!(
+        "bsp_import_pipeline_csv_unsupported_test_{}.csv",
+        std::process::id()
+    ));
+    std::fs::write(&path, "Name,Group\r\nAcme Traders,Sundry Creditors\r\n").unwrap();
+
+    let result = parser::csv_parser::parse_csv_file(&path);
+    assert!(
+        result.is_err(),
+        "a CSV with no statement-shaped columns must return Err"
+    );
+
+    let _ = std::fs::remove_file(&path);
 }

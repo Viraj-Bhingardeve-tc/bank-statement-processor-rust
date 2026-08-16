@@ -2319,12 +2319,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .add_filter(
                         "Bank Statements",
                         &[
-                            "pdf", "xlsx", "xls", "xlsm", "png", "jpg", "jpeg", "tiff", "tif",
-                            "bmp",
+                            "pdf", "xlsx", "xls", "xlsm", "csv", "png", "jpg", "jpeg", "tiff",
+                            "tif", "bmp",
                         ],
                     )
                     .add_filter("PDF", &["pdf"])
                     .add_filter("Excel", &["xlsx", "xls", "xlsm"])
+                    .add_filter("CSV", &["csv"])
                     .add_filter(
                         "Images (OCR)",
                         &["png", "jpg", "jpeg", "tiff", "tif", "bmp"],
@@ -2368,6 +2369,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(e) => {
                             log::error!("Excel parse error: {}", e);
                             h.set_status_bank(SharedString::from("Excel parse error — see log"));
+                        }
+                    }
+                    return;
+                }
+
+                if ext == "csv" {
+                    match parser::csv_parser::parse_csv_file(&path) {
+                        Ok(r) => {
+                            log::info!("CSV OK: {} rows", r.transactions.len());
+                            finish_load_file(&h, &state_ref, &db_ref, r, &file_name);
+                        }
+                        Err(e) => {
+                            log::error!("CSV parse error: {}", e);
+                            h.set_status_bank(SharedString::from("CSV parse error — see log"));
                         }
                     }
                     return;

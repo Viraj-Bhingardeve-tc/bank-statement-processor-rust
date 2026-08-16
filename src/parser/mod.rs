@@ -12,6 +12,7 @@
 pub mod amount_parser;
 pub mod bank_detection;
 pub mod column_detector;
+pub mod csv_parser;
 pub mod date_parser;
 pub mod excel_parser;
 pub mod noise_filter;
