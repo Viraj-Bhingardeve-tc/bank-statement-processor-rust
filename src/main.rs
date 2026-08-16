@@ -5788,7 +5788,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let updated = {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
-                        db::update_client(conn, cid, &new_name, &new_ledger).ok()
+                        db::update_client(conn, cid, &new_name, &new_ledger)
+                            .map_err(|e| {
+                                log::error!(
+                                    "[EditClient] db::update_client failed for cid={}: {}",
+                                    cid,
+                                    e
+                                )
+                            })
+                            .ok()
                     } else {
                         None
                     }
