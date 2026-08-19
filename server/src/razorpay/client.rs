@@ -334,9 +334,22 @@ impl RazorpayClient for HttpRazorpayClient {
                 .map_err(|e| RazorpayError::Http(e.to_string()))?;
 
             if !response.status().is_success() {
+                // Diagnostic fix: previously discarded Razorpay's actual
+                // error body and reported only the bare status code,
+                // making every failure here indistinguishable from the
+                // outside (`PaymentOperationError::ProviderError` ->
+                // `502 PROVIDER_ERROR`, then collapsed further into the
+                // client's generic "licensing server had a problem"
+                // message). Razorpay's error responses only ever describe
+                // what was wrong with *our* request (e.g. `{"error":
+                // {"code":"BAD_REQUEST_ERROR","description":...}}`) — they
+                // never echo back the `Authorization` header or any
+                // credential, so capturing the body here can't leak
+                // `key_id`/`key_secret`.
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
                 return Err(RazorpayError::Http(format!(
-                    "payment_links returned {}",
-                    response.status()
+                    "payment_links returned {status}: {body}"
                 )));
             }
 

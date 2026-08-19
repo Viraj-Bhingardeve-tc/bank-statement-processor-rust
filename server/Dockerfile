@@ -30,6 +30,16 @@ COPY Cargo.toml Cargo.lock ./
 COPY protocol ./protocol
 COPY server ./server
 
+# reqwest's default native-tls backend pulls in openssl-sys, which needs
+# pkg-config + libssl-dev to *compile* — the runtime stage's libssl3
+# further below is only for linking the already-built binary, not for
+# building it, so this builder stage needs its own copy of both.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       pkg-config \
+       libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # --locked: fail the build rather than silently re-resolving dependency
 # versions that drift from the committed Cargo.lock — this image should
 # build from exactly what was tested locally, every time.
@@ -56,7 +66,7 @@ FROM debian:bookworm-slim AS runtime
 # failure/timeout and a non-2xx HTTP status — exactly what the check
 # below needs, at the smallest footprint of the options considered.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 busybox-static \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 busybox-static curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --no-create-home --uid 10001 --shell /usr/sbin/nologin license-server
 
@@ -105,6 +115,6 @@ EXPOSE 8080
 #   -O /dev/null:          discards the response body — this check only
 #                         cares about the HTTP outcome, not the content.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD busybox wget -q -T 3 -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+    CMD curl -fsS --max-time 3 http://127.0.0.1:8080/healthz >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/local/bin/license-server"]
