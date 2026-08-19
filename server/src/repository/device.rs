@@ -21,7 +21,8 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceActivationOutcome {
     /// The device is now active on this license — already active (just
-    /// refreshed), reactivated from a previously-deactivated row, or
+    /// refreshed, including `machine_fingerprint`/`device_label`),
+    /// reactivated from a previously-deactivated row (same refresh), or
     /// freshly inserted.
     Activated,
     /// Activating this device would have exceeded `max_devices`; nothing
@@ -205,10 +206,28 @@ impl DeviceRepository for PgDeviceRepository {
         if let Some(existing) = existing {
             if existing.deactivated_at.is_none() {
                 // Already active — idempotent refresh, no slot consumed.
-                sqlx::query("UPDATE devices SET last_seen_at = now() WHERE id = $1")
-                    .bind(existing.id)
-                    .execute(&mut *tx)
-                    .await?;
+                // Also re-syncs `machine_fingerprint`/`device_label` to
+                // what this call presented: `device_id` (locked/compared
+                // above) is this schema's actual device identity, and
+                // `machine_fingerprint` is documented as only a secondary,
+                // best-effort consistency signal that can legitimately
+                // drift (e.g. a renamed COMPUTERNAME/USERNAME) — leaving
+                // the value frozen at whatever the very first activation
+                // happened to see would otherwise permanently strand this
+                // same, still-authorized device: `validate`/`deactivate`
+                // both reject on any mismatch against the stored value, so
+                // a stale row here would fail every later call for a
+                // legitimate reactivation that presents its current,
+                // truthful fingerprint.
+                sqlx::query(
+                    "UPDATE devices SET machine_fingerprint = $2, device_label = $3, \
+                            last_seen_at = now() WHERE id = $1",
+                )
+                .bind(existing.id)
+                .bind(machine_fingerprint)
+                .bind(device_label)
+                .execute(&mut *tx)
+                .await?;
                 tx.commit().await?;
                 return Ok(DeviceActivationOutcome::Activated);
             }
@@ -228,10 +247,16 @@ impl DeviceRepository for PgDeviceRepository {
                 return Ok(DeviceActivationOutcome::LimitReached(active));
             }
 
+            // Reactivating also re-syncs the stored fingerprint/label to
+            // this call's values, for the same reason as the idempotent
+            // refresh above.
             sqlx::query(
-                "UPDATE devices SET deactivated_at = NULL, last_seen_at = now() WHERE id = $1",
+                "UPDATE devices SET deactivated_at = NULL, machine_fingerprint = $2, \
+                        device_label = $3, last_seen_at = now() WHERE id = $1",
             )
             .bind(existing.id)
+            .bind(machine_fingerprint)
+            .bind(device_label)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;

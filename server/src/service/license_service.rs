@@ -783,6 +783,8 @@ mod tests {
             if let Some((id, was_deactivated)) = existing_match {
                 if !was_deactivated {
                     if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
+                        d.machine_fingerprint = machine_fingerprint.to_string();
+                        d.device_label = Some(device_label.to_string());
                         d.last_seen_at = Utc::now();
                     }
                     return Ok(DeviceActivationOutcome::Activated);
@@ -803,6 +805,8 @@ mod tests {
 
                 if let Some(d) = devices.iter_mut().find(|d| d.id == id) {
                     d.deactivated_at = None;
+                    d.machine_fingerprint = machine_fingerprint.to_string();
+                    d.device_label = Some(device_label.to_string());
                     d.last_seen_at = Utc::now();
                 }
                 return Ok(DeviceActivationOutcome::Activated);
@@ -1140,6 +1144,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.license.id, 1);
+    }
+
+    /// Regression test: `activate_device`'s reactivation path used to leave
+    /// `machine_fingerprint` frozen at whatever the row's very first
+    /// activation stored, never syncing it to what a later, legitimate
+    /// reactivation call presents. Since `validate` rejects on any
+    /// fingerprint mismatch against the stored value, that stale row
+    /// permanently locked out the same, still-authorized device the moment
+    /// its fingerprint naturally drifted (e.g. a renamed COMPUTERNAME/
+    /// USERNAME) — reactivating would silently "succeed" yet every
+    /// following `validate` call would then fail with `DeviceMismatch`.
+    #[tokio::test]
+    async fn activate_reactivating_a_deactivated_device_refreshes_its_stored_fingerprint() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let deactivated_device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "old-fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: Some(Utc::now()),
+        };
+        let service = service_with(
+            vec![license],
+            vec![deactivated_device],
+            vec![sample_subscription()],
+        );
+
+        service
+            .activate("TEST-KEY", device_id, "new-fp", "label")
+            .await
+            .unwrap();
+
+        // The reactivated device's fingerprint is now "new-fp" — a
+        // subsequent validate presenting that current fingerprint must
+        // succeed, and the stale "old-fp" must no longer match.
+        service
+            .validate(1, device_id, "new-fp", None)
+            .await
+            .expect("validate should succeed with the freshly-activated fingerprint");
+        let err = service
+            .validate(1, device_id, "old-fp", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceMismatch));
+    }
+
+    /// Same fix, other branch: an idempotent re-activate of an
+    /// already-active device must also re-sync the stored fingerprint, not
+    /// just `last_seen_at`.
+    #[tokio::test]
+    async fn activate_of_an_already_active_device_refreshes_its_stored_fingerprint() {
+        let device_id = Uuid::new_v4();
+        let license = sample_license(LicenseRecordStatus::Active, 1);
+        let existing_device = Device {
+            id: 1,
+            license_id: license.id,
+            device_id,
+            machine_fingerprint: "old-fp".to_string(),
+            device_label: None,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            deactivated_at: None,
+        };
+        let service = service_with(
+            vec![license],
+            vec![existing_device],
+            vec![sample_subscription()],
+        );
+
+        service
+            .activate("TEST-KEY", device_id, "new-fp", "label")
+            .await
+            .unwrap();
+
+        service
+            .validate(1, device_id, "new-fp", None)
+            .await
+            .expect("validate should succeed with the freshly-activated fingerprint");
+        let err = service
+            .validate(1, device_id, "old-fp", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LicenseOperationError::DeviceMismatch));
     }
 
     #[tokio::test]
