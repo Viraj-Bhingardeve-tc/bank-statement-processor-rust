@@ -1738,7 +1738,10 @@ mod tests {
         let service = service_with(vec![], vec![], vec![pending]);
 
         let outcome = service.subscription_summary(100).await.unwrap();
-        assert_eq!(outcome.subscription.status, SubscriptionStatus::PendingPayment);
+        assert_eq!(
+            outcome.subscription.status,
+            SubscriptionStatus::PendingPayment
+        );
         assert!(
             outcome.licenses.is_empty(),
             "no license exists yet before payment completes"
