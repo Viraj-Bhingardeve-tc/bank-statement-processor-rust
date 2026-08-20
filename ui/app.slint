@@ -7,13 +7,20 @@
 // login.slint's header) only touches the one cosmetic line below.
 
 import { LoginScreen } from "login.slint";
-import { MainScreen, TxnRow, BatchFileRow, SummaryListRow } from "main_screen.slint";
+import { MainScreen, TxnRow, BatchFileRow, SummaryListRow, AccountSummaryRow } from "main_screen.slint";
 import { DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 export component AppWindow inherits Window {
     title:            "A S Havaldar — Bank Statement Processor";
     preferred-width:  1440px;
-    preferred-height: 860px;
+    // 860px previously: on a 1366x768 screen the usable desktop height
+    // (after the OS taskbar) is typically ~720-730px, so an unmaximized
+    // launch at 860px opened taller than the visible screen — the footer
+    // (and sometimes the header) ended up below the screen edge, requiring
+    // the window to be dragged/resized to see them. Matches min-height so
+    // the default launch size always fits the smallest targeted desktop
+    // resolution without manual resizing; still freely resizable upward.
+    preferred-height: 720px;
     min-width:        1280px;
     min-height:       720px;
     background:       #F8FAFC;
@@ -54,6 +61,13 @@ export component AppWindow inherits Window {
     in property <string> dash-credits:    "₹ —";
     in property <string> dash-debits:     "₹ —";
     in property <string> dash-closing:    "₹ —";
+    // Symbol-free counterparts for the Figma-matched Summary panel — see
+    // main_screen.slint's matching declarations for why these are separate
+    // from the ₹-prefixed ones above (which DashboardScreen also uses).
+    in property <string> dash-opening-plain: "—";
+    in property <string> dash-credits-plain: "—";
+    in property <string> dash-debits-plain:  "—";
+    in property <string> dash-closing-plain: "—";
     in property <string> dash-txn-count:  "—";
     in property <string> dash-vendors:    "—";
 
@@ -69,9 +83,12 @@ export component AppWindow inherits Window {
     in property <string> dash-needs-review:  "0";
     in property <string> dash-duplicates:    "0";
     in property <string> dash-gst-count:     "0";
-    in property <string> dash-calc-closing:  "₹ —";
+    in property <string> dash-gst-txn-count: "0";
+    in property <string> dash-tax-txn-count: "0";
+    in property <string> dash-calc-closing:  "—";
     in property <bool>   dash-has-mismatch:  false;
     in property <string> dash-mismatch:      "";
+    in property <string> dash-diff:          "—";
 
     // ── Filter counts (set by Rust after parse) ───────────────────────────────
     in property <string> fc-all:        "0";
@@ -161,10 +178,10 @@ export component AppWindow inherits Window {
     in property <string> dash-cq-kw:   "0";
     in property <string> dash-gst-paid:       "₹ —";
     in property <string> dash-gst-recv:       "₹ —";
-    in property <[SummaryListRow]> dash-parties:     [];
-    in property <[SummaryListRow]> dash-per-account: [];
-    in property <[SummaryListRow]> dash-rec-ledgers: [];
-    in property <[SummaryListRow]> dash-pay-ledgers: [];
+    in property <[SummaryListRow]>    dash-parties:     [];
+    in property <[AccountSummaryRow]> dash-per-account: [];
+    in property <[SummaryListRow]>    dash-rec-ledgers: [];
+    in property <[SummaryListRow]>    dash-pay-ledgers: [];
 
     // ── Edit client fields ────────────────────────────────────────────────────
     in-out property <string> edit-client-name:   "";
@@ -389,6 +406,10 @@ export component AppWindow inherits Window {
         dash-credits:      root.dash-credits;
         dash-debits:       root.dash-debits;
         dash-closing:      root.dash-closing;
+        dash-opening-plain: root.dash-opening-plain;
+        dash-credits-plain: root.dash-credits-plain;
+        dash-debits-plain:  root.dash-debits-plain;
+        dash-closing-plain: root.dash-closing-plain;
         dash-txn-count:    root.dash-txn-count;
         dash-vendors:      root.dash-vendors;
 
@@ -403,9 +424,12 @@ export component AppWindow inherits Window {
         dash-needs-review: root.dash-needs-review;
         dash-duplicates:   root.dash-duplicates;
         dash-gst-count:    root.dash-gst-count;
+        dash-gst-txn-count: root.dash-gst-txn-count;
+        dash-tax-txn-count: root.dash-tax-txn-count;
         dash-calc-closing: root.dash-calc-closing;
         dash-has-mismatch: root.dash-has-mismatch;
         dash-mismatch:     root.dash-mismatch;
+        dash-diff:         root.dash-diff;
 
         dash-conf-hi-frac:   root.dash-conf-hi-frac;
         dash-conf-med-frac:  root.dash-conf-med-frac;

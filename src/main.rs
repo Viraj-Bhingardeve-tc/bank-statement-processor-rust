@@ -123,6 +123,19 @@ fn fmt_cell(v: Option<f64>) -> String {
     }
 }
 
+// Plain (no ₹ symbol) Indian-formatted amount, "—" for None — used by the
+// Summary panel's Figma-matched cards, which display amounts without a
+// currency prefix (the shared dash-opening/credits/debits/closing strings
+// keep their ₹ symbol as-is for the Dashboard screen, which still wants it;
+// these are separate, additive "-plain" values, not a reformat of those).
+#[cfg(feature = "slint-ui")]
+fn fmt_inr_dash(v: Option<f64>) -> String {
+    match v {
+        None => "\u{2014}".to_string(),
+        Some(n) => ui::fmt_inr(n),
+    }
+}
+
 #[cfg(feature = "slint-ui")]
 fn audit_now() -> String {
     let secs = std::time::SystemTime::now()
@@ -535,11 +548,19 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
     h.set_dash_has_data(s.txn_count > 0);
     h.set_dash_opening(SharedString::from(fmt_amt(s.opening_bal).as_str()));
     h.set_dash_closing(SharedString::from(fmt_amt(s.closing_bal).as_str()));
-    // dash-suspense shows a ₹ amount (sum of suspense-txn amounts), not a row
-    // count — matches old app's Suspense summary card (app.js:2179-2183),
-    // which reads "Amount in suspense: ₹X", not a transaction count.
+    // Symbol-free counterparts for the redesigned Summary panel — see
+    // fmt_inr_dash's doc comment; dash-opening/credits/debits/closing above
+    // stay ₹-prefixed for DashboardScreen, which also binds to them.
+    h.set_dash_opening_plain(SharedString::from(fmt_inr_dash(s.opening_bal).as_str()));
+    h.set_dash_closing_plain(SharedString::from(fmt_inr_dash(s.closing_bal).as_str()));
+    h.set_dash_credits_plain(SharedString::from(ui::fmt_inr(s.total_credit).as_str()));
+    h.set_dash_debits_plain(SharedString::from(ui::fmt_inr(s.total_debit).as_str()));
+    // dash-suspense shows a plain (Summary-panel-only, no ₹ prefix) amount
+    // (sum of suspense-txn amounts), not a row count — matches old app's
+    // Suspense summary card (app.js:2179-2183), which reads "Amount in
+    // suspense: ₹X", not a transaction count.
     h.set_dash_suspense(SharedString::from(
-        fmt_amt(Some(s.suspense_amount)).as_str(),
+        fmt_inr_dash(Some(s.suspense_amount)).as_str(),
     ));
     h.set_dash_has_suspense(s.suspense_amount > 0.0);
     h.set_dash_needs_review(SharedString::from(
@@ -547,6 +568,20 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
     ));
     h.set_dash_duplicates(SharedString::from(s.duplicate_count.to_string().as_str()));
     h.set_dash_gst_count(SharedString::from(s.gst_count.to_string().as_str()));
+    // Keep the Summary panel's pending-classification banner (status ===
+    // 'unreviewed' count, matching app.js's `pending`) fresh on every
+    // dashboard refresh — apply_parse_result() only sets this once at
+    // initial parse, but push_dashboard() runs after every subsequent
+    // reclassify/batch-load/filter update, so binding the banner to a
+    // value only refreshed here would otherwise go stale.
+    let unreviewed_cnt = txns
+        .iter()
+        .filter(|t| {
+            !t.is_opening_balance
+                && matches!(t.status, parser::TransactionStatus::Unreviewed)
+        })
+        .count();
+    h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
 
     // Insights
     let ins = &data.insights;
@@ -734,7 +769,7 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
             slint::VecModel::<SummaryListRow>::from(vec![]),
         ));
         h.set_dash_per_account(slint::ModelRc::new(
-            slint::VecModel::<SummaryListRow>::from(vec![]),
+            slint::VecModel::<AccountSummaryRow>::from(vec![]),
         ));
         h.set_dash_rec_ledgers(slint::ModelRc::new(
             slint::VecModel::<SummaryListRow>::from(vec![]),
@@ -798,11 +833,25 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
     let gst_paid: f64 = gst_txns.iter().filter_map(|t| t.debit).sum();
     let gst_recv: f64 = gst_txns.iter().filter_map(|t| t.credit).sum();
     h.set_dash_gst_paid(SharedString::from(
-        ui::AppState::fmt_amount(if gst_paid > 0.0 { Some(gst_paid) } else { None }).as_str(),
+        fmt_inr_dash(if gst_paid > 0.0 { Some(gst_paid) } else { None }).as_str(),
     ));
     h.set_dash_gst_recv(SharedString::from(
-        ui::AppState::fmt_amount(if gst_recv > 0.0 { Some(gst_recv) } else { None }).as_str(),
+        fmt_inr_dash(if gst_recv > 0.0 { Some(gst_recv) } else { None }).as_str(),
     ));
+    // GST-tag-only / TAX-tag-only counts for the GST/Tax card's two separate
+    // "GST Transactions" / "Tax Transactions" rows (app.js: gstTxns.length /
+    // taxTxns.length) — distinct from dash-gst-count, which stays the
+    // combined GST+TAX count the stat tile uses.
+    let gst_only_cnt = real
+        .iter()
+        .filter(|t| t.tags.iter().any(|g| g.to_uppercase() == "GST"))
+        .count();
+    let tax_only_cnt = real
+        .iter()
+        .filter(|t| t.tags.iter().any(|g| g.to_uppercase() == "TAX"))
+        .count();
+    h.set_dash_gst_txn_count(SharedString::from(gst_only_cnt.to_string().as_str()));
+    h.set_dash_tax_txn_count(SharedString::from(tax_only_cnt.to_string().as_str()));
 
     // ── Recurring parties (top 6 by count) ───────────────────────────────────
     let mut party_map: HashMap<String, (usize, f64)> = HashMap::new();
@@ -830,7 +879,12 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
             };
             SummaryListRow {
                 lbl: SharedString::from(nm.as_str()),
-                val: SharedString::from(format!("{}×  ₹{}", cnt, ui::fmt_inr(*amt)).as_str()),
+                // Figma reference splits the frequency ("144×") from the
+                // amount so they can be styled differently (muted count,
+                // bold amount) — count and val are separate fields for that;
+                // the underlying data (cnt, amt) is unchanged.
+                count: SharedString::from(format!("{}\u{d7}", cnt).as_str()),
+                val: SharedString::from(ui::fmt_inr(*amt).as_str()),
                 is_debit: false,
                 key: SharedString::from(name.as_str()),
             }
@@ -846,7 +900,12 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
             acc_order.push(key);
         }
     }
-    let account_rows: Vec<SummaryListRow> = acc_order
+    // Per Account row: bank/account header (lbl, clickable) + Opening /
+    // Closing / Transactions as three separate sub-rows, matching the old
+    // app's acc-row markup exactly (app.js:2140-2149) — each field is left
+    // "" (hidden in the .slint template) when its source guard
+    // (`!== null` / `> 0`) would have skipped that sub-row.
+    let account_rows: Vec<AccountSummaryRow> = acc_order
         .iter()
         .map(|(bank, acct)| {
             let acc_txns: Vec<&parser::Transaction> = txns
@@ -867,18 +926,19 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" · ");
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(ob) = opening {
-                parts.push(format!("Open ₹{}", ui::fmt_inr(ob)));
-            }
-            if let Some(cb) = closing {
-                parts.push(format!("Close ₹{}", ui::fmt_inr(cb)));
-            }
-            parts.push(format!("{} txns", non_ob.len()));
-            SummaryListRow {
+            AccountSummaryRow {
                 lbl: SharedString::from(label.as_str()),
-                val: SharedString::from(parts.join("  ·  ").as_str()),
-                is_debit: false,
+                opening: SharedString::from(
+                    opening.map(ui::fmt_inr).unwrap_or_default().as_str(),
+                ),
+                closing: SharedString::from(
+                    closing.map(ui::fmt_inr).unwrap_or_default().as_str(),
+                ),
+                txns: SharedString::from(if non_ob.is_empty() {
+                    String::new()
+                } else {
+                    non_ob.len().to_string()
+                }.as_str()),
                 key: SharedString::from(bank.as_str()),
             }
         })
@@ -912,7 +972,8 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
                 };
                 SummaryListRow {
                     lbl: SharedString::from(nm.as_str()),
-                    val: SharedString::from(format!("₹{}", ui::fmt_inr(*amt)).as_str()),
+                    val: SharedString::from(ui::fmt_inr(*amt).as_str()),
+                    count: SharedString::from(""),
                     is_debit: false,
                     key: SharedString::from(k.as_str()),
                 }
@@ -1155,6 +1216,14 @@ fn apply_parse_result(
     } else {
         String::new()
     };
+    // Difference row for the Summary panel's Reconciliation section — same
+    // (stated - calc) magnitude as mismatch_str above, always populated
+    // (not just when has_mismatch) so the row reads "₹0.00" once reconciled
+    // instead of a blank/em-dash.
+    let diff_amt: Option<f64> = match (result.closing_balance, calc_closing) {
+        (Some(stated), Some(calc)) => Some((stated - calc).abs()),
+        _ => None,
+    };
 
     log::info!(
         "Summary: bank='{}' txns={} dr={:.2} cr={:.2} ob={:?} cb={:?}",
@@ -1335,6 +1404,18 @@ fn apply_parse_result(
     h.set_dash_debits(SharedString::from(
         ui::AppState::fmt_amount(Some(total_dr)).as_str(),
     ));
+    // Symbol-free counterparts for the redesigned Summary panel (Figma
+    // reference shows amounts without a ₹ prefix) — dash-opening/credits/
+    // debits/closing above are left untouched since DashboardScreen also
+    // binds to them and keeps its ₹ symbol.
+    h.set_dash_opening_plain(SharedString::from(
+        fmt_inr_dash(result.opening_balance).as_str(),
+    ));
+    h.set_dash_closing_plain(SharedString::from(
+        fmt_inr_dash(result.closing_balance).as_str(),
+    ));
+    h.set_dash_credits_plain(SharedString::from(ui::fmt_inr(total_cr).as_str()));
+    h.set_dash_debits_plain(SharedString::from(ui::fmt_inr(total_dr).as_str()));
     h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
     h.set_dash_vendors(SharedString::from("\u{2014}"));
     h.set_dash_account_no(SharedString::from(result.account_no.as_str()));
@@ -1344,11 +1425,10 @@ fn apply_parse_result(
     h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
     // suspense/needs_review/duplicates/gst counts are set by push_dashboard() below,
     // which recomputes them live from analytics::compute() on every dashboard refresh.
-    h.set_dash_calc_closing(SharedString::from(
-        ui::AppState::fmt_amount(calc_closing).as_str(),
-    ));
+    h.set_dash_calc_closing(SharedString::from(fmt_inr_dash(calc_closing).as_str()));
     h.set_dash_has_mismatch(has_mismatch);
     h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
+    h.set_dash_diff(SharedString::from(fmt_inr_dash(diff_amt).as_str()));
     push_summary_extras(h, &result.transactions);
 
     let import_id_persisted: Option<i64> = {
@@ -1811,6 +1891,8 @@ fn finish_batch(
     h.set_dash_credits(SharedString::from(
         ui::AppState::fmt_amount(Some(total_cr)).as_str(),
     ));
+    h.set_dash_credits_plain(SharedString::from(ui::fmt_inr(total_cr).as_str()));
+    h.set_dash_debits_plain(SharedString::from(ui::fmt_inr(total_dr).as_str()));
     h.set_dash_debits(SharedString::from(
         ui::AppState::fmt_amount(Some(total_dr)).as_str(),
     ));
@@ -2796,6 +2878,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 h.set_dash_credits(SharedString::from(
                     ui::AppState::fmt_amount(Some(total_cr)).as_str(),
                 ));
+                h.set_dash_credits_plain(SharedString::from(ui::fmt_inr(total_cr).as_str()));
+                h.set_dash_debits_plain(SharedString::from(ui::fmt_inr(total_dr).as_str()));
                 h.set_dash_debits(SharedString::from(
                     ui::AppState::fmt_amount(Some(total_dr)).as_str(),
                 ));

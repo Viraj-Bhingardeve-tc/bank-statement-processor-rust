@@ -18,11 +18,28 @@ export struct BatchFileRow {
 }
 
 // ── Generic summary list row (label + value, optional color hint) ─────────────
+// `count` is an optional secondary value (e.g. "144×" for Recurring
+// Parties) shown muted/smaller ahead of `val` — empty string when a row
+// doesn't use it (per-account, ledger breakdowns).
 export struct SummaryListRow {
     lbl:      string,
     val:      string,
+    count:    string,
     is-debit: bool,
     key:      string,
+}
+
+// ── Per-account Summary row (bank/account header + opening/closing/txns) ──────
+// Matches the old app's Per Account card (app.js acc-row): a bold, clickable
+// bank/account header line, followed by up to three plain sub-rows. Fields
+// are "" when the source app's `if (... !== null)` / `if (txnCount > 0)`
+// guard would have skipped that sub-row entirely.
+export struct AccountSummaryRow {
+    lbl:     string,
+    opening: string,
+    closing: string,
+    txns:    string,
+    key:     string,
 }
 
 // ── Transaction row data struct ────────────────────────────────────────────────
@@ -58,6 +75,12 @@ component TBtn inherits Rectangle {
     in property <int>    fw:      500;   // font-weight override (btn-ai needs 700)
     callback clicked();
 
+    // Balanced 4-sided padding (UI fix, 2026-08-20): width used to be
+    // driven only by a flat 58px min-width with no padding concept at
+    // all, so left/right breathing room didn't match the ~7px top/bottom
+    // gap the fixed 28px height leaves around the 12px label. A real
+    // HorizontalBox with equal padding on every side now guarantees the
+    // two match, via Slint's layout engine rather than a width guess.
     height: 28px; min-width: 58px;
     background:    root.enabled ? root.bg : #FFFFFF28;
     border-radius: 4px;
@@ -73,10 +96,15 @@ component TBtn inherits Rectangle {
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
     }
-    Text {
-        text: root.text; font-size: 12px; font-weight: root.fw;
-        color: root.enabled ? root.fg : root.fg;
-        horizontal-alignment: center; vertical-alignment: center;
+    HorizontalBox {
+        padding-left: 7px; padding-right: 7px;
+        padding-top: 7px; padding-bottom: 7px;
+        alignment: center;
+        Text {
+            text: root.text; font-size: 12px; font-weight: root.fw;
+            color: root.enabled ? root.fg : root.fg;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
     }
 }
 
@@ -120,7 +148,11 @@ component FBtn inherits Rectangle {
     in property <color>  i-fg:     #555555;
     callback clicked();
 
-    height: 22px; min-width: 50px;
+    // 26px height matches the 26px group-divider bars either side of this
+    // row (UI fix, 2026-08-20); padding is now 6px balanced on all four
+    // sides (was 7px left/right, 0px top/bottom) so every tab has the
+    // same breathing room and none reads taller/shorter than the rest.
+    height: 26px; min-width: 50px;
     background:    root.active ? root.a-bg : #FFFFFF;
     border-radius: 3px;
     border-width:  1px;
@@ -131,20 +163,24 @@ component FBtn inherits Rectangle {
 
     TouchArea { clicked => { root.clicked(); } }
     HorizontalBox {
-        padding-left: 7px; padding-right: 7px;
-        padding-top: 0px; padding-bottom: 0px;
-        spacing: 3px; alignment: center;
+        padding-left: 6px; padding-right: 6px;
+        padding-top: 6px; padding-bottom: 6px;
+        spacing: 5px; alignment: center;
         Text {
             text: root.label; font-size: 11px;
             color: root.active ? root.a-fg : root.i-fg;
             vertical-alignment: center;
         }
         // count badge: inactive=rgba(0,0,0,.15)=#00000026, active=rgba(255,255,255,.28)=#FFFFFF47
+        // Explicit width (text + 5px each side, UI fix 2026-08-20) so the
+        // digit(s) sit centered with real breathing room instead of
+        // touching the pill edge whenever the text is wider than the old
+        // 20px floor.
         if root.count != "" : Rectangle {
-            height: 16px; min-width: 20px;
+            height: 16px; width: max(20px, cnt.preferred-width + 10px);
             background:    root.active ? #FFFFFF47 : #00000026;
             border-radius: 8px;
-            Text {
+            cnt := Text {
                 text: root.count; font-size: 9px; font-weight: 800;
                 color: root.active ? white : #37474F;
                 horizontal-alignment: center; vertical-alignment: center;
@@ -190,6 +226,10 @@ component FootBtn inherits Rectangle {
     in property <color>  fg:         #0A1929;
     callback clicked();
 
+    // Balanced 4-sided padding (UI fix, 2026-08-20) — same treatment as
+    // TBtn above: a real HorizontalBox gives left/right the same 7px the
+    // fixed 28px height already leaves top/bottom, instead of sizing
+    // purely off a flat min-width.
     height: 28px; min-width: 82px;
     background:    root.enabled ? root.bg : #F5F5F5;
     border-radius: 4px;
@@ -205,29 +245,53 @@ component FootBtn inherits Rectangle {
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
     }
-    Text {
-        text: root.text; font-size: 12px; font-weight: 500;
-        color: root.enabled ? root.fg : #BDBDBD;
-        horizontal-alignment: center; vertical-alignment: center;
+    HorizontalBox {
+        padding-left: 7px; padding-right: 7px;
+        padding-top: 7px; padding-bottom: 7px;
+        alignment: center;
+        Text {
+            text: root.text; font-size: 12px; font-weight: 500;
+            color: root.enabled ? root.fg : #BDBDBD;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
     }
 }
 
 // ── Summary label / value row ──────────────────────────────────────────────────
+// Matches the old app's `.sr` row. Clickable rows (`.sum-link` in the
+// original) get a thin underline traced under just the label's own text
+// width (via lblt.preferred-width) — Slint's Text has no native
+// text-decoration, so a solid 1px Rectangle approximates the original's
+// `text-decoration: underline dotted`.
 component SR inherits Rectangle {
-    in property <string> lbl:  "";
-    in property <string> val:  "\u{2014}";
-    in property <color>  vcol: #37474F;
+    in property <string> lbl:      "";
+    in property <string> val:      "\u{2014}";
+    in property <color>  vcol:     #37474F;
+    in property <color>  lcol:     #607D8B;
+    in property <length> lsize:    12px;
+    in property <length> pad-left: 0px;
+    in property <bool>   underline: false;
     in property <bool>   clickable: false;
     callback clicked();
     height: 18px;
     HorizontalLayout {
-        padding: 0px; spacing: 0px; width: parent.width; height: parent.height;
-        Text {
-            text: root.lbl; font-size: 12px; color: #607D8B;
-            horizontal-stretch: 1; vertical-alignment: center;
+        padding-left: root.pad-left; padding-right: 0px; padding-top: 0px; padding-bottom: 0px;
+        spacing: 0px; width: parent.width; height: parent.height;
+        Rectangle {
+            horizontal-stretch: 1; height: parent.height; clip: true;
+            lblt := Text {
+                x: 0; width: parent.width;
+                text: root.lbl; font-size: root.lsize; color: root.lcol;
+                vertical-alignment: center; overflow: elide;
+            }
+            if root.underline : Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: min(lblt.preferred-width, parent.width); height: 1px;
+                background: root.lcol;
+            }
         }
         Text {
-            text: root.val; font-size: 12px; font-weight: 600;
+            text: root.val; font-size: 12px; font-weight: 700;
             color: root.vcol; horizontal-alignment: right; vertical-alignment: center;
         }
     }
@@ -238,32 +302,120 @@ component SR inherits Rectangle {
     }
 }
 
-// ── Summary section title ──────────────────────────────────────────────────────
-// Original .sec-title: margin-top:11px; margin-bottom:3px; font-size:10px; font-weight:700; color:#1565C0; letter-spacing:.6px
-component SDivider inherits VerticalBox {
-    in property <string> title: "";
-    padding: 0px; spacing: 3px; height: 24px;
-    Rectangle { height: 1px; background: #BBDEFB; }
-    Text {
-        text: root.title; font-size: 10px; font-weight: 700;
-        color: #1565C0; letter-spacing: 0.6px;
+// ── Summary section card ─────────────────────────────────────────────────────
+// Matches the old app's `.sum-card` / `.sum-card-title` exactly: white card,
+// #BBDEFB border, 6px radius, blue uppercase title with a thin #E3F2FD
+// underline beneath it. `show-title: false` skips the built-in title Text
+// so a card can build its own header row instead (GST/TAX and Duplicates
+// Detected prefix their titles with small colored tag chips).
+component SCard inherits Rectangle {
+    in property <string> title:      "";
+    in property <color>  title-color: #1565C0;
+    in property <bool>   show-title:  true;
+    background: white;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #BBDEFB;
+    VerticalBox {
+        padding-left: 10px; padding-right: 10px;
+        padding-top: 8px; padding-bottom: 8px;
+        spacing: 6px;
+        if root.show-title : VerticalBox {
+            padding: 0px; padding-bottom: 4px; spacing: 0px;
+            Text {
+                text: root.title; font-size: 10px; font-weight: 800;
+                color: root.title-color; letter-spacing: 0.6px;
+            }
+            Rectangle { height: 1px; background: #E3F2FD; }
+        }
+        @children
+    }
+}
+
+// ── Small colored tag chip (GST/TAX/DUP) ─────────────────────────────────────
+// Matches the old app's `.txn-tag` badges used as a prefix on the GST/Tax and
+// Duplicates Detected card titles.
+component TagChip inherits Rectangle {
+    in property <string> label: "";
+    in property <color>  bg: #ECEFF1;
+    in property <color>  fg: #555555;
+    in property <color>  bc: #BBBBBB;
+    height: 14px; width: t.preferred-width + 12px;
+    background: root.bg; border-radius: 3px; border-width: 1px; border-color: root.bc;
+    t := Text {
+        text: root.label; font-size: 8px; font-weight: 800; letter-spacing: 0.4px;
+        color: root.fg; horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// ── Summary list row (label + optional count + amount) ──────────────────────
+// Used inside Recurring Parties / Receipts by Ledger / Payments by Ledger
+// cards — matches the old app's `.sr` + `.sum-link` markup for those three
+// lists exactly: label is always the underlined/clickable part (dark,
+// #0A1929), and `count` (e.g. "144×") + `val` render as one plain grey
+// trailing string for Recurring Parties, or `val` alone styled per-category
+// (`vcol`/`vweight`) for the ledger breakdowns.
+component SListRow inherits Rectangle {
+    in property <string> lbl:     "";
+    in property <string> count:   "";
+    in property <string> val:     "";
+    in property <color>  vcol:    #0A1929;
+    in property <int>    vweight: 700;
+    callback clicked();
+    height: 20px;
+    HorizontalLayout {
+        padding: 0px; spacing: 6px; width: parent.width; height: parent.height;
+        Rectangle {
+            horizontal-stretch: 1; height: parent.height; clip: true;
+            lblt := Text {
+                x: 0; width: parent.width;
+                text: root.lbl; font-size: 12px; color: #0A1929;
+                vertical-alignment: center; overflow: elide;
+            }
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: min(lblt.preferred-width, parent.width); height: 1px;
+                background: #90A4AE;
+            }
+        }
+        Text {
+            text: root.count != "" ? root.count + "  " + root.val : root.val;
+            font-size: root.count != "" ? 11px : 12px;
+            font-weight: root.vweight;
+            color: root.vcol; vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
 // ── Modal action button ────────────────────────────────────────────────────────
 // Original .btn: padding:5px 11px; font-size:12px; border-radius:4px; height≈27px
+// Balanced 4-sided padding (UI fix): same treatment as TBtn/FootBtn/FBtn in the
+// toolbar/footer — a real HorizontalBox gives left/right the same 7px the fixed
+// 28px height already leaves top/bottom, instead of sizing purely off a flat
+// min-width (which left left/right breathing room that didn't match top/bottom
+// whenever the label was shorter than the min-width floor).
 component MBtn inherits Rectangle {
-    in property <string> text:    "";
-    in property <color>  bg:      #1565C0;
-    in property <color>  fg:      white;
-    in property <bool>   enabled: true;
+    in property <string> text:       "";
+    in property <color>  bg:         #1565C0;
+    in property <color>  fg:         white;
+    in property <bool>   enabled:    true;
+    // Opt-in outline border for enabled state (e.g. "Change Plan"'s white/blue
+    // outline button) — independent of the disabled-state border below, which
+    // always applies regardless of these two.
+    in property <length> border-w:   0px;
+    in property <color>  border-clr: #D0D0D0;
     callback clicked();
 
     height: 28px; min-width: 80px;
     background:    root.enabled ? root.bg : #F5F5F5;
     border-radius: 4px;
-    border-width:  root.enabled ? 0px : 1px;
-    border-color:  #D0D0D0;
+    border-width:  root.enabled ? root.border-w : 1px;
+    border-color:  root.enabled ? root.border-clr : #D0D0D0;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -273,10 +425,15 @@ component MBtn inherits Rectangle {
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
     }
-    Text {
-        text: root.text; font-size: 12px;
-        color: root.enabled ? root.fg : #BDBDBD;
-        horizontal-alignment: center; vertical-alignment: center;
+    HorizontalBox {
+        padding-left: 7px; padding-right: 7px;
+        padding-top: 7px; padding-bottom: 7px;
+        alignment: center;
+        Text {
+            text: root.text; font-size: 12px; font-weight: 500;
+            color: root.enabled ? root.fg : #BDBDBD;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
     }
 }
 
@@ -299,13 +456,24 @@ component MHdr inherits Rectangle {
             text: root.title; font-size: 15px; font-weight: 700;
             color: #0A1929; vertical-alignment: center; horizontal-stretch: 1;
         }
+        // Close (×) button — a real circular button (hover/press-tinted
+        // background + darkening glyph), not plain clickable text, so it
+        // reads as a proper UI control and gives clear pointer feedback.
         Rectangle {
-            width: 28px; height: 28px; border-radius: 14px; background: transparent;
+            width: 28px; height: 28px; border-radius: 14px;
+            background: closeTa.pressed ? #E0E0E0 : closeTa.has-hover ? #F0F0F0 : transparent;
             accessible-role: button;
             accessible-label: "Close";
-            TouchArea { clicked => { root.close(); } }
+            closeTa := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
             Text {
-                text: "\u{2715}"; font-size: 22px; color: #AAAAAA;
+                // U+2715 ("✕ MULTIPLICATION X") renders as a missing-glyph
+                // tofu box on this app's default font (verified visually,
+                // 2026-08-21) — the font has no coverage for it. U+00D7
+                // (the plain "×" multiplication sign) is in Latin-1
+                // Supplement, which every font here covers, and reads
+                // identically as a close icon.
+                text: "\u{00D7}"; font-size: 16px; font-weight: 700;
+                color: closeTa.has-hover ? #37474F : #90A4AE;
                 horizontal-alignment: center; vertical-alignment: center;
             }
         }
@@ -329,80 +497,107 @@ component MFtr inherits Rectangle {
     }
 }
 
+// ── Small in-row danger chip button (Remove / Delete) ──────────────────────────
+// Used for the small per-row actions inside list-style modal bodies (Import
+// History's "Remove", Learned Rules' "Delete") — same balanced-padding /
+// content-driven-width treatment as MBtn, just sized down to fit a dense row.
+component MChipBtn inherits Rectangle {
+    in property <string> text: "";
+    callback clicked();
+    height: 20px; border-radius: 4px;
+    background: chipTa.pressed ? #F8BBD0 : chipTa.has-hover ? #FDE0E7 : #FFEBEE;
+    border-width: 1px; border-color: #EF9A9A;
+    accessible-role: button;
+    accessible-label: root.text;
+    chipTa := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    HorizontalBox {
+        padding-left: 8px; padding-right: 8px;
+        padding-top: 4px; padding-bottom: 4px;
+        alignment: center;
+        Text {
+            text: root.text; font-size: 9px; font-weight: 700; color: #C62828;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+}
+
 // ── Transaction table header ───────────────────────────────────────────────────
 // Original: thead { background:#1565C0; } th { padding:7px 9px; font-weight:600; white-space:nowrap; border-right:1px solid #1976D2; }
 // Generated columns have font-style:italic. Debit header color:#FFCDD2, Credit:#C8E6C9
 component TxnHeader inherits Rectangle {
-    height: 32px; background: #1565C0;
+    // UI refinement pass: 32px -> 36px (approx. 8-10px header padding
+    // around the 12px text), column dividers recentered from y:8 to y:10
+    // to stay vertically centered in the taller row.
+    height: 36px; background: #1565C0;
     accessible-role: table;
     accessible-label: "Transactions table header";
-    Rectangle { y: 31px; height: 1px; background: #1976D2; }
+    Rectangle { y: 35px; height: 1px; background: #1976D2; }
 
     HorizontalBox {
         padding: 0px; spacing: 0px;
         // Bank Name 90px (raw)
         Rectangle { width: 90px; clip: true;
-            Rectangle { x: 89px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 89px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 72px; height: parent.height; text: "Bank Name"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Account No 90px (raw)
         Rectangle { width: 90px; clip: true;
-            Rectangle { x: 89px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 89px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 72px; height: parent.height; text: "Account No"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Date 82px (raw)
         Rectangle { width: 82px; clip: true;
-            Rectangle { x: 81px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 81px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 64px; height: parent.height; text: "Date"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Narration stretch (raw)
         Rectangle { horizontal-stretch: 1; clip: true;
-            Rectangle { x: parent.width - 1px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: parent.width - 1px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: parent.width - 18px; height: parent.height; text: "Narration"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Ref 95px (raw)
         Rectangle { width: 95px; clip: true;
-            Rectangle { x: 94px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 94px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 77px; height: parent.height; text: "Ref"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Debit 92px (raw) — pink tint header
         Rectangle { width: 92px; clip: true;
-            Rectangle { x: 91px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
-            Text { x: 0px; width: 83px; height: parent.height; text: "Debit"; font-size: 12px; font-weight: 600; color: #FFCDD2; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+            Rectangle { x: 91px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 84px; height: parent.height; text: "Debit"; font-size: 12px; font-weight: 600; color: #FFCDD2; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
         }
         // Credit 92px (raw) — green tint header
         Rectangle { width: 92px; clip: true;
-            Rectangle { x: 91px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
-            Text { x: 0px; width: 83px; height: parent.height; text: "Credit"; font-size: 12px; font-weight: 600; color: #C8E6C9; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+            Rectangle { x: 91px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 84px; height: parent.height; text: "Credit"; font-size: 12px; font-weight: 600; color: #C8E6C9; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
         }
         // Balance 100px (raw)
         Rectangle { width: 100px; clip: true;
-            Rectangle { x: 99px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
-            Text { x: 0px; width: 91px; height: parent.height; text: "Balance"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
+            Rectangle { x: 99px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
+            Text { x: 0px; width: 92px; height: parent.height; text: "Balance"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; horizontal-alignment: right; vertical-alignment: center; }
         }
         // Vendor/Customer 120px (generated — italic)
         Rectangle { width: 120px; clip: true;
-            Rectangle { x: 119px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 119px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 102px; height: parent.height; text: "Vendor/Customer"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Ledger for Posting 120px (generated — italic)
         Rectangle { width: 120px; clip: true;
-            Rectangle { x: 119px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 119px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 102px; height: parent.height; text: "Ledger for Posting"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
         }
         // Expense Head 100px (generated — italic)
         Rectangle { width: 100px; clip: true;
-            Rectangle { x: 99px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 99px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 82px; height: parent.height; text: "Expense Head"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
         }
         // Type/Status 75px (generated — italic)
         Rectangle { width: 75px; clip: true;
-            Rectangle { x: 74px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 74px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 57px; height: parent.height; text: "Type/Status"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; overflow: elide; }
         }
         // Tags 80px (generated — italic, min-width:80px in original)
         Rectangle { width: 80px; clip: true;
-            Rectangle { x: 79px; y: 8px; width: 1px; height: 16px; background: #1976D2; }
+            Rectangle { x: 79px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 62px; height: parent.height; text: "Tags"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Review 60px (generated — italic)
@@ -419,7 +614,10 @@ component TxnTableRow inherits Rectangle {
     in property <bool>   compact: false;
     callback clicked(int);
 
-    height: root.compact ? 22px : 26px;
+    // UI refinement pass: 26px -> 30px (normal) / 22px -> 24px (compact),
+    // and the 6px text inset below bumped to 8px, for readability per the
+    // spacing spec's row/column padding target.
+    height: root.compact ? 24px : 30px;
     background:
         root.data.row-color == 1 ? #E8F5E9 :
         root.data.row-color == 2 ? #FFFDE7 :
@@ -448,37 +646,37 @@ component TxnTableRow inherits Rectangle {
 
         // Bank Name 90px (matches header)
         Rectangle { width: 90px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.bank-name; font-size: 11px; color: #555555;
                    vertical-alignment: center; overflow: elide; }
         }
         // Account No 90px (matches header)
         Rectangle { width: 90px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.account-no; font-size: 11px; color: #555555;
                    vertical-alignment: center; overflow: elide; }
         }
         // Date 82px
         Rectangle { width: 82px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.date; font-size: 12px; color: #0A1929;
                    vertical-alignment: center; overflow: elide; }
         }
         // Narration stretch
         Rectangle { horizontal-stretch: 1; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.narration; font-size: 12px; color: #0A1929;
                    vertical-alignment: center; overflow: elide; }
         }
         // Ref 95px
         Rectangle { width: 95px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.ref-no; font-size: 11px; color: #546E7A;
                    vertical-alignment: center; overflow: elide; }
         }
         // Debit 92px right-aligned red
         Rectangle { width: 92px; clip: true;
-            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+            Text { x: 0px; width: parent.width - 8px; height: parent.height;
                    text: root.data.debit;
                    font-size: 12px; font-weight: root.data.debit != "" ? 600 : 400;
                    color: root.data.debit != "" ? #B71C1C : #CCCCCC;
@@ -486,7 +684,7 @@ component TxnTableRow inherits Rectangle {
         }
         // Credit 92px right-aligned green
         Rectangle { width: 92px; clip: true;
-            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+            Text { x: 0px; width: parent.width - 8px; height: parent.height;
                    text: root.data.credit;
                    font-size: 12px; font-weight: root.data.credit != "" ? 600 : 400;
                    color: root.data.credit != "" ? #1B5E20 : #CCCCCC;
@@ -494,26 +692,26 @@ component TxnTableRow inherits Rectangle {
         }
         // Balance 100px right-aligned blue
         Rectangle { width: 100px; clip: true;
-            Text { x: 0px; width: parent.width - 9px; height: parent.height;
+            Text { x: 0px; width: parent.width - 8px; height: parent.height;
                    text: root.data.balance; font-size: 12px; font-weight: 600;
                    color: #0D47A1;
                    horizontal-alignment: right; vertical-alignment: center; }
         }
         // Vendor 120px
         Rectangle { width: 120px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.vendor; font-size: 12px; color: #0D47A1; font-weight: 600;
                    vertical-alignment: center; overflow: elide; }
         }
         // Ledger 120px
         Rectangle { width: 120px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.ledger; font-size: 12px; color: #0D47A1; font-weight: 600;
                    vertical-alignment: center; overflow: elide; }
         }
         // Expense Head 100px
         Rectangle { width: 100px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.expense-head; font-size: 11px; color: #455A64;
                    vertical-alignment: center; overflow: elide; }
         }
@@ -588,7 +786,7 @@ component TxnTableRow inherits Rectangle {
         // Review 60px (original: .review-ok #2e7d32 checkmark, .review-reason
         // #bf360c failure text — two colors, not one flat grey)
         Rectangle { width: 60px; clip: true;
-            Text { x: 6px; width: parent.width - 12px; height: parent.height;
+            Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.review; font-size: 11px;
                    color: root.data.review == "\u{2713}" ? #2E7D32
                         : root.data.review == "" ? #546E7A
@@ -679,6 +877,13 @@ export component MainScreen inherits Rectangle {
     in property <string> dash-credits:      "\u{20B9} \u{2014}";
     in property <string> dash-debits:       "\u{20B9} \u{2014}";
     in property <string> dash-closing:      "\u{20B9} \u{2014}";
+    // Symbol-free counterparts of the four above, for the Figma-matched
+    // Summary panel (which displays amounts without a ₹ prefix). The
+    // ₹-prefixed originals above are unchanged and still feed DashboardScreen.
+    in property <string> dash-opening-plain: "\u{2014}";
+    in property <string> dash-credits-plain: "\u{2014}";
+    in property <string> dash-debits-plain:  "\u{2014}";
+    in property <string> dash-closing-plain: "\u{2014}";
     in property <string> dash-txn-count:    "\u{2014}";
     in property <string> dash-vendors:      "\u{2014}";
     in property <string> dash-client-name:  "";
@@ -692,9 +897,15 @@ export component MainScreen inherits Rectangle {
     in property <string> dash-needs-review: "0";
     in property <string> dash-duplicates:   "0";
     in property <string> dash-gst-count:    "0";
-    in property <string> dash-calc-closing: "\u{20B9} \u{2014}";
+    // GST/TAX-tag-only breakdown for the GST/Tax card's two sum-link rows
+    // (dash-gst-count above stays the combined GST+TAX count used by the
+    // stat tile, matching app.js's gstTxns.length + taxTxns.length).
+    in property <string> dash-gst-txn-count: "0";
+    in property <string> dash-tax-txn-count: "0";
+    in property <string> dash-calc-closing: "\u{2014}";
     in property <bool>   dash-has-mismatch: false;
     in property <string> dash-mismatch:     "";
+    in property <string> dash-diff:         "\u{2014}";
 
     // ── Dashboard chart data ──────────────────────────────────────────────────
     in property <string> dash-net-flow:       "₹ —";
@@ -737,10 +948,10 @@ export component MainScreen inherits Rectangle {
     in property <string> dash-gst-paid: "₹ —";
     in property <string> dash-gst-recv: "₹ —";
     // Recurring parties (top 6) and ledger breakdowns (top 8)
-    in property <[SummaryListRow]> dash-parties:     [];
-    in property <[SummaryListRow]> dash-per-account: [];
-    in property <[SummaryListRow]> dash-rec-ledgers: [];
-    in property <[SummaryListRow]> dash-pay-ledgers: [];
+    in property <[SummaryListRow]>    dash-parties:     [];
+    in property <[AccountSummaryRow]> dash-per-account: [];
+    in property <[SummaryListRow]>    dash-rec-ledgers: [];
+    in property <[SummaryListRow]>    dash-pay-ledgers: [];
 
     in property <string> fc-all:        "0";
     in property <string> fc-unreviewed: "0";
@@ -929,8 +1140,11 @@ export component MainScreen inherits Rectangle {
 
         // ─────────────────────────── TOOLBAR ──────────────────────────────────
         // background: #1565C0, box-shadow: 0 2px 8px rgba(13,71,161,.40), border-bottom: 2px solid #0D47A1
+        // UI refinement pass: 50px -> 52px with a symmetric 6px vertical
+        // breathing zone (y:6 + 38px content track) above the border strip,
+        // instead of the content track filling the bar edge-to-edge.
         Rectangle {
-            height: 50px; background: #1565C0;
+            height: 52px; background: #1565C0;
             drop-shadow-blur: 8px;
             drop-shadow-color: #0D47A166;
             drop-shadow-offset-x: 0px;
@@ -938,13 +1152,17 @@ export component MainScreen inherits Rectangle {
 
             // Bottom border
             Rectangle {
-                y: 48px; height: 2px; background: #0D47A1;
+                y: 50px; height: 2px; background: #0D47A1;
             }
 
             HorizontalBox {
-                padding-left: 14px; padding-right: 14px;
+                // Slightly more balanced vertical breathing room (7px each
+                // side vs. 6px) — bar height itself stays at 52px so buttons
+                // never get vertically compressed.
+                y: 7px;
+                padding-left: 18px; padding-right: 18px;
                 padding-top: 0px; padding-bottom: 0px;
-                spacing: 10px; height: 48px;
+                spacing: 8px; height: 36px;
 
                 // Scrollable-content region for every button except Logout,
                 // clipped so that on narrower/1536px screens an overflow of
@@ -957,7 +1175,7 @@ export component MainScreen inherits Rectangle {
                     horizontal-stretch: 1;
 
                     HorizontalBox {
-                        padding: 0px; spacing: 10px; height: 48px;
+                        padding: 0px; spacing: 8px; height: 36px;
 
                         // Firm block — stacked vertically
                         VerticalBox {
@@ -986,6 +1204,11 @@ export component MainScreen inherits Rectangle {
                             height: 28px; min-width: 160px; max-width: 200px;
                             selected(v) => { root.select-client(v); }
                         }
+
+                        // Group divider — logo/client-identity vs. client
+                        // management + file-load actions.
+                        Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
+
                         // btn-primary: background #1565C0, color #fff (blue-on-blue in toolbar)
                         TBtn { text: "+ New Client"; bg: #1565C0; fg: #FFFFFF; clicked => { root.modal-state = "new-client"; } }
                         TBtn { text: "Edit Client"; bg: #0277BD; fg: #FFFFFF; clicked => {
@@ -993,9 +1216,6 @@ export component MainScreen inherits Rectangle {
                             root.edit-client-ledger = root.dash-client-ledger;
                             root.modal-state = "edit-client";
                         } }
-
-                        Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
-
                         TBtn { text: "Load Single File"; clicked => { root.load-file(); } }
                         TBtn { text: "Batch Process Folder"; enabled: !root.batch-running; clicked => { root.batch-folder(); } }
 
@@ -1018,11 +1238,12 @@ export component MainScreen inherits Rectangle {
 
                         TBtn { text: "View Rules"; enabled: true; clicked => { root.view-rules(); root.modal-state = "view-rules"; } }
 
-                        // Extra breathing room between View Rules and Import History
-                        // (requested UI fix — the two otherwise sit as tight as every
-                        // other adjacent toolbar button pair via HorizontalBox's
-                        // uniform 10px spacing).
-                        Rectangle { width: 16px; }
+                        // Sub-group dividers — same 1px bar used at every other
+                        // group boundary in this toolbar, so every gap (button-to-
+                        // button, group-to-group) reads as the same consistent
+                        // rhythm instead of some being a plain 8px spacing gap and
+                        // others a much wider ad-hoc blank spacer.
+                        Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
                         TBtn {
                             text: "Import History";
@@ -1031,19 +1252,11 @@ export component MainScreen inherits Rectangle {
                         }
                         TBtn { text: "Import Ledgers"; enabled: true; clicked => { root.import-ledgers(); } }
 
-                        // Breathing room before Dedupe (requested UI fix — same
-                        // rationale as the View Rules/Import History gap above).
-                        Rectangle { width: 16px; }
+                        Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
                         HorizontalBox {
                             padding: 0px; spacing: 4px;
                             CheckBox { text: "Dedupe"; checked <=> root.dedup-enabled; }
-                        }
-
-                        // .loaded-file { font-size:11px; color:#BBDEFB; font-style:italic }
-                        if root.status-file != "" : Text {
-                            text: root.status-file; color: #BBDEFB; font-size: 11px; font-italic: true;
-                            vertical-alignment: center; max-width: 180px;
                         }
                     }
                 }
@@ -1066,6 +1279,7 @@ export component MainScreen inherits Rectangle {
                 // longer had enough room to also fit Logout via a shared
                 // horizontal-stretch spacer, which pushed it past the
                 // visible edge.
+                Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
                 TBtn {
                     text: "Logout"; bg: #546E7A; fg: #FFFFFF;
                     clicked => {
@@ -1082,15 +1296,16 @@ export component MainScreen inherits Rectangle {
         // ─────────────────────────── DATE RANGE BAR ───────────────────────────
         // background: #EBF3FF, border-bottom: 1px solid #C5D9F0
         Rectangle {
-            height: 36px; background: #EBF3FF;
+            height: 42px; background: #EBF3FF;
 
             // Bottom border
-            Rectangle { y: 35px; height: 1px; background: #C5D9F0; }
+            Rectangle { y: 41px; height: 1px; background: #C5D9F0; }
 
             HorizontalBox {
-                padding-left: 12px; padding-right: 12px;
+                y: 5px;
+                padding-left: 16px; padding-right: 16px;
                 padding-top: 0px; padding-bottom: 0px;
-                spacing: 6px; height: 35px;
+                spacing: 8px; height: 31px;
 
                 // .dr-label: font-size:11px; font-weight:700; color:#1565C0; text-transform:uppercase → "PERIOD:"
                 Text {
@@ -1128,6 +1343,10 @@ export component MainScreen inherits Rectangle {
                 }
 
                 Rectangle { width: 1px; height: 18px; background: #C5D9F0; }
+                // Extra breathing room beyond the base 8px gap so the date
+                // inputs and the quick-period presets read as two distinct
+                // groups (spec: ~12px between them), not one continuous row.
+                Rectangle { width: 4px; }
 
                 QBtn { text: "Today";      active: root.active-preset == "today";      enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "today";      root.date-preset("today"); } }
                 QBtn { text: "This Month"; active: root.active-preset == "this_month"; enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "this_month"; root.date-preset("this_month"); } }
@@ -1173,7 +1392,7 @@ export component MainScreen inherits Rectangle {
             Rectangle { y: 36px; height: 2px; background: #1565C0; }
 
             HorizontalBox {
-                padding-left: 14px; padding-right: 14px;
+                padding-left: 16px; padding-right: 16px;
                 padding-top: 0px; padding-bottom: 0px;
                 spacing: 0px; height: 36px;
                 VTab { text: "TRANSACTIONS"; active: !root.show-dashboard; clicked => { root.show-dashboard = false; } }
@@ -1183,25 +1402,35 @@ export component MainScreen inherits Rectangle {
         }
 
         // ─────────────────────────── CONTENT AREA (stretch wrapper) ─────────────
+        // 12px left/right breathing room only — no top/bottom inset, so the
+        // content band always consumes 100% of the vertical space this
+        // vertical-stretch:1 region is allotted between the fixed header
+        // bars and the fixed footer. (A vertical inset here was tried in an
+        // earlier pass and cost 16px of that stretch height for cosmetic
+        // padding alone; removed so the header/footer can never be pushed
+        // outside the window at smaller viewport heights, and so the
+        // table/Summary panel remain the only things that ever scroll.)
         Rectangle {
             vertical-stretch: 1; clip: true;
 
         // ─────────────────────────── TRANSACTIONS PANEL ───────────────────────
         if !root.show-dashboard : VerticalBox {
+            x: 12px; y: 0px;
+            width: parent.width - 24px; height: parent.height;
             padding: 0px; spacing: 0px;
-            width: parent.width; height: parent.height;
 
                 // Panel header — .panel-hdr { padding:7px 12px; font-size:12px; background:#E3F2FD; }
                 Rectangle {
-                    height: 36px; background: #E3F2FD;
+                    height: 42px; background: #E3F2FD;
 
                     // Bottom border
-                    Rectangle { y: 35px; height: 1px; background: #BBDEFB; }
+                    Rectangle { y: 41px; height: 1px; background: #BBDEFB; }
 
                     HorizontalBox {
-                        padding-left: 12px; padding-right: 12px;
+                        y: 6px;
+                        padding-left: 16px; padding-right: 16px;
                         padding-top: 0px; padding-bottom: 0px;
-                        spacing: 4px; height: 35px;
+                        spacing: 8px; height: 29px;
 
                         Text {
                             text: "Transactions"; font-size: 12px; font-weight: 600;
@@ -1274,7 +1503,7 @@ export component MainScreen inherits Rectangle {
                 if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits || (root.sel-bank != "All Banks" && root.sel-bank != "") || root.sel-vendor != "" || root.sel-head != "" : Rectangle {
                     height: 32px; background: #F8F9FA; border-width: 0px;
                     Rectangle { y: 0px; height: 1px; background: #E0E0E0; width: parent.width; }
-                    HorizontalLayout { padding-left: 12px; padding-right: 12px; padding-top: 0px; padding-bottom: 0px; spacing: 6px; alignment: start;
+                    HorizontalLayout { padding-left: 16px; padding-right: 16px; padding-top: 0px; padding-bottom: 0px; spacing: 8px; alignment: start;
                         Text { text: "Filters:"; font-size: 10px; font-weight: 700; color: #607D8B; vertical-alignment: center; }
                         if root.fs-unreviewed : Rectangle {
                             height: 20px; border-radius: 10px; background: #E65100;
@@ -1383,9 +1612,11 @@ export component MainScreen inherits Rectangle {
                     }
                 }
 
-                // Table + Summary
+                // Table + Summary — 12px gap between them (spec: main content
+                // area spacing) so the Summary panel no longer sits flush
+                // against the transaction table's right edge.
                 HorizontalBox {
-                    padding: 0px; spacing: 0px; vertical-stretch: 1;
+                    padding: 0px; spacing: 12px; vertical-stretch: 1;
 
                     // Transaction table — white background
                     Rectangle {
@@ -1494,339 +1725,389 @@ export component MainScreen inherits Rectangle {
                         }
                     }
 
-                    // Summary panel — background: #F0F7FF, width: 270px
+                    // Summary panel — rebuilt to match the Figma reference: every
+                    // section is its own bordered/rounded white "card" (SCard)
+                    // instead of a flat list under an underline divider, amounts
+                    // are shown without a ₹ prefix (dash-*-plain properties; the
+                    // original ₹-prefixed dash-* properties are untouched and
+                    // still feed DashboardScreen), Reconciliation/Mismatch is one
+                    // tinted card (status + all six balance rows + Difference),
+                    // and Recurring Parties / Receipts by Ledger / Payments by
+                    // Ledger each get their own card with a category-colored
+                    // header (blue / green / red) per the reference. All data
+                    // below is still the existing dash-*/for-loop bindings —
+                    // only presentation changed.
                     Rectangle {
-                        width: 270px;
+                        width: 280px;
                         background: #F0F7FF;
                         clip: true;
                         // Left border only (matches original border-left: 1px solid #BBDEFB)
                         Rectangle { x: 0px; y: 0px; width: 1px; height: parent.height; background: #BBDEFB; }
 
-                        ScrollView {
-                            width: parent.width; height: parent.height;
+                        VerticalLayout {
+                            padding: 0px; spacing: 0px;
 
+                            // ── Header — title, pinned above the scrolling body
+                            // below (never scrolls itself, it's just one row tall).
                             VerticalBox {
-                                padding: 12px; spacing: 5px; width: 258px;
+                                padding: 10px; padding-bottom: 0px; spacing: 6px;
 
-                                // .sum-hdr { font-weight:800; font-size:13px; color:#0A1929; padding-bottom:8px; border-bottom:3px solid #1565C0; margin-bottom:10px }
                                 Text {
-                                    text: "Summary"; font-size: 13px; font-weight: 800;
+                                    text: "Summary"; font-size: 16px; font-weight: 800;
                                     color: #0A1929;
                                 }
-                                Rectangle { height: 8px; }  // padding-bottom:8px before border
-                                Rectangle { height: 3px; background: #1565C0; }
 
-                                // .sum-placeholder { color:#aaa; font-style:italic; font-size:12px; margin-top:20px; text-align:center }
-                                if root.transaction-rows.length == 0 : Rectangle { height: 20px; }
+                                if root.transaction-rows.length == 0 : Rectangle { height: 12px; }
                                 if root.transaction-rows.length == 0 : Text {
                                     text: "No data loaded";
                                     font-size: 12px; color: #AAAAAA; font-italic: true;
                                     horizontal-alignment: center; wrap: word-wrap;
                                 }
+                            }
 
-                                if root.transaction-rows.length > 0 : SDivider { title: "CLIENT"; }
-                                SR { lbl: "Name";    val: root.dash-client-name != "" ? root.dash-client-name : "\u{2014}"; vcol: #37474F; }
-                                SR { lbl: "Bank";    val: root.dash-bank-name   != "" ? root.dash-bank-name   : "\u{2014}"; vcol: #37474F; }
-                                SR { lbl: "Account"; val: root.dash-account-no  != "" ? root.dash-account-no  : "\u{2014}"; vcol: #37474F; }
-                                SR { lbl: "Period";  val: root.dash-period;  vcol: #546E7A; }
+                            // ── Body — every card below scrolls as a single unit
+                            // (vertical-only: horizontal-scrollbar-policy is forced
+                            // off and content width is pinned to the panel width,
+                            // so long labels/amounts elide instead of ever growing
+                            // sideways). ScrollView is used directly as the layout
+                            // child (its own `vertical-stretch: 1; preferred-height:
+                            // 100%;` are what actually constrain its viewport —
+                            // see the transaction table's ListView for the same
+                            // pattern) rather than wrapped in a manually-sized
+                            // Rectangle, which is what let it grow to fit content
+                            // instead of scrolling.
+                            if root.transaction-rows.length > 0 : ScrollView {
+                                vertical-stretch: 1;
+                                vertical-scrollbar-policy: as-needed;
+                                horizontal-scrollbar-policy: always-off;
 
-                                // ── Top stat tiles (original: 4-tile .sum-stats-grid right
-                                // after client info — Transactions/To Review/Duplicates/GST-Tax,
-                                // each a sum-link that drills into that filter except the plain
-                                // Transactions count). "To Review" reuses dash-unreviewed, the
-                                // same pending/unreviewed count the banner below and the
-                                // "Unreviewed" row further down already use — not a new value.
-                                SDivider { title: "TRANSACTIONS"; }
-                                HorizontalBox {
-                                    padding: 0px; spacing: 6px;
-                                    // sum-stat: padding:7px 8px; text-align:center; border-radius:6px
-                                    // sum-stat-val: font-size:15px; font-weight:800; color:#0D47A1
-                                    // sum-stat-lbl: font-size:9px; color:#888; text-transform:uppercase; letter-spacing:.4px
-                                    for s in [
-                                        {v: root.dash-txn-count,  lbl: "TRANSACTIONS", flt: ""},
-                                        {v: root.dash-unreviewed, lbl: "TO REVIEW",    flt: "unreviewed"},
-                                        {v: root.dash-duplicates, lbl: "DUPLICATES",   flt: "duplicates"},
-                                        {v: root.dash-gst-count,  lbl: "GST/TAX",      flt: "gst"},
-                                    ] : Rectangle {
-                                        horizontal-stretch: 1; height: 46px;
-                                        background: #FFFFFF; border-radius: 6px;
-                                        border-width: 1px; border-color: #BBDEFB;
+                                VerticalBox {
+                                    padding-left: 10px; padding-right: 10px;
+                                    padding-top: 6px; padding-bottom: 10px;
+                                    spacing: 10px; width: 260px;
+
+                                    // ── CLIENT ───────────────────────────────────
+                                    // Name / Bank / Account / Period — all four bound
+                                    // to the same live dash-* values the rest of the
+                                    // panel and the header toolbar already use
+                                    // (dash-bank-name / dash-account-no come from the
+                                    // active parse result, same as the Per Account
+                                    // card's key and the header's bank/account combo).
+                                    SCard {
+                                        title: "CLIENT";
+                                        SR { lbl: "Name";    val: root.dash-client-name != "" ? root.dash-client-name : "\u{2014}"; vcol: #263238; }
+                                        SR { lbl: "Bank";    val: root.dash-bank-name   != "" ? root.dash-bank-name   : "\u{2014}"; vcol: #263238; }
+                                        SR { lbl: "Account"; val: root.dash-account-no  != "" ? root.dash-account-no  : "\u{2014}"; vcol: #263238; }
+                                        SR { lbl: "Period";  val: root.dash-period; vcol: #263238; }
+                                    }
+
+                                    // ── Top stat tiles (Transactions/To Review/Duplicates,
+                                    // each a sum-link that drills into that filter except
+                                    // the plain Transactions count) ─────────────────────
+                                    HorizontalBox {
+                                        padding: 0px; spacing: 8px;
+                                        for s in [
+                                            {v: root.dash-txn-count,  lbl: "TRANSACTIONS", flt: ""},
+                                            {v: root.dash-unreviewed, lbl: "TO REVIEW",    flt: "unreviewed"},
+                                            {v: root.dash-duplicates, lbl: "DUPLICATES",   flt: "duplicates"},
+                                        ] : Rectangle {
+                                            horizontal-stretch: 1; height: 56px;
+                                            background: #FFFFFF; border-radius: 8px;
+                                            border-width: 1px; border-color: #BBDEFB;
+                                            VerticalBox {
+                                                padding-top: 8px; padding-bottom: 8px;
+                                                padding-left: 6px; padding-right: 6px;
+                                                spacing: 3px; alignment: center;
+                                                Text { text: s.v; font-size: 18px; font-weight: 800; color: #0D47A1; horizontal-alignment: center; }
+                                                Text { text: s.lbl; font-size: 9px; color: #888888; letter-spacing: 0.4px; horizontal-alignment: center; }
+                                            }
+                                            if s.flt != "" : TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.show-dashboard = false; root.active-filter = s.flt; root.drill-filter(s.flt); }
+                                            }
+                                        }
+                                    }
+                                    // Standalone, muted GST/Tax tile (full width) — kept
+                                    // visually secondary to the three tiles above, matching
+                                    // the reference.
+                                    Rectangle {
+                                        height: 44px; background: #ECEFF1; border-radius: 8px;
+                                        border-width: 1px; border-color: #CFD8DC;
                                         VerticalBox {
-                                            padding-top: 7px; padding-bottom: 7px;
-                                            padding-left: 8px; padding-right: 8px;
-                                            spacing: 2px; alignment: center;
-                                            Text { text: s.v; font-size: 15px; font-weight: 800; color: #0D47A1; horizontal-alignment: center; }
-                                            Text { text: s.lbl; font-size: 9px; color: #888888; letter-spacing: 0.4px; horizontal-alignment: center; }
+                                            padding-top: 5px; padding-bottom: 5px; spacing: 2px; alignment: center;
+                                            Text { text: root.dash-gst-count; font-size: 15px; font-weight: 800; color: #455A64; horizontal-alignment: center; }
+                                            Text { text: "GST/TAX"; font-size: 9px; color: #78909C; letter-spacing: 0.4px; horizontal-alignment: center; }
                                         }
-                                        if s.flt != "" : TouchArea {
+                                        TouchArea {
                                             mouse-cursor: pointer;
-                                            clicked => { root.show-dashboard = false; root.active-filter = s.flt; root.drill-filter(s.flt); }
+                                            clicked => { root.show-dashboard = false; root.active-filter = "gst"; root.drill-filter("gst"); }
                                         }
                                     }
-                                }
+                                    SR { lbl: "Vendors"; val: root.dash-vendors; vcol: #546E7A; }
 
-                                SDivider { title: "BALANCES"; }
-                                SR { lbl: "Opening Balance"; val: root.dash-opening;      vcol: #1565C0; }
-                                SR { lbl: "Total Receipts";  val: root.dash-credits;      vcol: #2E7D32; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "credits";      root.drill-filter("credits"); } }
-                                SR { lbl: "Total Payments";  val: root.dash-debits;       vcol: #C62828; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "debits";       root.drill-filter("debits"); } }
-                                SR { lbl: "Closing Balance"; val: root.dash-closing;      vcol: #1565C0; }
-                                SR { lbl: "Calc. Closing";   val: root.dash-calc-closing; vcol: #546E7A; }
+                                    // ── BALANCES ─────────────────────────────────
+                                    SCard {
+                                        title: "BALANCES";
+                                        SR { lbl: "Opening Balance"; val: root.dash-opening-plain; vcol: #263238; }
+                                        SR { lbl: "Total Receipts";  val: root.dash-credits-plain; vcol: #00897B; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "credits"; root.drill-filter("credits"); } }
+                                        SR { lbl: "Total Payments";  val: root.dash-debits-plain;  vcol: #C62828; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "debits";  root.drill-filter("debits"); } }
+                                        SR { lbl: "Closing Balance"; val: root.dash-closing-plain; vcol: #0D47A1; }
+                                    }
 
-                                // .recon-card.mismatch { background:#ffebee; border-left:4px solid #c62828; border-radius:6px; padding:10px 12px }
-                                if root.dash-has-mismatch : Rectangle {
-                                    height: 36px; background: #FFEBEE;
-                                    border-radius: 6px;
-                                    // Left accent border (4px)
-                                    Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #C62828; border-radius: 6px; }
-                                    HorizontalBox {
-                                        padding-left: 14px; padding-right: 12px;
-                                        padding-top: 0px; padding-bottom: 0px; spacing: 6px;
-                                        Text {
-                                            text: "\u{2717} MISMATCH"; font-size: 13px; font-weight: 800;
-                                            color: #B71C1C; vertical-alignment: center; horizontal-stretch: 1;
-                                        }
-                                        Text {
-                                            text: root.dash-mismatch; font-size: 11px; font-weight: 700;
-                                            color: #C62828; vertical-alignment: center;
-                                        }
-                                    }
-                                }
-                                // .recon-card.ok { background:#e8f5e9; border-left:4px solid #2e7d32; border-radius:6px; padding:10px 12px }
-                                if !root.dash-has-mismatch && root.transaction-rows.length > 0 : Rectangle {
-                                    height: 36px; background: #E8F5E9;
-                                    border-radius: 6px;
-                                    // Left accent border (4px)
-                                    Rectangle { x: 0; y: 0; width: 4px; height: parent.height; background: #2E7D32; border-radius: 6px; }
-                                    HorizontalBox {
-                                        padding-left: 14px; padding-right: 12px;
-                                        padding-top: 0px; padding-bottom: 0px;
-                                        Text {
-                                            text: "\u{2713} RECONCILED"; font-size: 13px; font-weight: 800;
-                                            color: #1B5E20; vertical-alignment: center;
-                                        }
-                                    }
-                                }
-
-                                // Pending-classification badge (original: .pending-badge —
-                                // background #fff3e0/color #e65100 when pending>0, else
-                                // background #e8f5e9/color #2e7d32). "Pending" there means
-                                // status === 'unreviewed' specifically, same as dash-unreviewed
-                                // used for the "Unreviewed" row below — not dash-needs-review,
-                                // which is a different, narrower bucket.
-                                if root.transaction-rows.length > 0 && root.dash-unreviewed != "0" : Rectangle {
-                                    height: 28px; border-radius: 5px; background: #FFF3E0;
-                                    Text {
-                                        text: "\u{26A0} " + root.dash-unreviewed + " of " + root.dash-txn-count + " need review";
-                                        font-size: 12px; font-weight: 600; color: #E65100;
-                                        horizontal-alignment: center; vertical-alignment: center;
-                                    }
-                                }
-                                if root.transaction-rows.length > 0 && root.dash-unreviewed == "0" : Rectangle {
-                                    height: 28px; border-radius: 5px; background: #E8F5E9;
-                                    Text {
-                                        text: "\u{2713} All " + root.dash-txn-count + " classified";
-                                        font-size: 12px; font-weight: 600; color: #2E7D32;
-                                        horizontal-alignment: center; vertical-alignment: center;
-                                    }
-                                }
-
-                                SDivider { title: "REVIEW STATUS"; }
-                                SR { lbl: "Unreviewed";   val: root.dash-unreviewed;   vcol: #EF5350; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "unreviewed";   root.drill-filter("unreviewed"); } }
-                                SR { lbl: "Needs Review"; val: root.dash-needs-review; vcol: #E65100; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "needs_review"; root.drill-filter("needs_review"); } }
-                                if root.dash-has-suspense : SR { lbl: "Suspense"; val: root.dash-suspense; vcol: #7B1FA2; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense"; root.drill-filter("suspense"); } }
-
-                                SDivider { title: "OTHER"; }
-                                SR { lbl: "Duplicates"; val: root.dash-duplicates; vcol: #C2185B; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "duplicates"; root.drill-filter("duplicates"); } }
-                                SR { lbl: "GST / Tax";  val: root.dash-gst-count;  vcol: #6A1B9A; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "gst";        root.drill-filter("gst"); } }
-                                SR { lbl: "Vendors";    val: root.dash-vendors;    vcol: #546E7A; }
-
-                                // ── Classification Quality card ───────────────────────────────────────
-                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : SDivider { title: "CLASSIFICATION QUALITY"; }
-                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : Rectangle {
-                                    // Original: .conf-bar-hi #388E3C, .conf-bar-med #EF6C00, .conf-bar-lo #C62828
-                                    height: 10px; border-radius: 4px; clip: true; background: #C62828;
-                                    // High conf segment (green, left)
-                                    Rectangle {
-                                        x: 0; y: 0; height: parent.height; background: #388E3C;
-                                        width: parent.width * root.dash-conf-hi-frac;
-                                    }
-                                    // Medium conf segment (orange, after green)
-                                    Rectangle {
-                                        x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #EF6C00;
-                                        width: parent.width * root.dash-conf-med-frac;
-                                    }
-                                }
-                                if root.transaction-rows.length > 0 && (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : HorizontalBox {
-                                    padding: 0px; spacing: 4px;
-                                    for chip in [
-                                        { lbl: "HIGH " + root.dash-conf-hi-count,  bg: #C8E6C9, fg: #1B5E20, bc: #81C784 },
-                                        { lbl: "MED "  + root.dash-conf-med-count, bg: #FFF9C4, fg: #F57F17, bc: #FFD54F },
-                                        { lbl: "LOW "  + root.dash-conf-lo-count,  bg: #FFCDD2, fg: #C62828, bc: #EF9A9A },
-                                    ] : Rectangle {
-                                        height: 18px; horizontal-stretch: 1;
-                                        background: chip.bg; border-radius: 4px;
-                                        border-width: 1px; border-color: chip.bc;
-                                        Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
-                                    }
-                                }
-                                if root.dash-cq-ai != "0" : SR { lbl: "\u{2726} AI classified";   val: root.dash-cq-ai;   vcol: #7B1FA2; }
-                                if root.dash-cq-rule != "0" : SR { lbl: "Rule matched";       val: root.dash-cq-rule; vcol: #1565C0; }
-                                if root.dash-cq-kw != "0" : SR { lbl: "Keyword heuristic"; val: root.dash-cq-kw;   vcol: #555555; }
-
-                                // ── Per Account breakdown ─────────────────────────────────────────────
-                                if root.dash-per-account.length > 0 : SDivider { title: "PER ACCOUNT"; }
-                                for a in root.dash-per-account : Rectangle {
-                                    height: 34px;
-                                    VerticalLayout {
-                                        padding: 0px; spacing: 1px; width: parent.width; height: parent.height;
-                                        Text {
-                                            text: a.lbl; font-size: 11px; font-weight: 700; color: #0D47A1;
-                                            overflow: elide; vertical-alignment: center;
-                                        }
-                                        Text {
-                                            text: a.val; font-size: 9px; color: #555555; vertical-alignment: center;
-                                        }
-                                    }
-                                    TouchArea {
-                                        x: 0; y: 0; width: parent.width; height: parent.height;
-                                        mouse-cursor: pointer;
-                                        clicked => { root.sel-bank = a.key; root.bank-filter-changed(a.key); }
-                                    }
-                                }
-
-                                // ── GST / Tax amounts ─────────────────────────────────────────────────
-                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SDivider { title: "GST / TAX"; }
-                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Paid";        val: root.dash-gst-paid; vcol: #C62828; }
-                                if root.transaction-rows.length > 0 && root.dash-gst-count != "0" : SR { lbl: "GST Recv./Refund"; val: root.dash-gst-recv; vcol: #2E7D32; }
-
-                                // ── Duplicates Detected card (original: .sum-card with
-                                // border-color:#f48fb1, title color:#880e4f) — a standalone
-                                // callout distinct from the plain "Duplicates" row above
-                                // (that row stays, for its click-to-filter behavior).
-                                if root.dash-duplicates != "0" : Rectangle {
-                                    border-width: 1px; border-color: #F48FB1; border-radius: 6px;
-                                    background: #FFFFFF;
-                                    VerticalBox {
-                                        padding-top: 8px; padding-bottom: 8px;
-                                        padding-left: 10px; padding-right: 10px;
-                                        spacing: 4px;
-                                        HorizontalBox {
-                                            padding: 0px; spacing: 4px;
-                                            Rectangle {
-                                                width: 26px; height: 13px; border-radius: 3px;
-                                                background: #FCE4EC; border-width: 1px; border-color: #E91E63;
-                                                Text { text: "DUP"; font-size: 8px; font-weight: 800; color: #880E4F;
-                                                       horizontal-alignment: center; vertical-alignment: center; }
+                                    // ── Reconciliation / Mismatch ─────────────────
+                                    // One tinted card: status header + all six balance
+                                    // rows + a bold Difference row, matching the
+                                    // reference exactly. Same dash-* values as the
+                                    // BALANCES card above, just restated per the
+                                    // reconciliation layout (Opening/+Receipts/
+                                    // −Payments/Calculated/Statement/Difference).
+                                    if root.dash-has-mismatch : Rectangle {
+                                        background: #FDECEA; border-radius: 8px;
+                                        border-width: 1px; border-color: #F5C6C2;
+                                        VerticalBox {
+                                            padding: 10px; spacing: 5px;
+                                            Text { text: "\u{2717} MISMATCH"; font-size: 12px; font-weight: 800; color: #B71C1C; }
+                                            SR { lbl: "Opening";         val: root.dash-opening-plain; vcol: #7A2A24; lcol: #7A2A24; }
+                                            SR { lbl: "+ Receipts";      val: root.dash-credits-plain; vcol: #7A2A24; lcol: #7A2A24; }
+                                            SR { lbl: "\u{2212} Payments"; val: root.dash-debits-plain; vcol: #7A2A24; lcol: #7A2A24; }
+                                            SR { lbl: "Calculated";      val: root.dash-calc-closing;  vcol: #7A2A24; lcol: #7A2A24; }
+                                            SR { lbl: "Statement";       val: root.dash-closing-plain; vcol: #7A2A24; lcol: #7A2A24; }
+                                            Rectangle { height: 1px; background: #F5C6C2; }
+                                            HorizontalLayout {
+                                                padding-top: 2px;
+                                                Text { text: "Difference"; font-size: 12px; font-weight: 800; color: #B71C1C; horizontal-stretch: 1; vertical-alignment: center; }
+                                                Text { text: root.dash-diff; font-size: 14px; font-weight: 800; color: #C62828; vertical-alignment: center; }
                                             }
+                                        }
+                                    }
+                                    if !root.dash-has-mismatch : Rectangle {
+                                        background: #EAF6EB; border-radius: 8px;
+                                        border-width: 1px; border-color: #C3E6C5;
+                                        VerticalBox {
+                                            padding: 10px; spacing: 5px;
+                                            Text { text: "\u{2713} RECONCILED"; font-size: 12px; font-weight: 800; color: #1B5E20; }
+                                            SR { lbl: "Opening";         val: root.dash-opening-plain; vcol: #1B5E20; lcol: #1B5E20; }
+                                            SR { lbl: "+ Receipts";      val: root.dash-credits-plain; vcol: #1B5E20; lcol: #1B5E20; }
+                                            SR { lbl: "\u{2212} Payments"; val: root.dash-debits-plain; vcol: #1B5E20; lcol: #1B5E20; }
+                                            SR { lbl: "Calculated";      val: root.dash-calc-closing;  vcol: #1B5E20; lcol: #1B5E20; }
+                                            SR { lbl: "Statement";       val: root.dash-closing-plain; vcol: #1B5E20; lcol: #1B5E20; }
+                                            Rectangle { height: 1px; background: #C3E6C5; }
+                                            HorizontalLayout {
+                                                padding-top: 2px;
+                                                Text { text: "Difference"; font-size: 12px; font-weight: 800; color: #1B5E20; horizontal-stretch: 1; vertical-alignment: center; }
+                                                Text { text: root.dash-diff; font-size: 14px; font-weight: 800; color: #2E7D32; vertical-alignment: center; }
+                                            }
+                                        }
+                                    }
+
+                                    // ── Needs-review banner ───────────────────────
+                                    // Matches the old app's `.pending-badge`: one
+                                    // centered, word-wrapped line (`text-align:center`
+                                    // on a single string naturally splits the leading
+                                    // "⚠"/"✓" glyph onto its own visual line at this
+                                    // width) that flips between a "has" (orange) and
+                                    // "ok" (green) state — driven by dash-unreviewed
+                                    // (status === 'unreviewed' count), the same value
+                                    // app.js's `pending` used, not dash-needs-review
+                                    // (a different, broader validation-failure bucket).
+                                    if root.dash-unreviewed != "0" : Rectangle {
+                                        background: #FFF3E0; border-radius: 5px;
+                                        VerticalBox {
+                                            padding-left: 10px; padding-right: 10px;
+                                            padding-top: 6px; padding-bottom: 6px;
+                                            alignment: center;
                                             Text {
-                                                text: "Duplicates Detected"; font-size: 9.5px; font-weight: 800;
-                                                letter-spacing: 0.6px; color: #880E4F; vertical-alignment: center;
+                                                text: "\u{26A0} " + root.dash-unreviewed + " of " + root.transaction-rows.length + " need review";
+                                                font-size: 12px; font-weight: 600; color: #E65100;
+                                                horizontal-alignment: center; wrap: word-wrap;
+                                            }
+                                        }
+                                        TouchArea {
+                                            x: 0; y: 0; width: parent.width; height: parent.height;
+                                            mouse-cursor: pointer;
+                                            clicked => { root.show-dashboard = false; root.active-filter = "unreviewed"; root.drill-filter("unreviewed"); }
+                                        }
+                                    }
+                                    if root.dash-unreviewed == "0" : Rectangle {
+                                        background: #E8F5E9; border-radius: 5px;
+                                        VerticalBox {
+                                            padding-left: 10px; padding-right: 10px;
+                                            padding-top: 6px; padding-bottom: 6px;
+                                            alignment: center;
+                                            Text {
+                                                text: "\u{2713} All " + root.transaction-rows.length + " classified";
+                                                font-size: 12px; font-weight: 600; color: #2E7D32;
+                                                horizontal-alignment: center; wrap: word-wrap;
+                                            }
+                                        }
+                                    }
+                                    if root.dash-has-suspense : SR { lbl: "Suspense"; val: root.dash-suspense; vcol: #7B1FA2; clickable: true; clicked => { root.show-dashboard = false; root.active-filter = "suspense"; root.drill-filter("suspense"); } }
+
+                                    // ── CLASSIFICATION QUALITY ────────────────────
+                                    // Matches `.conf-bar`/`.conf-chip-*`/the three
+                                    // classification-source `.sr` rows exactly.
+                                    SCard {
+                                        title: "CLASSIFICATION QUALITY";
+                                        if (root.dash-conf-hi-frac > 0.0 || root.dash-conf-med-frac > 0.0 || root.dash-conf-lo-count != "0") : Rectangle {
+                                            height: 10px; border-radius: 5px; clip: true; background: #ECEFF1;
+                                            Rectangle {
+                                                x: 0; y: 0; height: parent.height; background: #388E3C;
+                                                width: parent.width * root.dash-conf-hi-frac;
+                                            }
+                                            Rectangle {
+                                                x: parent.width * root.dash-conf-hi-frac; y: 0; height: parent.height; background: #EF6C00;
+                                                width: parent.width * root.dash-conf-med-frac;
+                                            }
+                                            Rectangle {
+                                                x: parent.width * (root.dash-conf-hi-frac + root.dash-conf-med-frac); y: 0; height: parent.height;
+                                                background: #C62828;
+                                                width: parent.width * max(0.0, 1.0 - root.dash-conf-hi-frac - root.dash-conf-med-frac);
                                             }
                                         }
                                         HorizontalBox {
-                                            padding: 0px;
-                                            Text { text: "Flagged rows"; font-size: 10px; color: #37474F; horizontal-stretch: 1; vertical-alignment: center; }
-                                            Text { text: root.dash-duplicates; font-size: 10px; font-weight: 700; color: #C62828; vertical-alignment: center; }
+                                            padding: 0px; spacing: 5px; alignment: start;
+                                            for chip in [
+                                                { lbl: "HIGH " + root.dash-conf-hi-count,  bg: #E8F5E9, fg: #2E7D32, bc: #A5D6A7 },
+                                                { lbl: "MED "  + root.dash-conf-med-count, bg: #FFF3E0, fg: #E65100, bc: #FFCC80 },
+                                                { lbl: "LOW "  + root.dash-conf-lo-count,  bg: #FFEBEE, fg: #C62828, bc: #EF9A9A },
+                                            ] : Rectangle {
+                                                height: 18px; width: ct.preferred-width + 16px;
+                                                background: chip.bg; border-radius: 9px;
+                                                border-width: 1px; border-color: chip.bc;
+                                                ct := Text { text: chip.lbl; font-size: 10px; color: chip.fg; font-weight: 700; letter-spacing: 0.4px; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
                                         }
-                                        Text { text: "Use the Duplicates filter to review"; font-size: 10px; color: #888888; }
+                                        // Classification-method breakdown — plain (non-
+                                        // link) rows, each label a distinct small-caps
+                                        // color, value a plain dark count.
+                                        if root.dash-cq-ai != "0" : SR { lbl: "\u{2726} AI classified";   val: root.dash-cq-ai;   lcol: #7B1FA2; lsize: 10px; vcol: #0A1929; }
+                                        if root.dash-cq-rule != "0" : SR { lbl: "Rule matched";       val: root.dash-cq-rule; lcol: #1565C0; lsize: 10px; vcol: #0A1929; }
+                                        if root.dash-cq-kw != "0" : SR { lbl: "Keyword heuristic"; val: root.dash-cq-kw;   lcol: #555555; lsize: 10px; vcol: #0A1929; }
                                     }
-                                }
 
-                                // ── Suspense card (original: .sum-card with border-color:
-                                // #ba68c8, title color:#6a1b9a) — dash-suspense already IS
-                                // the ₹ amount in suspense (main.rs: fmt_amt(s.suspense_amount)),
-                                // not a row count, so no backend change was needed here; the
-                                // plain "Suspense" row above (a count-shaped SR, reusing the
-                                // same dash-suspense value) stays for its click-to-filter
-                                // behavior.
-                                if root.dash-has-suspense : Rectangle {
-                                    border-width: 1px; border-color: #BA68C8; border-radius: 6px;
-                                    background: #FFFFFF;
-                                    VerticalBox {
-                                        padding-top: 8px; padding-bottom: 8px;
-                                        padding-left: 10px; padding-right: 10px;
-                                        spacing: 4px;
-                                        Text {
-                                            text: "Suspense"; font-size: 9.5px; font-weight: 800;
-                                            letter-spacing: 0.6px; color: #6A1B9A;
+                                    // ── PER ACCOUNT ────────────────────────────────
+                                    // Matches the old app's acc-row markup: a bold,
+                                    // underlined, clickable bank/account header line
+                                    // (with a divider above it), followed by plain
+                                    // Opening / Closing (bold) / Transactions sub-rows
+                                    // — each shown only when that field is non-empty,
+                                    // mirroring the source's per-field null/zero guards.
+                                    if root.dash-per-account.length > 0 : SCard {
+                                        title: "PER ACCOUNT";
+                                        for a in root.dash-per-account : VerticalLayout {
+                                            padding: 0px; spacing: 0px;
+                                            Rectangle { height: 1px; background: #E3F2FD; }
+                                            Rectangle {
+                                                height: 20px;
+                                                hdrt := Text {
+                                                    x: 0; y: 5px; width: parent.width;
+                                                    text: a.lbl; font-size: 11px; font-weight: 700; color: #0D47A1;
+                                                    overflow: elide; vertical-alignment: center;
+                                                }
+                                                Rectangle {
+                                                    x: 0; y: parent.height - 1px;
+                                                    width: min(hdrt.preferred-width, parent.width); height: 1px;
+                                                    background: #0D47A1;
+                                                }
+                                                TouchArea {
+                                                    x: 0; y: 0; width: parent.width; height: parent.height;
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.sel-bank = a.key; root.bank-filter-changed(a.key); }
+                                                }
+                                            }
+                                            if a.opening != "" : SR { lbl: "Opening"; val: a.opening; vcol: #0D47A1; pad-left: 8px; }
+                                            if a.closing != "" : SR { lbl: "Closing"; val: a.closing; vcol: #0D47A1; pad-left: 8px; }
+                                            if a.txns    != "" : SR { lbl: "Transactions"; val: a.txns; vcol: #0A1929; pad-left: 8px; }
                                         }
+                                    }
+
+                                    // ── GST / TAX ──────────────────────────────────
+                                    // Matches the old app's GST/Tax card: GST/TAX tag
+                                    // chips prefix the header; GST/Tax Transactions
+                                    // are clickable/underlined (they drill the "gst"
+                                    // filter, which already matches both tags), GST
+                                    // Paid/Refund are plain debit/credit-colored rows.
+                                    if root.dash-gst-count != "0" : SCard {
+                                        show-title: false;
                                         HorizontalBox {
-                                            padding: 0px;
-                                            Text { text: "Amount in suspense"; font-size: 10px; color: #37474F; horizontal-stretch: 1; vertical-alignment: center; }
-                                            Text { text: root.dash-suspense; font-size: 10px; font-weight: 700; color: #7B1FA2; vertical-alignment: center; }
+                                            padding: 0px; padding-bottom: 4px; spacing: 4px;
+                                            TagChip { label: "GST"; bg: #C8E6C9; fg: #1B5E20; bc: #66BB6A; }
+                                            TagChip { label: "TAX"; bg: #FFE0B2; fg: #BF360C; bc: #FFA726; }
+                                            Text { text: "GST / TAX"; font-size: 10px; font-weight: 800; color: #1565C0; letter-spacing: 0.6px; vertical-alignment: center; }
                                         }
+                                        Rectangle { height: 1px; background: #E3F2FD; }
+                                        if root.dash-gst-txn-count != "0" : SR {
+                                            lbl: "GST Transactions"; val: root.dash-gst-txn-count; vcol: #0A1929;
+                                            underline: true; lcol: #0A1929; clickable: true;
+                                            clicked => { root.show-dashboard = false; root.active-filter = "gst"; root.drill-filter("gst"); }
+                                        }
+                                        if root.dash-tax-txn-count != "0" : SR {
+                                            lbl: "Tax Transactions"; val: root.dash-tax-txn-count; vcol: #0A1929;
+                                            underline: true; lcol: #0A1929; clickable: true;
+                                            clicked => { root.show-dashboard = false; root.active-filter = "gst"; root.drill-filter("gst"); }
+                                        }
+                                        SR { lbl: "GST Paid";         val: root.dash-gst-paid;  vcol: #B71C1C; }
+                                        SR { lbl: "GST Refund/Recv."; val: root.dash-gst-recv;  vcol: #1B5E20; }
                                     }
-                                }
 
-                                // ── Recurring parties ─────────────────────────────────────────────────
-                                if root.dash-parties.length > 0 : SDivider { title: "RECURRING PARTIES"; }
-                                for p in root.dash-parties : Rectangle {
-                                    height: 18px;
-                                    HorizontalLayout {
-                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
-                                        Text {
-                                            text: p.lbl; font-size: 11px; color: #0D47A1; horizontal-stretch: 1;
-                                            overflow: elide; vertical-alignment: center;
+                                    // ── DUPLICATES DETECTED ────────────────────────
+                                    if root.dash-duplicates != "0" : SCard {
+                                        show-title: false;
+                                        border-color: #F48FB1;
+                                        HorizontalBox {
+                                            padding: 0px; padding-bottom: 4px; spacing: 4px;
+                                            TagChip { label: "DUP"; bg: #FCE4EC; fg: #880E4F; bc: #E91E63; }
+                                            Text { text: "DUPLICATES DETECTED"; font-size: 10px; font-weight: 800; color: #880E4F; letter-spacing: 0.6px; vertical-alignment: center; }
+                                        }
+                                        Rectangle { height: 1px; background: #E3F2FD; }
+                                        SR {
+                                            lbl: "Flagged rows"; val: root.dash-duplicates; vcol: #C62828;
+                                            clickable: true;
+                                            clicked => { root.show-dashboard = false; root.active-filter = "duplicates"; root.drill-filter("duplicates"); }
                                         }
                                         Text {
-                                            text: p.val; font-size: 10px; color: #555555; vertical-alignment: center;
+                                            text: "Use the Duplicates filter to review";
+                                            font-size: 10px; color: #888888;
+                                            wrap: word-wrap;
                                         }
                                     }
-                                    TouchArea {
-                                        x: 0; y: 0; width: parent.width; height: parent.height;
-                                        mouse-cursor: pointer;
-                                        clicked => { root.sel-vendor = p.key; root.vendor-filter-changed(p.key); }
-                                    }
-                                }
 
-                                // ── Receipts by Ledger ────────────────────────────────────────────────
-                                if root.dash-rec-ledgers.length > 0 : SDivider { title: "RECEIPTS BY LEDGER"; }
-                                for r in root.dash-rec-ledgers : Rectangle {
-                                    height: 18px;
-                                    HorizontalLayout {
-                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
-                                        Text {
-                                            text: r.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
-                                            overflow: elide; vertical-alignment: center;
-                                        }
-                                        Text {
-                                            text: r.val; font-size: 10px; color: #2E7D32; font-weight: 600; vertical-alignment: center;
+                                    // ── RECURRING PARTIES ──────────────────────────
+                                    // Matches `parties.slice(0,6)`: underlined vendor
+                                    // name, plain grey "144×  amount" trailing text.
+                                    if root.dash-parties.length > 0 : SCard {
+                                        title: "RECURRING PARTIES";
+                                        for p in root.dash-parties : SListRow {
+                                            lbl: p.lbl; count: p.count; val: p.val; vcol: #555555; vweight: 400;
+                                            clicked => { root.sel-vendor = p.key; root.vendor-filter-changed(p.key); }
                                         }
                                     }
-                                    TouchArea {
-                                        x: 0; y: 0; width: parent.width; height: parent.height;
-                                        mouse-cursor: pointer;
-                                        clicked => { root.sel-head = r.key; root.head-filter-changed(r.key); }
-                                    }
-                                }
 
-                                // ── Payments by Ledger ────────────────────────────────────────────────
-                                if root.dash-pay-ledgers.length > 0 : SDivider { title: "PAYMENTS BY LEDGER"; }
-                                for p in root.dash-pay-ledgers : Rectangle {
-                                    height: 18px;
-                                    HorizontalLayout {
-                                        padding: 0px; spacing: 4px; width: parent.width; height: parent.height;
-                                        Text {
-                                            text: p.lbl; font-size: 10px; color: #37474F; horizontal-stretch: 1;
-                                            overflow: elide; vertical-alignment: center;
-                                        }
-                                        Text {
-                                            text: p.val; font-size: 10px; color: #C62828; font-weight: 600; vertical-alignment: center;
+                                    // ── RECEIPTS BY LEDGER ─────────────────────────
+                                    if root.dash-rec-ledgers.length > 0 : SCard {
+                                        title: "RECEIPTS BY LEDGER";
+                                        title-color: #2E7D32;
+                                        for r in root.dash-rec-ledgers : SListRow {
+                                            lbl: r.lbl; val: r.val; vcol: #1B5E20; vweight: 700;
+                                            clicked => { root.sel-head = r.key; root.head-filter-changed(r.key); }
                                         }
                                     }
-                                    TouchArea {
-                                        x: 0; y: 0; width: parent.width; height: parent.height;
-                                        mouse-cursor: pointer;
-                                        clicked => { root.sel-head = p.key; root.head-filter-changed(p.key); }
-                                    }
-                                }
 
-                                Rectangle { height: 6px; }
-                                if root.status-bank != "" : Text {
-                                    text: root.status-bank; font-size: 10px;
-                                    color: #90A4AE; horizontal-alignment: center; wrap: word-wrap;
+                                    // ── PAYMENTS BY LEDGER ─────────────────────────
+                                    if root.dash-pay-ledgers.length > 0 : SCard {
+                                        title: "PAYMENTS BY LEDGER";
+                                        title-color: #B71C1C;
+                                        for p in root.dash-pay-ledgers : SListRow {
+                                            lbl: p.lbl; val: p.val; vcol: #B71C1C; vweight: 700;
+                                            clicked => { root.sel-head = p.key; root.head-filter-changed(p.key); }
+                                        }
+                                    }
+
+                                    if root.status-bank != "" : Text {
+                                        text: root.status-bank; font-size: 10px;
+                                        color: #90A4AE; horizontal-alignment: center; wrap: word-wrap;
+                                    }
                                 }
-                                Rectangle { vertical-stretch: 1; }
                             }
                         }
                     }
@@ -1835,7 +2116,8 @@ export component MainScreen inherits Rectangle {
 
         // ─────────────────────────── DASHBOARD ────────────────────────────────
         if root.show-dashboard : DashboardScreen {
-            width: parent.width; height: parent.height;
+            x: 12px; y: 0px;
+            width: parent.width - 24px; height: parent.height;
             // Summary
             opening-balance: root.dash-opening;
             total-credits:   root.dash-credits;
@@ -1894,22 +2176,30 @@ export component MainScreen inherits Rectangle {
 
         // ─────────────────────────── FOOTER ───────────────────────────────────
         // background: #E3F2FD, border-top: 2px solid #BBDEFB
+        // UI refinement pass: 44px -> 56px with an 8px vertical breathing
+        // zone (y:10 = 2px border + 8px top pad, 38px content track, then
+        // another 8px before the bar's bottom edge) so buttons no longer
+        // sit flush against the window edge.
         Rectangle {
-            height: 44px; background: #E3F2FD;
+            height: 56px; background: #E3F2FD;
 
             // Top border
             Rectangle { y: 0px; height: 2px; background: #BBDEFB; }
 
             HorizontalBox {
-                padding-left: 14px; padding-right: 14px;
+                padding-left: 18px; padding-right: 18px;
                 padding-top: 0px; padding-bottom: 0px;
-                spacing: 8px; y: 2px; height: 42px;
+                spacing: 8px; y: 10px; height: 38px;
 
-                // Green buttons
+                // Export group
                 FootBtn { text: "Export to Excel";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "excel-export"; } }
                 // &#8659; = ⇓ (U+21D3 DOWNWARDS DOUBLE ARROW) from original HTML
                 FootBtn { text: "\u{21D3} Export for Accounting"; enabled: root.transaction-rows.length > 0; bg: #1A237E; border-clr: #1A237E; fg: #FFFFFF; clicked => { root.wiz-step = 1; root.wiz-state-idx = root.settings-state-idx; root.modal-state = "export-wizard"; } }
                 FootBtn { text: "Quick Tally XML";        enabled: root.transaction-rows.length > 0; bg: #2E7D32; border-clr: #2E7D32; fg: #FFFFFF; clicked => { root.modal-state = "tally-export"; } }
+
+                Rectangle { width: 1px; height: 28px; background: #90CAF9; }
+
+                // Maintenance group
                 FootBtn { text: "Re-import Excel";        enabled: root.transaction-rows.length > 0; clicked => { root.reimport-excel(); } }
                 FootBtn { text: "Reset Dedupe History";   enabled: root.transaction-rows.length > 0; bg: #C62828; border-clr: #C62828; fg: #FFFFFF; clicked => {
                     root.confirm-title = "Reset Dedupe History";
@@ -1921,7 +2211,12 @@ export component MainScreen inherits Rectangle {
 
                 Rectangle { width: 1px; height: 28px; background: #90CAF9; }
 
+                // Processing group
                 FootBtn { text: "Reconcile";     enabled: root.transaction-rows.length > 0; bg: #7E57C2; border-clr: #7E57C2; fg: #FFFFFF; clicked => { root.modal-state = "reconcile"; } }
+
+                Rectangle { width: 1px; height: 28px; background: #90CAF9; }
+
+                // Monitoring group
                 FootBtn { text: "Batch Monitor"; enabled: true; clicked => { root.modal-state = "batch-monitor"; } }
                 FootBtn { text: "Audit Trail";   enabled: true; clicked => { root.modal-state = "audit-trail";  } }
                 FootBtn { text: "Settings";      enabled: true; clicked => { root.modal-state = "settings";     } }
@@ -2228,20 +2523,21 @@ export component MainScreen inherits Rectangle {
                             Text { text: "Log Level"; font-size: 11px; color: #546E7A; vertical-alignment: center; }
                             ComboBox { model: ["INFO", "DEBUG", "WARN", "ERROR"]; current-index <=> root.settings-log-level; min-width: 100px; }
                         }
-                        Rectangle {
-                            height: 30px; width: 140px;
-                            background: #C62828; border-radius: 4px;
-                            accessible-role: button;
-                            accessible-label: "Clear All Logs";
-                            TouchArea { clicked => {
-                                root.confirm-title = "Clear All Logs";
-                                root.confirm-message = "Clear all logs?";
-                                root.confirm-action = "clear-logs";
-                                root.confirm-payload = -1;
-                                root.modal-state = "confirm";
-                            } }
-                            Text { text: "Clear All Logs"; font-size: 11px; color: white;
-                                   horizontal-alignment: center; vertical-alignment: center; }
+                        // Wrapped in a HorizontalBox (not placed bare in this
+                        // VerticalBox) so MBtn's content-driven width sizes
+                        // naturally instead of the VerticalLayout's default
+                        // cross-axis stretch pulling it to the full row width.
+                        HorizontalBox { padding: 0px;
+                            MBtn {
+                                text: "Clear All Logs"; bg: #C62828; fg: white;
+                                clicked => {
+                                    root.confirm-title = "Clear All Logs";
+                                    root.confirm-message = "Clear all logs?";
+                                    root.confirm-action = "clear-logs";
+                                    root.confirm-payload = -1;
+                                    root.modal-state = "confirm";
+                                }
+                            }
                         }
                         Rectangle { height: 1px; background: #E3F2FD; }
                         Text { text: "DATA MIGRATION"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
@@ -2249,14 +2545,11 @@ export component MainScreen inherits Rectangle {
                             text: "Moving from the old desktop app? Import your clients, rules, ledgers, transaction history, and settings in one step.";
                             font-size: 11px; color: #546E7A; wrap: word-wrap; width: 640px;
                         }
-                        Rectangle {
-                            height: 30px; width: 190px;
-                            background: #1565C0; border-radius: 4px;
-                            accessible-role: button;
-                            accessible-label: "Import Legacy Data";
-                            TouchArea { clicked => { root.modal-state = "migration"; } }
-                            Text { text: "Import Legacy Data\u{2026}"; font-size: 11px; color: white;
-                                   horizontal-alignment: center; vertical-alignment: center; }
+                        HorizontalBox { padding: 0px;
+                            MBtn {
+                                text: "Import Legacy Data\u{2026}"; bg: #1565C0; fg: white;
+                                clicked => { root.modal-state = "migration"; }
+                            }
                         }
                         Rectangle { height: 1px; background: #E3F2FD; }
                         Text { text: "LICENSE"; font-size: 12px; font-weight: 700; color: #1565C0; letter-spacing: 0.5px; }
@@ -2267,40 +2560,19 @@ export component MainScreen inherits Rectangle {
                                 placeholder-text: "License key (XXXX-XXXX-XXXX-XXXX)";
                                 height: 30px; min-width: 260px;
                             }
-                            Rectangle {
-                                height: 30px; width: 100px;
-                                background: #1565C0; border-radius: 4px;
-                                accessible-role: button;
-                                accessible-label: "Activate License";
-                                TouchArea { clicked => { root.license-activate(); } }
-                                Text { text: "Activate"; font-size: 11px; color: white;
-                                       horizontal-alignment: center; vertical-alignment: center; }
-                            }
+                            MBtn { text: "Activate"; bg: #1565C0; fg: white; clicked => { root.license-activate(); } }
                             // Re-checks the already-activated license
                             // without needing a key retyped (audit fix,
                             // 2026-08-05, "Subscription refresh" — see
                             // main.rs's on_do_license_refresh).
-                            Rectangle {
-                                height: 30px; width: 120px;
-                                background: #546E7A; border-radius: 4px;
-                                accessible-role: button;
-                                accessible-label: "Refresh Status";
-                                TouchArea { clicked => { root.license-refresh(); } }
-                                Text { text: "Refresh Status"; font-size: 11px; color: white;
-                                       horizontal-alignment: center; vertical-alignment: center; }
-                            }
+                            MBtn { text: "Refresh Status"; bg: #546E7A; fg: white; clicked => { root.license-refresh(); } }
                             // Reuses LoginScreen's pricing/checkout page
                             // (audit fix, 2026-08-05, "Upgrade flow") — see
                             // app.slint's `change-plan` handler.
-                            Rectangle {
-                                height: 30px; width: 110px;
-                                background: #FFFFFF; border-radius: 4px;
-                                border-width: 1px; border-color: #1565C0;
-                                accessible-role: button;
-                                accessible-label: "Change Plan";
-                                TouchArea { clicked => { root.change-plan(); } }
-                                Text { text: "Change Plan"; font-size: 11px; color: #1565C0;
-                                       horizontal-alignment: center; vertical-alignment: center; }
+                            MBtn {
+                                text: "Change Plan"; bg: white; fg: #1565C0;
+                                border-w: 1px; border-clr: #1565C0;
+                                clicked => { root.change-plan(); }
                             }
                         }
                         if root.license-activate-result != "" : Text {
@@ -2378,19 +2650,14 @@ export component MainScreen inherits Rectangle {
                                         horizontal-stretch: 1;
                                         vertical-alignment: center; overflow: elide;
                                     }
-                                    Rectangle {
-                                        width: 56px; height: 18px; border-radius: 4px;
-                                        background: #FFEBEE; border-width: 1px; border-color: #EF9A9A;
-                                        Text { text: "Remove"; font-size: 9px; color: #C62828; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                                        TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => {
-                                                root.confirm-title = "Remove Import History Entry";
-                                                root.confirm-message = "Remove this entry from import history? (The original file is not affected.)";
-                                                root.confirm-action = "delete-import";
-                                                root.confirm-payload = i;
-                                                root.modal-state = "confirm";
-                                            }
+                                    MChipBtn {
+                                        text: "Remove";
+                                        clicked => {
+                                            root.confirm-title = "Remove Import History Entry";
+                                            root.confirm-message = "Remove this entry from import history? (The original file is not affected.)";
+                                            root.confirm-action = "delete-import";
+                                            root.confirm-payload = i;
+                                            root.modal-state = "confirm";
                                         }
                                     }
                                 }
@@ -2443,20 +2710,15 @@ export component MainScreen inherits Rectangle {
                                 font-size: 11px; color: #0A1929;
                                 vertical-alignment: center; overflow: elide;
                             }
-                            Rectangle {
-                                x: parent.width - 66px; y: 4px;
-                                width: 56px; height: 18px; border-radius: 4px;
-                                background: #FFEBEE; border-width: 1px; border-color: #EF9A9A;
-                                Text { text: "Delete"; font-size: 9px; color: #C62828; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.confirm-title = "Delete Rule";
-                                        root.confirm-message = "Delete this rule?";
-                                        root.confirm-action = "delete-rule";
-                                        root.confirm-payload = i;
-                                        root.modal-state = "confirm";
-                                    }
+                            delChip := MChipBtn {
+                                x: parent.width - self.width - 10px; y: (parent.height - self.height) / 2;
+                                text: "Delete";
+                                clicked => {
+                                    root.confirm-title = "Delete Rule";
+                                    root.confirm-message = "Delete this rule?";
+                                    root.confirm-action = "delete-rule";
+                                    root.confirm-payload = i;
+                                    root.modal-state = "confirm";
                                 }
                             }
                         }
@@ -2613,8 +2875,13 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 470px) / 2; y: (parent.height - 440px) / 2;
-            width: 470px; height: 440px; background: white; border-radius: 8px;
+            // Width bumped 470px -> 560px (UI fix, 2026-08-21): this footer has
+            // 5 buttons (the most of any modal in the app) and, now that MBtn's
+            // width is content-driven by its balanced 7px padding rather than a
+            // flat min-width, "Mark as Suspense" / "Save (no learn)" no longer
+            // fit five-across in 470px without clipping past the card edge.
+            x: (parent.width - 560px) / 2; y: (parent.height - 440px) / 2;
+            width: 560px; height: 440px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -3182,10 +3449,17 @@ export component MainScreen inherits Rectangle {
                             Text { text: "AI Auto-Classify \u{2014} Confidentiality Warning"; font-size: 14px; font-weight: 700; color: white; }
                             Text { text: "Read carefully before proceeding"; font-size: 11px; color: #FFCDD2; }
                         }
+                        // Same real-button hover/press treatment as MHdr's close
+                        // button — this modal has its own red-themed header so it
+                        // can't use MHdr directly, but the close control should
+                        // still behave and look identically.
                         Rectangle {
-                            width: 28px; height: 28px; border-radius: 14px; background: #00000030;
-                            TouchArea { clicked => { root.modal-state = ""; } }
-                            Text { text: "\u{2715}"; font-size: 13px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                            width: 28px; height: 28px; border-radius: 14px;
+                            background: aiCloseTa.pressed ? #00000055 : aiCloseTa.has-hover ? #00000040 : #00000030;
+                            accessible-role: button;
+                            accessible-label: "Close";
+                            aiCloseTa := TouchArea { mouse-cursor: pointer; clicked => { root.modal-state = ""; } }
+                            Text { text: "\u{2715}"; font-size: 15px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
@@ -3266,7 +3540,6 @@ export component MainScreen inherits Rectangle {
                 MFtr {
                     MBtn { text: "Unlock"; bg: #1565C0; clicked => { root.pdf-pwd-confirm(root.pdf-pwd-input); } }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.pdf-pwd-cancel(); } }
-                    Rectangle { horizontal-stretch: 1; }
                 }
             }
         }
@@ -3329,13 +3602,15 @@ export component MainScreen inherits Rectangle {
                 }
                 Text { text: root.ai-pct + "%"; font-size: 12px; font-weight: 600; color: #6B2FB8; horizontal-alignment: center; }
                 Text { text: "Sending transaction narrations to AI provider…\nDo not close the window."; font-size: 11px; color: #888888; horizontal-alignment: center; wrap: word-wrap; }
-                Rectangle {
-                    height: 30px; width: 100px;
-                    background: #FFFFFF; border-radius: 4px; border-width: 1px; border-color: #90CAF9;
-                    accessible-role: button;
-                    accessible-label: "Cancel";
-                    TouchArea { clicked => { root.ai-cancel(); } }
-                    Text { text: "Cancel"; font-size: 12px; color: #546E7A; horizontal-alignment: center; vertical-alignment: center; }
+                // Wrapped in a HorizontalBox so MBtn's content-driven width
+                // sizes naturally instead of stretching to the card's full
+                // width inside this centered VerticalBox.
+                HorizontalBox { padding: 0px;
+                    MBtn {
+                        text: "Cancel"; bg: white; fg: #546E7A;
+                        border-w: 1px; border-clr: #90CAF9;
+                        clicked => { root.ai-cancel(); }
+                    }
                 }
             }
         }
