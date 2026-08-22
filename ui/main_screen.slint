@@ -549,8 +549,25 @@ component TxnHeader inherits Rectangle {
     min-width: 50px;
     in property <length> content-width: max(self.width, 1460px);
     in property <length> scroll-x: 0px;
+    // Direct horizontal scroll (2026-08-22) — same mechanism/callback as
+    // `TxnTableRow`'s, so hovering the header scrolls the table too, not
+    // just hovering the rows. No existing interactive element here to
+    // conflict with, so a plain TouchArea (rather than piggy-backing on an
+    // existing one, as `TxnTableRow` had to) is fine.
+    callback horizontal-scroll(length);
     clip: true;
     Rectangle { x: root.scroll-x; width: root.content-width; y: 35px; height: 1px; background: #1976D2; }
+
+    TouchArea {
+        width: parent.width; height: parent.height;
+        scroll-event(event) => {
+            if event.delta-x != 0px || (event.modifiers.shift && event.delta-y != 0px) {
+                root.horizontal-scroll(event.delta-x + (event.modifiers.shift ? event.delta-y : 0px));
+                return accept;
+            }
+            return reject;
+        }
+    }
 
     HorizontalBox {
         x: root.scroll-x; width: root.content-width;
@@ -633,6 +650,16 @@ component TxnTableRow inherits Rectangle {
     in property <int>    row-idx;
     in property <bool>   compact: false;
     callback clicked(int);
+    // Direct horizontal scroll (2026-08-22) — lets the user pan the table by
+    // scrolling/swiping over a row directly, instead of only via the
+    // scrollbar thumb. Added to this row's own existing `ta` TouchArea
+    // rather than a separate overlay: a TouchArea placed *over* another one
+    // (even handling only `scroll-event`, nothing else) was confirmed via a
+    // standalone repro to swallow that other TouchArea's clicks entirely —
+    // so any such overlay here would have broken double-click-to-edit. One
+    // TouchArea doing both jobs avoids that. Bubbled up as a callback since
+    // this component doesn't have its own access to the table's `hscroll`.
+    callback horizontal-scroll(length);
 
     // UI refinement pass: 26px -> 30px (normal) / 22px -> 24px (compact),
     // and the 6px text inset below bumped to 8px, for readability per the
@@ -659,6 +686,18 @@ component TxnTableRow inherits Rectangle {
     ta := TouchArea {
         width: parent.width; height: parent.height;
         clicked => { root.clicked(root.row-idx); }
+        // Pure-vertical wheel motion is deliberately *not* handled here —
+        // returning `reject` for it lets the event keep propagating up to
+        // the enclosing ScrollView's own Flickable, which is what actually
+        // drives vertical scrolling (unchanged, still works exactly as
+        // before this was added).
+        scroll-event(event) => {
+            if event.delta-x != 0px || (event.modifiers.shift && event.delta-y != 0px) {
+                root.horizontal-scroll(event.delta-x + (event.modifiers.shift ? event.delta-y : 0px));
+                return accept;
+            }
+            return reject;
+        }
     }
 
     HorizontalBox {
@@ -1731,6 +1770,9 @@ export component MainScreen inherits Rectangle {
                                 TxnHeader {
                                     content-width: body.content-width;
                                     scroll-x: -body.hscroll;
+                                    horizontal-scroll(dx) => {
+                                        body.hscroll = max(0px, min(body.max-hscroll, body.hscroll + dx));
+                                    }
                                 }
 
                                 // Scrollable body with colored rows. `hScrollWrap` is a
@@ -1750,6 +1792,21 @@ export component MainScreen inherits Rectangle {
                                         width: body.content-width; height: parent.height;
                                         accessible-role: list;
                                         horizontal-scrollbar-policy: always-off;
+                                        // Vertical scrolling itself (wheel/drag-to-pan) still
+                                        // works fine through this ScrollView's own Flickable —
+                                        // that was never broken. What *was* broken: this
+                                        // ScrollView's own vertical scrollbar chrome renders at
+                                        // its own right edge, which is `body.content-width`
+                                        // (potentially 1460px+) — far to the right of
+                                        // `hScrollWrap`'s visible, clipped area — so the
+                                        // scrollbar itself was invisible even though scrolling
+                                        // worked, making it look broken. Hidden here in favor of
+                                        // `vTrack`/`vThumb` below, a custom scrollbar positioned
+                                        // at the *visible* right edge instead, driving this same
+                                        // ScrollView's `viewport-y` directly (an ordinary in-out
+                                        // property — same mechanism `TxnHeader` already reads
+                                        // from `viewport-x` for horizontal sync).
+                                        vertical-scrollbar-policy: always-off;
                                         VerticalLayout {
                                             padding: 0px; spacing: 0px; alignment: start;
                                             for row[idx] in root.transaction-rows : TxnTableRow {
@@ -1769,6 +1826,45 @@ export component MainScreen inherits Rectangle {
                                                         root.dclick-pending-idx = i;
                                                     }
                                                 }
+                                                horizontal-scroll(dx) => {
+                                                    body.hscroll = max(0px, min(body.max-hscroll, body.hscroll + dx));
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Custom vertical scrollbar — only shown once the rows
+                                    // actually overflow the visible height. Track + draggable
+                                    // thumb, positioned at this column's own visible right edge
+                                    // (not `txnList`'s, which is wider) and directly reading/
+                                    // writing `txnList.viewport-y`, so native wheel-scroll and
+                                    // thumb-drag both move the same, single source of truth.
+                                    if txnList.viewport-height > hScrollWrap.height : vTrack := Rectangle {
+                                        x: parent.width - 8px; y: 0px;
+                                        width: 8px; height: parent.height;
+                                        background: #E3E3E3;
+
+                                        vThumb := Rectangle {
+                                            width: 6px; x: 1px; border-radius: 3px;
+                                            background: vDrag.pressed ? #607D8B : #B0BEC5;
+                                            height: max(24px, vTrack.height * (hScrollWrap.height / txnList.viewport-height));
+                                            y: (vTrack.height - self.height)
+                                                * (-txnList.viewport-y / max(1px, txnList.viewport-height - hScrollWrap.height));
+
+                                            vDrag := TouchArea {
+                                                property <length> drag-start-viewport-y: 0px;
+                                                pointer-event(event) => {
+                                                    if event.kind == PointerEventKind.down {
+                                                        drag-start-viewport-y = txnList.viewport-y;
+                                                    }
+                                                }
+                                                moved => {
+                                                    if self.pressed {
+                                                        txnList.viewport-y = max(hScrollWrap.height - txnList.viewport-height, min(0px,
+                                                            drag-start-viewport-y - (self.mouse-y - self.pressed-y)
+                                                                * ((txnList.viewport-height - hScrollWrap.height) / max(1px, vTrack.height - vThumb.height))));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1778,6 +1874,19 @@ export component MainScreen inherits Rectangle {
                                 // actually narrower than its full column width. Track +
                                 // draggable thumb, sized/positioned proportionally like a
                                 // normal scrollbar.
+                                //
+                                // Bug fix (2026-08-22, found via manual testing of the real
+                                // compiled app — dragging did nothing): the `TouchArea` used to
+                                // be nested *inside* `hThumb`, so `self.mouse-x`/`self.pressed-x`
+                                // were local to the thumb's own coordinate frame — but the thumb
+                                // is exactly what this drag *moves*, so every frame the thumb
+                                // shifted in response to the drag, the TouchArea's own local
+                                // origin shifted with it, corrupting the next delta computed
+                                // from the same physical mouse position (a feedback loop against
+                                // the drag, not a fixed frame it's measured from). Moved the
+                                // `TouchArea` out to cover the whole (stationary) track instead —
+                                // same delta-from-`pressed-x` math, but now measured against a
+                                // frame that never moves during the drag, so it tracks correctly.
                                 if body.max-hscroll > 0px : hTrack := Rectangle {
                                     height: 10px;
                                     background: #E3E3E3;
@@ -1787,20 +1896,21 @@ export component MainScreen inherits Rectangle {
                                         background: hDrag.pressed ? #607D8B : #B0BEC5;
                                         width: max(24px, hTrack.width * (txnTableArea.width / body.content-width));
                                         x: (hTrack.width - self.width) * (body.hscroll / body.max-hscroll);
+                                    }
 
-                                        hDrag := TouchArea {
-                                            property <length> drag-start-hscroll: 0px;
-                                            pointer-event(event) => {
-                                                if event.kind == PointerEventKind.down {
-                                                    drag-start-hscroll = body.hscroll;
-                                                }
+                                    hDrag := TouchArea {
+                                        x: 0px; y: 0px; width: parent.width; height: parent.height;
+                                        property <length> drag-start-hscroll: 0px;
+                                        pointer-event(event) => {
+                                            if event.kind == PointerEventKind.down {
+                                                drag-start-hscroll = body.hscroll;
                                             }
-                                            moved => {
-                                                if self.pressed {
-                                                    body.hscroll = max(0px, min(body.max-hscroll,
-                                                        drag-start-hscroll + (self.mouse-x - self.pressed-x)
-                                                            * (body.max-hscroll / max(1px, hTrack.width - hThumb.width))));
-                                                }
+                                        }
+                                        moved => {
+                                            if self.pressed {
+                                                body.hscroll = max(0px, min(body.max-hscroll,
+                                                    drag-start-hscroll + (self.mouse-x - self.pressed-x)
+                                                        * (body.max-hscroll / max(1px, hTrack.width - hThumb.width))));
                                             }
                                         }
                                     }
