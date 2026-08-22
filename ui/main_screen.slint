@@ -531,9 +531,29 @@ component TxnHeader inherits Rectangle {
     height: 36px; background: #1565C0;
     accessible-role: table;
     accessible-label: "Transactions table header";
-    Rectangle { y: 35px; height: 1px; background: #1976D2; }
+    // Horizontal-scroll sync (UI fix, 2026-08-21): this component's own
+    // `width` is left to the instantiator's normal layout (unchanged) —
+    // only `content-width` (defaulting to the greater of that width or the
+    // table's natural full-column width, same 1460px floor TxnTableRow
+    // uses) can be wider, for the same "columns don't fit the viewport"
+    // case documented at TxnTableRow's `width`. `min-width` is set to a
+    // small constant (matching std-widgets' own ScrollView) specifically
+    // so *this* element's width demand never itself gets inflated by
+    // content-width/the HorizontalBox below back up through its ancestors
+    // — `self.width` in content-width's default is what those ancestors
+    // actually hand back down, not a circular re-ask. `clip: true` hides
+    // whatever content-width's gap over the viewport scrolls out of view,
+    // and `scroll-x` (bound by the instantiator to the row list's own
+    // `viewport-x`) shifts this header's content to match it, so the
+    // header can never drift out of column-alignment with the rows below.
+    min-width: 50px;
+    in property <length> content-width: max(self.width, 1460px);
+    in property <length> scroll-x: 0px;
+    clip: true;
+    Rectangle { x: root.scroll-x; width: root.content-width; y: 35px; height: 1px; background: #1976D2; }
 
     HorizontalBox {
+        x: root.scroll-x; width: root.content-width;
         padding: 0px; spacing: 0px;
         // Bank Name 90px (raw)
         Rectangle { width: 90px; clip: true;
@@ -1615,12 +1635,68 @@ export component MainScreen inherits Rectangle {
                 // Table + Summary — 12px gap between them (spec: main content
                 // area spacing) so the Summary panel no longer sits flush
                 // against the transaction table's right edge.
-                HorizontalBox {
-                    padding: 0px; spacing: 12px; vertical-stretch: 1;
+                //
+                // `txnTableArea`'s width below is a plain constant, not a
+                // formula tracking the window/available width, and that's
+                // a deliberate, tested trade-off, not an oversight — see
+                // the note on that `width:` line for why. `tableRow` is a
+                // plain `Rectangle` (not `HorizontalBox`) with both
+                // children's `x`/`width`/`height` set explicitly, the same
+                // pattern `TxnHeader` already uses for its own inner
+                // content, so nothing here depends on `HorizontalBox`'s
+                // own child-sizing/positioning machinery.
+                tableRow := Rectangle {
+                    width: parent.width;
+                    vertical-stretch: 1;
 
-                    // Transaction table — white background
-                    Rectangle {
-                        horizontal-stretch: 4; background: #FFFFFF; clip: true;
+                    // Transaction table — white background. Fills whatever
+                    // space remains after the Summary panel's fixed 280px
+                    // (plus the 12px gap above), so there's no leftover
+                    // blank gap between the table and the Summary panel at
+                    // any window size.
+                    //
+                    // This is safe to make responsive now — it wasn't
+                    // always (2026-08-21): `TxnTableRow`/`TxnHeader` need
+                    // at least ~1460px to show every column without their
+                    // own scrolling, and an earlier version of this file
+                    // let that wide content size *this* area directly
+                    // (`TxnTableRow { width: max(txnTableArea.width,
+                    // 1460px) }` inside a plain `ScrollView`, whose
+                    // Flickable auto-infers its `viewport-width` from
+                    // that). Whenever this area's assigned width left the
+                    // 1460px floor too little headroom, Slint rendered —
+                    // and positioned `summaryPanel` from — an effective
+                    // width measurably wider than what was actually
+                    // assigned (confirmed by comparing the value
+                    // `txnTableArea.width` read back, which stayed exactly
+                    // as assigned, against where `summaryPanel` — whose
+                    // own `x` is plain arithmetic off that same value —
+                    // visibly rendered), pushing the Summary panel off the
+                    // window. Reproduced with a bare, non-self-referential
+                    // `1460px` row-width literal and with `TxnHeader`
+                    // removed entirely, so it wasn't about self-reference
+                    // or `TxnHeader` specifically — it was that the *wide
+                    // Flickable itself*, even sized correctly, still
+                    // leaked some width demand to its ancestors once it
+                    // was close enough to that 1460px floor.
+                    //
+                    // The fix (below, at `hScrollWrap`/`txnList`) is to
+                    // stop asking any layout container to hold something
+                    // wider than the space it's given at all: the row
+                    // list's horizontal overflow is now handled the same
+                    // way `TxnHeader` already handles its own — a plain
+                    // `clip: true` `Rectangle` (`hScrollWrap`) whose width
+                    // simply follows this area normally, containing the
+                    // wide content as a *free* child (explicit `x`/`width`,
+                    // not layout-managed), which never contributes to its
+                    // parent's reported minimum size the way a layout's
+                    // child does. With nothing inside `txnTableArea` able
+                    // to leak a wide-content demand upward any more, this
+                    // area's own width is free to be a real formula again.
+                    txnTableArea := Rectangle {
+                        x: 0px; y: 0px; height: parent.height;
+                        background: #FFFFFF; clip: true;
+                        width: max(400px, tableRow.width - 280px - 12px);
 
                         VerticalBox {
                             padding: 0px; spacing: 0px;
@@ -1634,28 +1710,97 @@ export component MainScreen inherits Rectangle {
                                 }
                             }
 
-                            if root.transaction-rows.length > 0 : VerticalBox {
+                            if root.transaction-rows.length > 0 : body := VerticalBox {
                                 vertical-stretch: 1; padding: 0px; spacing: 0px;
-                                // Sticky table header
-                                TxnHeader { }
-                                // Scrollable body with colored rows
-                                ListView {
-                                    vertical-stretch: 1;
-                                    for row[idx] in root.transaction-rows : TxnTableRow {
-                                        width: parent.width;
-                                        data: row;
-                                        row-idx: idx;
-                                        compact: root.compact-mode;
-                                        clicked(i) => {
-                                            if root.dclick-pending-idx == i {
-                                                root.row-click(i);
-                                                root.etxn-vendor = "";
-                                                root.etxn-head   = "";
-                                                root.etxn-type-idx = 0;
-                                                root.modal-state = "edit-txn";
-                                                root.dclick-pending-idx = -1;
-                                            } else {
-                                                root.dclick-pending-idx = i;
+
+                                // Manual horizontal scroll (2026-08-21) — see the note on
+                                // `txnTableArea`'s `width` above for why this isn't a
+                                // `ScrollView`'s own horizontal axis. `content-width` is the
+                                // table's real full-column width (same 1460px floor
+                                // `TxnTableRow` always used); `hscroll` is how far right the
+                                // table is currently scrolled (0 = leftmost), shared by the
+                                // header, the row list, and the scrollbar thumb below so all
+                                // three can never drift out of sync with each other.
+                                property <length> content-width: max(txnTableArea.width, 1460px);
+                                property <length> max-hscroll: max(0px, content-width - txnTableArea.width);
+                                property <length> hscroll: 0px;
+
+                                // Sticky table header — offset in lockstep with the row
+                                // list's `hscroll` above, so it can never drift out of
+                                // column-alignment with the rows below.
+                                TxnHeader {
+                                    content-width: body.content-width;
+                                    scroll-x: -body.hscroll;
+                                }
+
+                                // Scrollable body with colored rows. `hScrollWrap` is a
+                                // plain `clip: true` Rectangle, not a layout — its own width
+                                // just follows this column normally. `txnList` inside it is
+                                // a *free* child (explicit `x`/`width`, not layout-managed),
+                                // the same pattern `TxnHeader` above already uses for its own
+                                // wide content, so its width never contributes to
+                                // `hScrollWrap`'s reported minimum size the way a layout
+                                // child's would — see the note on `txnTableArea`'s `width`
+                                // for why that containment matters here.
+                                hScrollWrap := Rectangle {
+                                    vertical-stretch: 1; clip: true; min-width: 50px;
+
+                                    txnList := ScrollView {
+                                        x: -body.hscroll; y: 0px;
+                                        width: body.content-width; height: parent.height;
+                                        accessible-role: list;
+                                        horizontal-scrollbar-policy: always-off;
+                                        VerticalLayout {
+                                            padding: 0px; spacing: 0px; alignment: start;
+                                            for row[idx] in root.transaction-rows : TxnTableRow {
+                                                width: body.content-width;
+                                                data: row;
+                                                row-idx: idx;
+                                                compact: root.compact-mode;
+                                                clicked(i) => {
+                                                    if root.dclick-pending-idx == i {
+                                                        root.row-click(i);
+                                                        root.etxn-vendor = "";
+                                                        root.etxn-head   = "";
+                                                        root.etxn-type-idx = 0;
+                                                        root.modal-state = "edit-txn";
+                                                        root.dclick-pending-idx = -1;
+                                                    } else {
+                                                        root.dclick-pending-idx = i;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Custom horizontal scrollbar — only shown once the table is
+                                // actually narrower than its full column width. Track +
+                                // draggable thumb, sized/positioned proportionally like a
+                                // normal scrollbar.
+                                if body.max-hscroll > 0px : hTrack := Rectangle {
+                                    height: 10px;
+                                    background: #E3E3E3;
+
+                                    hThumb := Rectangle {
+                                        height: 8px; y: 1px; border-radius: 4px;
+                                        background: hDrag.pressed ? #607D8B : #B0BEC5;
+                                        width: max(24px, hTrack.width * (txnTableArea.width / body.content-width));
+                                        x: (hTrack.width - self.width) * (body.hscroll / body.max-hscroll);
+
+                                        hDrag := TouchArea {
+                                            property <length> drag-start-hscroll: 0px;
+                                            pointer-event(event) => {
+                                                if event.kind == PointerEventKind.down {
+                                                    drag-start-hscroll = body.hscroll;
+                                                }
+                                            }
+                                            moved => {
+                                                if self.pressed {
+                                                    body.hscroll = max(0px, min(body.max-hscroll,
+                                                        drag-start-hscroll + (self.mouse-x - self.pressed-x)
+                                                            * (body.max-hscroll / max(1px, hTrack.width - hThumb.width))));
+                                                }
                                             }
                                         }
                                     }
@@ -1693,30 +1838,51 @@ export component MainScreen inherits Rectangle {
                                     Text { text: "|"; font-size: 11px; color: #90CAF9; vertical-alignment: center; }
 
                                     // Tag badges: .txn-tag style (font-size:9.5px; background+border)
+                                    //
+                                    // UI fix (2026-08-22): was `height:16px; min-width:28px;` with
+                                    // centered text — for text at/under 28px that gave *some* visible
+                                    // side margin, but it was never real padding, just leftover
+                                    // min-width slack, so it vanished (or the box just grew with zero
+                                    // margin) once the label was long enough to hit the min-width
+                                    // floor. Measured the actual gap that `height:16px` leaves above/
+                                    // below this text (font-size 10px, weight 800) at ~0.5px a side —
+                                    // effectively no visible padding either way. Replaced with a real,
+                                    // equal 3px padding on all four sides via `HorizontalBox`, so the
+                                    // badge always has the same breathing room left/right as top/
+                                    // bottom, text still centered, regardless of label length.
                                     for tag in [
                                         {lbl: "GST", bg: #C8E6C9, fg: #1B5E20, bc: #66BB6A},
                                         {lbl: "TAX", bg: #FFE0B2, fg: #BF360C, bc: #FFA726},
                                         {lbl: "DUP", bg: #FCE4EC, fg: #880E4F, bc: #E91E63},
                                     ] : Rectangle {
-                                        height: 16px; min-width: 28px;
                                         background: tag.bg; border-radius: 3px;
                                         border-width: 1px; border-color: tag.bc;
-                                        Text { text: tag.lbl; font-size: 10px; color: tag.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                        HorizontalBox {
+                                            padding: 3px;
+                                            Text { text: tag.lbl; font-size: 10px; color: tag.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
                                     }
 
                                     // Pipe separator text
                                     Text { text: "|"; font-size: 11px; color: #90CAF9; vertical-alignment: center; }
 
-                                    // Status chips: .status-chip style (rounded pills)
+                                    // Status chips: .status-chip style (rounded pills) — same fix as
+                                    // the tag badges above (was `height:16px; min-width:34px;`, ~1.5px
+                                    // of incidental top/bottom gap and none guaranteed left/right,
+                                    // most visible on "SUSPENSE" crowding its pill); border-radius
+                                    // bumped 8px -> 10px to keep the pill fully rounded at the new,
+                                    // slightly taller content-driven height.
                                     for chip in [
                                         {lbl: "HIGH",     bg: #C8E6C9, fg: #1B5E20, bc: #81C784},
                                         {lbl: "REVIEW",   bg: #FFCDD2, fg: #B71C1C, bc: #EF9A9A},
                                         {lbl: "SUSPENSE", bg: #E1BEE7, fg: #6A1B9A, bc: #BA68C8},
                                     ] : Rectangle {
-                                        height: 16px; min-width: 34px;
-                                        background: chip.bg; border-radius: 8px;
+                                        background: chip.bg; border-radius: 10px;
                                         border-width: 1px; border-color: chip.bc;
-                                        Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                        HorizontalBox {
+                                            padding: 3px;
+                                            Text { text: chip.lbl; font-size: 9px; color: chip.fg; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
                                     }
 
                                     Rectangle { horizontal-stretch: 1; }
@@ -1737,7 +1903,9 @@ export component MainScreen inherits Rectangle {
                     // header (blue / green / red) per the reference. All data
                     // below is still the existing dash-*/for-loop bindings —
                     // only presentation changed.
-                    Rectangle {
+                    summaryPanel := Rectangle {
+                        x: txnTableArea.x + txnTableArea.width + 12px;
+                        y: 0px; height: parent.height;
                         width: 280px;
                         background: #F0F7FF;
                         clip: true;

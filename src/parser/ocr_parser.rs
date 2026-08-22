@@ -52,6 +52,16 @@ static DRCR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(?:DR|CR)\b\.?").u
 // JS `\w` = [A-Za-z0-9_]; Rust default `\w` is Unicode-aware, so we use explicit set.
 static STRAY_PUNCT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^A-Za-z0-9_\s/\-.@&]").unwrap());
 
+// U+E020 (Unicode Private Use Area) — a delimiter that can never appear in
+// real bank-statement OCR/embedded-PDF text. `preprocess_multiline` wraps a
+// structurally-confirmed reference number (found on its own dedicated OCR
+// line, not guessed) in this marker so it survives being flattened into the
+// single-line format `parse_ocr_text`'s main loop consumes; that loop strips
+// the marker back out (`strip_ref_marker`) before touching amounts or
+// narration, so the value can never be misread as a debit/credit/balance
+// figure by `AMT_RE`'s no-decimal-required 5+-digit branch.
+const REF_MARKER: char = '\u{E020}';
+
 // ── Amount extraction ─────────────────────────────────────────────────────────
 
 /// Extracted amount with its value, raw string, and byte position in the line.
@@ -88,6 +98,85 @@ fn extract_amounts(s: &str) -> Vec<AmountMatch> {
         });
     }
     out
+}
+
+// ── Reference-number extraction ─────────────────────────────────────────────
+
+/// Number of integer digits in a decimal string (commas stripped, before
+/// the dot). Local copy of the identically-named helper in
+/// `transaction_extractor.rs` — kept independent per this module's existing
+/// convention of not exposing private cross-module helpers (see
+/// `csv_parser.rs`'s `apply_bank_detection` doc comment for the same
+/// rationale).
+fn int_digit_count(s: &str) -> usize {
+    let s = s.replace(',', "");
+    let s = if let Some(p) = s.find('.') { &s[..p] } else { &s };
+    s.chars().filter(|c| c.is_ascii_digit()).count()
+}
+
+/// Strips a `REF_MARKER`-delimited token (`\u{E020}<digits>\u{E020}`) out of
+/// `line`, returning the cleaned line and the recovered value, if present.
+/// A missing closing marker (malformed input) is left untouched rather than
+/// guessed at.
+fn strip_ref_marker(line: &str) -> (String, Option<String>) {
+    let Some(start) = line.find(REF_MARKER) else {
+        return (line.to_string(), None);
+    };
+    let after_start = start + REF_MARKER.len_utf8();
+    let Some(rel_end) = line[after_start..].find(REF_MARKER) else {
+        return (line.to_string(), None);
+    };
+    let value = line[after_start..after_start + rel_end].to_string();
+    let end = after_start + rel_end + REF_MARKER.len_utf8();
+    let cleaned = format!("{}{}", &line[..start], &line[end..]);
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    (cleaned, if value.is_empty() { None } else { Some(value) })
+}
+
+/// Extract the transaction's reference/UTR/RRN/UPI-reference number
+/// embedded in `narration` — the longest run of >= 9 consecutive ASCII
+/// digits found anywhere in the text.
+///
+/// Real OCR/embedded-PDF text glues the reference directly onto adjacent
+/// letters with no delimiter at all — e.g. `"UPI209498825681Papad"`,
+/// `"NEFT-HDFCN52025050515108279-SMCGLOBAL"`,
+/// `"N121243012696624CONNEXIONS"` (verified against every real
+/// successfully-parsing PDF fixture this parser handles — see
+/// `PDF_FIXTURES` in `tests/import_pipeline.rs`). So unlike
+/// `transaction_extractor::extract_ref_from_narration` (built for a
+/// cleanly slash-delimited FW/Cosmos PDF layout), this deliberately does
+/// **not** require a `/`/`-`/space boundary on either side. A run this
+/// long is never a date (already stripped from the line before this text
+/// is reached), a genuine amount (amounts here either carry a decimal
+/// point or were already excluded by the `int_digit_count` filter above),
+/// or a serial/line number in the bank statements this parser targets — so
+/// 9+ digits stays a safe, conservative threshold without needing
+/// punctuation cues.
+///
+/// Returns `None` when no qualifying run exists — never fabricates one.
+fn extract_embedded_reference(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut best: Option<(usize, usize)> = None; // (start, len)
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let len = i - start;
+            let is_better = match best {
+                Some((_, blen)) => len > blen,
+                None => true,
+            };
+            if len >= 9 && is_better {
+                best = Some((start, len));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    best.map(|(start, len)| text[start..start + len].to_string())
 }
 
 // ── parse_ocr_text ────────────────────────────────────────────────────────────
@@ -143,7 +232,26 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
                 s.split_whitespace().collect::<Vec<_>>().join(" ")
             };
 
-            let amts = extract_amounts(&rest_clean);
+            // Recover a structurally-confirmed reference number
+            // `preprocess_multiline` may have smuggled through as a
+            // REF_MARKER-delimited token — strip it out before any
+            // amount/narration processing touches this line.
+            let (rest_clean, marker_ref) = strip_ref_marker(&rest_clean);
+
+            let raw_amts = extract_amounts(&rest_clean);
+            // Bank amounts realistically never reach 11 integer digits; a
+            // longer bare digit run is a UTR/RRN/reference number that
+            // AMT_RE's no-decimal-required 5+-digit branch would otherwise
+            // misclassify as a debit/credit/balance figure — mirrors
+            // transaction_extractor.rs's identical `int_digit_count` guard,
+            // same reasoning, kept as a local copy per this module's
+            // existing convention of not exposing private cross-module
+            // helpers (see csv_parser.rs's `apply_bank_detection` doc
+            // comment for the same rationale).
+            let amts: Vec<AmountMatch> = raw_amts
+                .into_iter()
+                .filter(|a| int_digit_count(&a.raw) <= 10)
+                .collect();
             if amts.is_empty() {
                 continue;
             }
@@ -169,6 +277,19 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
             if narration.is_empty() {
                 narration = "(OCR)".to_string();
             }
+
+            // Reference: prefer the structurally-confirmed marker value
+            // (a whole line that was nothing but digits, per
+            // `preprocess_multiline`'s own layout doc comment); otherwise
+            // fall back to the longest embedded 9+ digit run still present
+            // in narration — real bank-statement OCR text glues the
+            // reference directly onto adjacent letters with no delimiter
+            // (see `extract_embedded_reference`'s doc comment). Never
+            // invented: both sources only ever return a value actually
+            // present in the source text.
+            let reference = marker_ref
+                .or_else(|| extract_embedded_reference(&narration))
+                .unwrap_or_default();
 
             // Determine debit / credit
             let dr_marker = {
@@ -235,6 +356,7 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
             t.date = nd.display;
             t.date_ts = nd.ts;
             t.narration = narration;
+            t.reference = reference;
             t.debit = debit
                 .filter(|&v| v > 0.0)
                 .map(|v| (v * 100.0).round() / 100.0);
@@ -408,8 +530,13 @@ pub fn preprocess_multiline(text: &str) -> String {
     let mut cur_date: Option<String> = None;
     let mut cur_narr: Vec<String> = Vec::new();
     let mut cur_amts: Vec<f64> = Vec::new();
+    let mut cur_ref: Option<String> = None;
 
-    let flush = |date: &str, narrs: &[String], amts: &[f64], out: &mut Vec<String>| {
+    let flush = |date: &str,
+                 narrs: &[String],
+                 amts: &[f64],
+                 refnum: &Option<String>,
+                 out: &mut Vec<String>| {
         if amts.len() < 2 {
             return;
         } // need txn amount + balance minimum
@@ -421,7 +548,24 @@ pub fn preprocess_multiline(text: &str) -> String {
         };
         // Format amounts as plain decimals so parse_ocr_text can re-parse them
         let amts_str: Vec<String> = amts.iter().map(|a| format!("{:.2}", a)).collect();
-        out.push(format!("{} {} {}", date, narr, amts_str.join(" ")));
+        // Carry a structurally-confirmed reference number (its own
+        // dedicated line, per this function's layout doc comment above)
+        // through as a REF_MARKER-delimited token instead of discarding it
+        // — parse_ocr_text strips the marker back out before touching
+        // amounts or narration, so it can't be misread as a debit/credit/
+        // balance figure downstream.
+        match refnum {
+            Some(r) => out.push(format!(
+                "{} {} {}{}{} {}",
+                date,
+                narr,
+                REF_MARKER,
+                r,
+                REF_MARKER,
+                amts_str.join(" ")
+            )),
+            None => out.push(format!("{} {} {}", date, narr, amts_str.join(" "))),
+        }
     };
 
     // Noise patterns that never belong in a narration
@@ -449,14 +593,21 @@ pub fn preprocess_multiline(text: &str) -> String {
         if nd.valid {
             // Flush previous transaction group
             if let Some(ref date) = cur_date {
-                flush(date, &cur_narr, &cur_amts, &mut out);
+                flush(date, &cur_narr, &cur_amts, &cur_ref, &mut out);
             }
             cur_date = Some(nd.display.clone());
             cur_narr.clear();
             cur_amts.clear();
+            cur_ref = None;
         } else if cur_date.is_some() {
             if is_pure_integer(line) {
-                // Reference number — skip entirely
+                // Reference number line — keep the first one seen for this
+                // transaction (matches this codebase's other "first
+                // non-empty wins" reference conventions, e.g.
+                // transaction_extractor.rs's Format A path).
+                if cur_ref.is_none() {
+                    cur_ref = Some(line.replace(',', "").trim().to_string());
+                }
             } else if is_amount_line(line) {
                 if let Some(v) = parse_amt_line(line) {
                     cur_amts.push(v);
@@ -470,7 +621,7 @@ pub fn preprocess_multiline(text: &str) -> String {
 
     // Flush the last group
     if let Some(ref date) = cur_date {
-        flush(date, &cur_narr, &cur_amts, &mut out);
+        flush(date, &cur_narr, &cur_amts, &cur_ref, &mut out);
     }
 
     out.join("\n")
@@ -572,6 +723,140 @@ Account No: 50100123456789
             result.closing_balance.is_none(),
             "OCR closing balance always None"
         );
+    }
+
+    // ── Reference-number extraction (regression coverage for the Ref/
+    // Reference table column being permanently blank for every OCR/
+    // embedded-text PDF import — see extract_embedded_reference's doc
+    // comment for the real-fixture evidence this is modeled on) ────────────
+
+    #[test]
+    fn embedded_reference_fused_to_narration_is_extracted() {
+        // Exactly the shape real fixtures produce: no delimiter at all
+        // between the narration text and the reference digits.
+        let text = "15/01/2024 UPI209498825681Papad 610.00 1,32,408.22\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert_eq!(real[0].reference, "209498825681");
+        // Reference is not scrubbed out of narration — matches the existing
+        // transaction_extractor.rs Format B convention (narration keeps it
+        // inline too).
+        assert!(real[0].narration.contains("209498825681"));
+    }
+
+    #[test]
+    fn no_qualifying_digit_run_leaves_reference_blank() {
+        // "50000" (5 digits) already gets consumed as a real amount by
+        // AMT_RE; nothing else in this line is >= 9 consecutive digits — the
+        // source genuinely has no reference here, so it must stay blank,
+        // never invented.
+        let text = "15/01/2024 SALARY CREDIT ACME PVT LTD 50000.00 1,50,000.00\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert_eq!(real[0].reference, "", "no source reference → must stay blank");
+    }
+
+    #[test]
+    fn a_short_digit_run_under_nine_digits_is_not_treated_as_reference() {
+        // An 8-digit run must not be picked up (the codebase-wide 9+ digit
+        // convention for "this is definitely a UTR/RRN, not something
+        // else") — stays out of the reference field.
+        let text = "15/01/2024 CHQ12345678 CLEARED 10000.00 90000.00\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert_eq!(real[0].reference, "");
+    }
+
+    #[test]
+    fn long_embedded_digit_run_does_not_get_misread_as_an_amount() {
+        // Without the int_digit_count guard, AMT_RE's no-decimal 5+-digit
+        // branch would treat "302498825681" (12 digits) as a legitimate
+        // debit/credit/balance figure and corrupt the real amounts — this
+        // proves the guard keeps balance/debit/credit correct while the
+        // long run is still recovered as the reference.
+        let text = "15/01/2024 UPI/302498825681/PAPAD SHOP 610.00 1,32,408.22\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert_eq!(real[0].reference, "302498825681");
+        assert!(
+            (real[0].balance.unwrap() - 132408.22).abs() < 0.01,
+            "balance must be the real 1,32,408.22 figure, not the reference number: {:?}",
+            real[0].balance
+        );
+        let moved_amt = real[0].debit.or(real[0].credit).unwrap();
+        assert!(
+            (moved_amt - 610.0).abs() < 0.01,
+            "debit/credit must be the real 610.00 figure, not the reference number: dr={:?} cr={:?}",
+            real[0].debit,
+            real[0].credit
+        );
+    }
+
+    #[test]
+    fn preprocess_multiline_carries_an_isolated_reference_line_through_to_the_transaction() {
+        // Exactly the layout preprocess_multiline's own doc comment
+        // describes: date / narration / bare reference number / amount /
+        // balance, each on its own OCR line.
+        let text = "\
+04/04/2022
+UPI209498825681Papad
+209498825681
+610.00
+13,24,083.22
+";
+        let pre = preprocess_multiline(text);
+        let result = parse_ocr_text(&pre, "bom.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1, "preprocessed text: {pre:?}");
+        assert_eq!(real[0].reference, "209498825681");
+        assert!(
+            (real[0].balance.unwrap() - 1324083.22).abs() < 0.01,
+            "balance must be the real running-balance figure, not the reference: {:?}",
+            real[0].balance
+        );
+    }
+
+    #[test]
+    fn preprocess_multiline_leaves_reference_blank_when_no_isolated_line_present() {
+        let text = "\
+23/08/2024
+SALARY FOR JULY 2024
+25000.00
+1,50,000.00
+";
+        let pre = preprocess_multiline(text);
+        let result = parse_ocr_text(&pre, "mahanagar.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1, "preprocessed text: {pre:?}");
+        assert_eq!(real[0].reference, "", "no source reference → must stay blank");
     }
 
     // ── Direction inference ───────────────────────────────────────────────────
