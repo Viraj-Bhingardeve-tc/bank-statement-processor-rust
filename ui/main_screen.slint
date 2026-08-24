@@ -593,7 +593,17 @@ component TxnHeader inherits Rectangle {
             Text { x: 9px; width: parent.width - 18px; height: parent.height; text: "Narration"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
         // Ref 95px (raw)
-        Rectangle { width: 95px; clip: true;
+        // `height: root.height` (2026-08-24) — every other cell in this row
+        // left its height unset, relying on the `Text` inside binding to
+        // `parent.height` while the cell `Rectangle` itself had no explicit
+        // height of its own to give — an ambiguous two-generation inference
+        // (cell height, in turn, from the `Text`'s own `parent.height` read)
+        // that a real running build showed resolving inconsistently: this
+        // column's label rendered visibly lower than "Bank Name"/"Account
+        // No"/"Date"/"Narration" alongside it. Anchoring directly to
+        // `root.height` (`TxnHeader`'s own explicit `height: 36px`,
+        // unambiguous) removes that inference entirely for this cell.
+        Rectangle { width: 95px; height: root.height; clip: true;
             Rectangle { x: 94px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 77px; height: parent.height; text: "Ref"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
@@ -728,7 +738,13 @@ component TxnTableRow inherits Rectangle {
                    vertical-alignment: center; overflow: elide; }
         }
         // Ref 95px
-        Rectangle { width: 95px; clip: true;
+        // `height: root.height` — see `TxnHeader`'s matching "Ref 95px"
+        // cell doc comment above for why this cell specifically needs an
+        // explicit height instead of leaving it to infer from its own
+        // `Text`'s `parent.height` read. `root.height` here is
+        // `TxnTableRow`'s own explicit `height: root.compact ? 24px :
+        // 30px`, equally unambiguous.
+        Rectangle { width: 95px; height: root.height; clip: true;
             Text { x: 8px; width: parent.width - 16px; height: parent.height;
                    text: root.data.ref-no; font-size: 11px; color: #546E7A;
                    vertical-alignment: center; overflow: elide; }
