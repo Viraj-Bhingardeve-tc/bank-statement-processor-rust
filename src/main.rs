@@ -641,25 +641,43 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
         .collect();
     h.set_dash_chart_monthly(slint::ModelRc::new(slint::VecModel::from(month_bars)));
 
-    // Expense breakdown — normalise widths
+    // Expense breakdown — normalise widths (bar length, `w`) and also
+    // accumulate donut-arc angles (`start_angle`/`sweep_angle`) from the
+    // same `amount`s, for the "EXPENSE HEAD BREAKDOWN" donut (see
+    // `DashExpBar`'s own doc comment, dashboard.slint, for why both live on
+    // the one struct). Angles are computed from `total_exp`, the sum of
+    // these same entries' amounts, so the ring always closes at 360°.
     let max_exp = data
         .expenses
         .iter()
         .map(|e| e.amount)
         .fold(0.0f64, f64::max);
+    let total_exp: f64 = data.expenses.iter().map(|e| e.amount).sum();
+    let mut angle = 0.0f32;
     let exp_bars: Vec<DashExpBar> = data
         .expenses
         .iter()
-        .map(|e| DashExpBar {
-            label: SharedString::from(e.label.as_str()),
-            w: (if max_exp > 0.0 {
-                e.amount / max_exp
+        .map(|e| {
+            let sweep = (if total_exp > 0.0 {
+                (e.amount / total_exp) as f32
             } else {
                 0.0
-            }) as f32,
-            amount_str: SharedString::from(fmt_amt(Some(e.amount)).as_str()),
-            color_idx: e.color_idx,
-            pct: e.pct,
+            }) * 360.0;
+            let bar = DashExpBar {
+                label: SharedString::from(e.label.as_str()),
+                w: (if max_exp > 0.0 {
+                    e.amount / max_exp
+                } else {
+                    0.0
+                }) as f32,
+                amount_str: SharedString::from(fmt_amt(Some(e.amount)).as_str()),
+                color_idx: e.color_idx,
+                pct: e.pct,
+                start_angle: angle,
+                sweep_angle: sweep,
+            };
+            angle += sweep;
+            bar
         })
         .collect();
     h.set_dash_chart_expenses(slint::ModelRc::new(slint::VecModel::from(exp_bars)));
@@ -1171,6 +1189,53 @@ fn apply_parse_result(
             .map(settings::Settings::load)
             .unwrap_or_default()
     };
+
+    // ── Auto-classify on import (restored 2026-08-24) ─────────────────────────
+    // Every freshly-parsed transaction starts life as `TransactionStatus::
+    // Unreviewed` with empty `vendor`/`account_head`/`tags` (see `parser::
+    // Transaction`'s `Default` impl) — traced end-to-end against a real,
+    // live-imported dataset (1075 transactions, all still Unreviewed/Low-
+    // confidence/unclassified) to confirm nothing in this function was
+    // running `classify_all` at all; only the manual "Auto-Classify All"/
+    // "AI Classify" button handlers did, so a transaction stayed at its raw
+    // imported defaults until the user took a separate manual action after
+    // every single import. Runs here with the same inputs those manual
+    // handlers use (stored rules for the current client, the bank's own
+    // ledger name, the Dedupe toggle, GST settings), before `real`/every
+    // stat below is computed from `result.transactions` and before this
+    // function's own `db::upsert_transactions` call further down persists
+    // it — so the classification these transactions get is what actually
+    // lands in the database, not just an in-memory display that reverts
+    // the moment this client is reloaded. Re-normalize vendors again
+    // afterward: a rule/heuristic match can newly set/derive a vendor name
+    // that itself needs canonicalizing, same as the manual handlers do.
+    {
+        let (bank_ledger, client_id) = {
+            let st = state_ref.lock().unwrap();
+            (st.tally_ledger.clone(), st.client_id.unwrap_or(0))
+        };
+        let rules = {
+            let db = db_ref.lock().unwrap();
+            db.as_ref()
+                .and_then(|conn| db::get_rules(conn, client_id).ok())
+                .unwrap_or_default()
+        };
+        let dedup_on = h.get_dedup_enabled();
+        let changed = classifier::classify_all(
+            &mut result.transactions,
+            &bank_ledger,
+            &rules,
+            dedup_on,
+            cfg.gst_enabled,
+            cfg.gst_auto_ledgers,
+        );
+        parser::party_master::normalize_vendors(&mut result.transactions);
+        log::info!(
+            "[AutoClassify] on import: classified {} transactions (rules={})",
+            changed,
+            rules.len()
+        );
+    }
 
     let real: Vec<&parser::Transaction> = result
         .transactions
@@ -2870,6 +2935,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     changed,
                     rules.len()
                 );
+                // Persist to the database (added 2026-08-24) — previously
+                // this handler only updated `st.transactions` in memory and
+                // refreshed the UI, never writing the classified vendor/
+                // account_head/status/confidence back to disk, so the
+                // moment this client was reloaded (switch away and back, or
+                // just restart the app) the classification silently
+                // reverted to the raw imported/unclassified state — traced
+                // end-to-end against a real dataset that showed exactly
+                // this symptom. `upsert_transactions` is `INSERT OR
+                // REPLACE`, so this is safe to call on already-persisted
+                // rows; `import_id: None` preserves each transaction's own
+                // already-set `import_id` (see `upsert_transactions`'s
+                // `eff_import_id = import_id.or(t.import_id)`).
+                if let Some(conn) = db_ref.lock().unwrap().as_ref() {
+                    if let Err(e) = db::upsert_transactions(conn, client_id, None, &st.transactions)
+                    {
+                        log::error!("[AutoClassify] failed to persist classification: {}", e);
+                    }
+                }
                 rebuild_rows(&h, &st);
                 push_dashboard(&h, &st.transactions, st.opening_balance);
                 push_summary_extras(&h, &st.transactions);
@@ -2890,6 +2974,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let handle = app.as_weak();
             let state_ref = app_state.clone();
+            let db_ref = db_conn.clone();
             app.on_do_ai_classify(move || {
                 let h = match handle.upgrade() { Some(h) => h, None => return };
                 {
@@ -2907,6 +2992,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let scope        = ai_classifier::AiScope::from_idx(h.get_ai_scope_idx());
                     let handle2      = h.as_weak();
                     let state_ref2   = state_ref.clone();
+                    let db_ref2      = db_ref.clone();
                     // Reset (and grab a clone of) the shared cancel flag before this run
                     // starts — on_do_ai_cancel sets it from the UI thread; the spawned
                     // thread below checks it between AI batches.
@@ -2958,12 +3044,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let handle3 = handle2.clone();
                         let state_ref3 = state_ref2.clone();
+                        let db_ref3 = db_ref2.clone();
                         let txns_done = txns;
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(h2) = handle3.upgrade() {
                                 let mut st = state_ref3.lock().unwrap();
                                 st.transactions = txns_done;
                                 parser::party_master::normalize_vendors(&mut st.transactions);
+                                // Persist to the database (added 2026-08-24) —
+                                // same gap as the free "Auto-Classify All"
+                                // handler had: without this, a paid AI-
+                                // classification run's results only lived in
+                                // memory and silently reverted to the raw
+                                // unclassified state on the next reload —
+                                // wasteful given this path costs real API
+                                // spend to run. See `upsert_transactions`'s
+                                // own doc comment for why `import_id: None`
+                                // is safe here.
+                                let client_id = st.client_id.unwrap_or(0);
+                                if let Some(conn) = db_ref3.lock().unwrap().as_ref() {
+                                    if let Err(e) = db::upsert_transactions(
+                                        conn,
+                                        client_id,
+                                        None,
+                                        &st.transactions,
+                                    ) {
+                                        log::error!(
+                                            "[AIClassify] failed to persist classification: {}",
+                                            e
+                                        );
+                                    }
+                                }
                                 h2.set_ai_overlay_visible(false);
                                 rebuild_rows(&h2, &st);
                                 push_dashboard(&h2, &st.transactions, st.opening_balance);
@@ -5655,7 +5766,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 // Load transactions from DB for this client
-                let txns = {
+                let mut txns = {
                     let db = db_ref.lock().unwrap();
                     if let Some(conn) = db.as_ref() {
                         db::get_transactions(conn, client.id).unwrap_or_default()
@@ -5673,6 +5784,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         settings::Settings::default()
                     }
                 };
+
+                // ── Self-healing classification (added 2026-08-24) ────────────────
+                // Traced end-to-end against a real client's data that loaded here
+                // with every transaction still at its raw imported defaults
+                // (Unreviewed, empty vendor/account_head, confidence 0) — this
+                // client's own import predated `apply_parse_result`'s auto-
+                // classify-on-import step (or came in via some other path that
+                // skipped it), and this handler itself never called
+                // `classify_all` at all, so switching to this client kept
+                // showing raw, unclassified data indefinitely, every single
+                // time. `classify_all` already skips confidently-classified
+                // (confidence>=1.0), AI-classified, and Suspense rows on its
+                // own (see its own doc comment), so unconditionally running it
+                // here is a safe no-op for a client whose data is already
+                // properly classified, and self-healing for one that isn't —
+                // no separate "does this look stale" heuristic needed. Only
+                // persists back to the database when something actually
+                // changed, so a healthy client's `on_do_select_client` doesn't
+                // pay for a write it doesn't need.
+                {
+                    let rules = {
+                        let db = db_ref.lock().unwrap();
+                        db.as_ref()
+                            .and_then(|conn| db::get_rules(conn, client.id).ok())
+                            .unwrap_or_default()
+                    };
+                    let dedup_on = h.get_dedup_enabled();
+                    let changed = classifier::classify_all(
+                        &mut txns,
+                        &client.tally_ledger,
+                        &rules,
+                        dedup_on,
+                        cfg.gst_enabled,
+                        cfg.gst_auto_ledgers,
+                    );
+                    if changed > 0 {
+                        parser::party_master::normalize_vendors(&mut txns);
+                        log::info!(
+                            "[SelectClient] self-healed classification for '{}': {} transactions classified",
+                            client.name,
+                            changed
+                        );
+                        if let Some(conn) = db_ref.lock().unwrap().as_ref() {
+                            if let Err(e) = db::upsert_transactions(conn, client.id, None, &txns) {
+                                log::error!(
+                                    "[SelectClient] failed to persist self-healed classification: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
 
                 let opening_bal = txns
                     .iter()

@@ -20,6 +20,17 @@ export struct DashExpBar {
     amount-str: string,
     color-idx:  int,      // 0-9 → PIE_PALETTE
     pct:        int,      // integer percent
+    // Cumulative donut-arc angles in degrees (0deg = 12 o'clock, clockwise),
+    // pre-computed in Rust from the same `amount` each entry's `w`/`pct`/
+    // `amount-str` above already come from (main.rs, push_dashboard) — added
+    // so "EXPENSE HEAD BREAKDOWN" can be drawn as the donut chart the ZIP
+    // reference screenshot shows (verified via pixel sampling: its legend
+    // swatch colors are this exact `PiePalette`, in this exact `color-idx`
+    // order), rather than a bar list. Slint's `Path` can't accumulate a
+    // running total across a `for` loop itself, so the cumulative sum is
+    // done once here instead.
+    start-angle: float,
+    sweep-angle: float,
 }
 
 export struct DashCashPt {
@@ -65,6 +76,18 @@ component StatCard inherits Rectangle {
     background:    #FFFFFF;
     border-radius: 10px;
     min-height:    78px;
+    // `clip: true` (2026-08-24) — runtime-verified fix. Confirmed by
+    // actually running the app: an unusually long value (this card's own
+    // test data included some absurdly long ₹ figures) wrapped to a second
+    // line whose height wasn't accounted for by the row's own layout pass,
+    // so that second line rendered *below* this card's rounded white
+    // background instead of growing it — text visibly spilling onto the
+    // plain page background outside the card. `clip: true` is the safety
+    // net: whatever happens inside this card's box now can never paint
+    // outside its rounded boundary, matching every other card-like
+    // component in this file (`ChartCard`, `InsCard`'s effective clipping
+    // via its rectangular children) which already clips.
+    clip: true;
     drop-shadow-blur:     6px;
     drop-shadow-color:    #00000012;
     drop-shadow-offset-y: 2px;
@@ -87,10 +110,22 @@ component StatCard inherits Rectangle {
                 text: root.title; color: #888888;
                 font-size: 10px; font-weight: 700;
                 letter-spacing: 0.7px;
+                overflow: elide;
             }
-            Text { text: root.value; color: #0D47A1; font-size: 15px; font-weight: 700; }
+            // Single line + elide (2026-08-24), not `wrap: word-wrap` — see
+            // `clip`'s doc comment above for what wrapping did wrong here.
+            // Eliding keeps every card's natural height stable (matching
+            // the ZIP reference's own clean single-line card values) while
+            // still guaranteeing an arbitrarily long ₹ figure never grows
+            // past, or spills outside of, this card's box — it just
+            // truncates with "…" instead.
+            Text {
+                text: root.value; color: #0D47A1; font-size: 15px; font-weight: 700;
+                overflow: elide;
+            }
             if root.sub != "" : Text {
                 text: root.sub; color: #999999; font-size: 10px;
+                overflow: elide;
             }
         }
     }
@@ -267,8 +302,17 @@ component MonthlyChart inherits Rectangle {
     }
 }
 
-// ── Expense horizontal bar chart ───────────────────────────────────────────────
-component ExpenseChart inherits Rectangle {
+// ── Expense head donut chart ────────────────────────────────────────────────────
+// Ring (drawn via `Path`/`ArcTo` — Slint has no built-in chart types) + a
+// plain label-only legend to the right, matching the ZIP reference
+// screenshot's "EXPENSE HEAD BREAKDOWN" exactly (verified by pixel-sampling
+// the screenshot: legend swatches are this same `PiePalette`, in this same
+// `color-idx` order; the legend shows only a swatch + label, no count/
+// percent alongside it). `start-angle`/`sweep-angle` come pre-computed on
+// `DashExpBar` itself (see its own doc comment) from the same real
+// `data.expenses` the old bar-chart form used — same data, different chart
+// type only.
+component DonutChart inherits Rectangle {
     in property <[DashExpBar]> data: [];
 
     if data.length == 0 : Text {
@@ -277,61 +321,56 @@ component ExpenseChart inherits Rectangle {
         horizontal-alignment: center; vertical-alignment: center;
     }
 
-    if data.length > 0 : ScrollView {
-        VerticalBox {
-            padding: 2px; spacing: 4px;
-            for item in root.data : Rectangle {
-                height: 22px;
+    if data.length > 0 : HorizontalBox {
+        padding: 0px; spacing: 14px;
 
-                // Color dot
-                Rectangle {
-                    x: 0px; y: 5px;
-                    width: 10px; height: 10px;
-                    border-radius: 5px;
-                    background: PiePalette.color(item.color-idx);
+        ring := Rectangle {
+            width: min(self.height, 260px);
+            property <float> cx: ring.width / 2 / 1px;
+            property <float> cy: ring.height / 2 / 1px;
+            property <float> r-outer: min(ring.width, ring.height) / 2 / 1px - 2;
+            property <float> r-inner: ring.r-outer * 0.55;
+
+            for item in root.data : Path {
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                viewbox-width: ring.width / 1px; viewbox-height: ring.height / 1px;
+                fill: PiePalette.color(item.color-idx);
+
+                property <float> a0: (item.start-angle - 90) * 3.14159265 / 180;
+                property <float> a1: (item.start-angle + item.sweep-angle - 90) * 3.14159265 / 180;
+                property <bool> big: item.sweep-angle > 180;
+
+                MoveTo { x: ring.cx + ring.r-outer * cos(a0 * 1rad); y: ring.cy + ring.r-outer * sin(a0 * 1rad); }
+                ArcTo {
+                    x: ring.cx + ring.r-outer * cos(a1 * 1rad); y: ring.cy + ring.r-outer * sin(a1 * 1rad);
+                    radius-x: ring.r-outer; radius-y: ring.r-outer;
+                    sweep: true; large-arc: big;
                 }
-
-                // Label
-                Text {
-                    x: 15px; y: 0px; width: 100px; height: 22px;
-                    text: item.label;
-                    font-size: 10px; color: #37474F;
-                    overflow: elide; vertical-alignment: center;
+                LineTo { x: ring.cx + ring.r-inner * cos(a1 * 1rad); y: ring.cy + ring.r-inner * sin(a1 * 1rad); }
+                ArcTo {
+                    x: ring.cx + ring.r-inner * cos(a0 * 1rad); y: ring.cy + ring.r-inner * sin(a0 * 1rad);
+                    radius-x: ring.r-inner; radius-y: ring.r-inner;
+                    sweep: false; large-arc: big;
                 }
+                Close { }
+            }
+        }
 
-                // Bar track
-                Rectangle {
-                    x: 120px; y: 7px;
-                    width: parent.width - 210px;
-                    height: 8px;
-                    background: #F5F5F5;
-                    border-radius: 4px;
-
-                    // Fill
+        ScrollView {
+            horizontal-stretch: 1;
+            horizontal-scrollbar-policy: always-off;
+            VerticalBox {
+                padding: 2px; spacing: 8px;
+                for item in root.data : HorizontalBox {
+                    padding: 0px; spacing: 6px; height: 16px;
                     Rectangle {
-                        x: 0px; y: 0px;
-                        width: parent.width * item.w;
-                        height: parent.height;
+                        width: 10px; height: 10px; y: 3px; border-radius: 2px;
                         background: PiePalette.color(item.color-idx);
-                        border-radius: 4px;
-                        opacity: 0.8;
                     }
-                }
-
-                // Percentage
-                Text {
-                    x: parent.width - 85px; y: 0px; width: 30px; height: 22px;
-                    text: item.pct + "%";
-                    font-size: 9px; color: #90A4AE;
-                    horizontal-alignment: right; vertical-alignment: center;
-                }
-
-                // Amount
-                Text {
-                    x: parent.width - 54px; y: 0px; width: 54px; height: 22px;
-                    text: item.amount-str;
-                    font-size: 10px; color: #546E7A;
-                    horizontal-alignment: right; vertical-alignment: center;
+                    Text {
+                        text: item.label; font-size: 10px; color: #37474F;
+                        overflow: elide; vertical-alignment: center;
+                    }
                 }
             }
         }
@@ -554,6 +593,25 @@ export component DashboardScreen inherits Rectangle {
     // ── Data flag ─────────────────────────────────────────────────────────────
     in property <bool> has-data: false;
 
+    // ── Responsive width input (2026-08-24 runtime-verified fix) ─────────────
+    // `DashboardScreen` inherits `Rectangle`, whose *own* `width` has a
+    // default of "inferred from children" — so a `HorizontalBox` deep inside
+    // (the 8-card summary row, the 2×2 chart grid) reading `root.width` back
+    // to decide its own layout would create a real dependency cycle within
+    // the compiled component, independent of the instantiator always giving
+    // this component an explicit `width`. A plain `in property` — not
+    // Rectangle's special `width` — has no such built-in self-reference, so
+    // the instantiator (`main_screen.slint`) passes the same value it
+    // already uses for this component's `width` binding through here too,
+    // and `scrollWrap` below reads this instead of `root.width` directly.
+    // Added after actually running the app and visually confirming the
+    // previous `ScrollView { width: parent.width } / VerticalBox { width:
+    // parent.visible-width }` pattern let the 8-card row and chart grid
+    // render wider than the real window and clip at the right edge (the
+    // 8th "Top Expense Category" card and part of "Vendors / Customers"
+    // were cut off on screen) — code-level review alone hadn't caught this.
+    in property <length> avail-width: 1440px;
+
     // ── Filter state ──────────────────────────────────────────────────────────
     in-out property <string> dash-from:         "";
     in-out property <string> dash-to:           "";
@@ -576,21 +634,53 @@ export component DashboardScreen inherits Rectangle {
         // ── Filter bar ─────────────────────────────────────────────────────
         // Original: background:#fff; border-radius:8px; padding:10px 14px; box-shadow:0 1px 4px rgba(0,0,0,.07); gap:10px
         // dash-fg label: font-size:10px; font-weight:700; color:#666; text-transform:uppercase; letter-spacing:.06em
-        Rectangle {
-            height: 56px; background: #FFFFFF;
-            border-width: 0px;
-            drop-shadow-blur: 4px;
-            drop-shadow-color: #00000012;
-            drop-shadow-offset-y: 1px;
+        //
+        // Rounded-card treatment (2026-08-24) — the `border-radius:8px` this
+        // component's own "Original" comment documents above had never
+        // actually been applied to the Rectangle below (it only set
+        // `background`/shadow, not `border-radius`), and the card had no
+        // outer margin either, so it rendered as a flush, square-cornered,
+        // full-width bar instead of an inset rounded card — confirmed by
+        // directly comparing a live screenshot of the running app against
+        // the user-supplied reference screenshot. `filterCardMargin` is a
+        // plain, un-positioned `VerticalBox` child (so it doesn't disturb
+        // that layout's own vertical stacking/spacing), tall enough to hold
+        // an 8px top margin plus the card; `filterCard` inside it is a
+        // *free* child with explicit x/y/width — the same pattern
+        // `scrollWrap` (below) and `ring` (`DonutChart`) already use
+        // successfully for the identical need (explicit positioning inside
+        // a plain, layout-managed `Rectangle`).
+        filterCardMargin := Rectangle {
+            height: 64px;
+
+            filterCard := Rectangle {
+                x: 10px; y: 8px;
+                width: parent.width - 20px; height: 56px;
+                background: #FFFFFF;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #E3EAF5;
+                drop-shadow-blur: 4px;
+                drop-shadow-color: #00000012;
+                drop-shadow-offset-y: 1px;
+                clip: true;
 
             HorizontalBox {
                 padding-left: 14px; padding-right: 14px;
                 padding-top: 0px; padding-bottom: 0px;
                 spacing: 10px;
 
-                VerticalBox {
-                    padding: 0px; spacing: 3px; alignment: center;
-                    Text { text: "FROM"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                // ── Inline label-beside-input fields (2026-08-24) ────────────
+                // Each field was previously its own `VerticalBox` (label on
+                // top, input below) — the user's own written spec explicitly
+                // asked for label-beside-input instead ("FROM: [Date
+                // Input]"), so each is now a `HorizontalBox` with the label
+                // and its input as siblings on one line. `vertical-align:
+                // center` on each label keeps it centered against the
+                // input's 26px height instead of sitting at the row's top.
+                HorizontalBox {
+                    padding: 0px; spacing: 6px; alignment: center;
+                    Text { text: "FROM"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; vertical-alignment: center; }
                     LineEdit {
                         placeholder-text: "DD/MM/YYYY"; height: 26px;
                         min-width: 96px; max-width: 96px; font-size: 12px;
@@ -604,9 +694,9 @@ export component DashboardScreen inherits Rectangle {
                         }
                     }
                 }
-                VerticalBox {
-                    padding: 0px; spacing: 3px; alignment: center;
-                    Text { text: "TO"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                HorizontalBox {
+                    padding: 0px; spacing: 6px; alignment: center;
+                    Text { text: "TO"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; vertical-alignment: center; }
                     LineEdit {
                         placeholder-text: "DD/MM/YYYY"; height: 26px;
                         min-width: 96px; max-width: 96px; font-size: 12px;
@@ -620,9 +710,9 @@ export component DashboardScreen inherits Rectangle {
                         }
                     }
                 }
-                VerticalBox {
-                    padding: 0px; spacing: 3px; alignment: center;
-                    Text { text: "BANK"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                HorizontalBox {
+                    padding: 0px; spacing: 6px; alignment: center;
+                    Text { text: "BANK"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; vertical-alignment: center; }
                     ComboBox {
                         model: root.filter-banks; height: 26px; min-width: 120px;
                         current-index: root.dash-bank-idx;
@@ -635,9 +725,9 @@ export component DashboardScreen inherits Rectangle {
                         }
                     }
                 }
-                VerticalBox {
-                    padding: 0px; spacing: 3px; alignment: center;
-                    Text { text: "VENDOR / LEDGER"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                HorizontalBox {
+                    padding: 0px; spacing: 6px; alignment: center;
+                    Text { text: "VENDOR / LEDGER"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; vertical-alignment: center; }
                     ComboBox {
                         model: root.filter-vendors; height: 26px; min-width: 130px;
                         current-index: root.dash-vendor-idx;
@@ -650,9 +740,9 @@ export component DashboardScreen inherits Rectangle {
                         }
                     }
                 }
-                VerticalBox {
-                    padding: 0px; spacing: 3px; alignment: center;
-                    Text { text: "EXPENSE HEAD"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; }
+                HorizontalBox {
+                    padding: 0px; spacing: 6px; alignment: center;
+                    Text { text: "EXPENSE HEAD"; font-size: 10px; font-weight: 700; color: #666666; letter-spacing: 0.6px; vertical-alignment: center; }
                     ComboBox {
                         model: root.filter-heads; height: 26px; min-width: 130px;
                         current-index: root.dash-head-idx;
@@ -690,16 +780,28 @@ export component DashboardScreen inherits Rectangle {
 
                 Rectangle { horizontal-stretch: 1; }
             }
+            }
         }
 
         // ── Scrollable content ──────────────────────────────────────────────
-        ScrollView {
-            vertical-stretch: 1;
-            width: parent.width;
+        // `scrollWrap` decouples this from the width-binding-loop /
+        // right-edge-clipping bug documented on `avail-width` above: a
+        // plain `clip: true` `Rectangle`, normally laid out (so it never
+        // itself demands more than it's given), containing `ScrollView` as
+        // a *free* child (explicit `x`/`y`/`width`/`height`, not layout-
+        // managed) — the same pattern the transaction table's own
+        // `hScrollWrap` already uses successfully for the identical class
+        // of `ScrollView`-inside-`Rectangle` issue (see `main_screen.slint`).
+        scrollWrap := Rectangle {
+            vertical-stretch: 1; clip: true;
 
-            VerticalBox {
-                padding: 16px; spacing: 14px;
-                width: parent.visible-width;
+            ScrollView {
+                x: 0px; y: 0px;
+                width: root.avail-width; height: parent.height;
+
+                VerticalBox {
+                    padding: 16px; spacing: 14px;
+                    width: max(400px, root.avail-width - 16px);
 
                 // ── 8 Summary cards ──────────────────────────────────────────
                 HorizontalBox {
@@ -716,7 +818,7 @@ export component DashboardScreen inherits Rectangle {
                     }
                     StatCard {
                         title: "Net Cash Flow"; value: root.net-cash-flow;
-                        accent: #37474F; horizontal-stretch: 1;
+                        accent: #1565C0; horizontal-stretch: 1;
                     }
                     StatCard {
                         title: "Opening Balance"; value: root.opening-balance;
@@ -724,21 +826,21 @@ export component DashboardScreen inherits Rectangle {
                     }
                     StatCard {
                         title: "Closing Balance"; value: root.closing-balance;
-                        accent: #F57F17; horizontal-stretch: 1;
+                        accent: #1565C0; horizontal-stretch: 1;
                     }
                     StatCard {
                         title: "Total Transactions"; value: root.txn-count;
-                        accent: #6A1B9A; horizontal-stretch: 1; clickable: true;
+                        accent: #1565C0; horizontal-stretch: 1; clickable: true;
                         clicked => { root.card-txns-clicked(); }
                     }
                     StatCard {
                         title: "Vendors / Customers"; value: root.vendor-count;
-                        accent: #00695C; horizontal-stretch: 1;
+                        accent: #1565C0; horizontal-stretch: 1;
                     }
                     StatCard {
                         title: "Top Expense Category"; value: root.top-expense;
                         sub: root.top-expense-amt;
-                        accent: #E65100; horizontal-stretch: 1;
+                        accent: #1565C0; horizontal-stretch: 1;
                     }
                 }
 
@@ -794,7 +896,7 @@ export component DashboardScreen inherits Rectangle {
                         horizontal-stretch: 1;
                         chart-title: "EXPENSE HEAD BREAKDOWN";
 
-                        ExpenseChart {
+                        DonutChart {
                             data: root.chart-expenses;
                             vertical-stretch: 1;
                         }
@@ -874,6 +976,7 @@ export component DashboardScreen inherits Rectangle {
                         horizontal-stretch: 1.5;
                         vcol: #1565C0;
                     }
+                }
                 }
             }
         }

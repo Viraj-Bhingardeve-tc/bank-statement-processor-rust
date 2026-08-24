@@ -5,6 +5,8 @@
 use crate::db::ClassificationRule;
 use crate::parser::{Transaction, TransactionStatus, VoucherType};
 use crate::text_safety::{find_ascii_ci, floor_char_boundary, safe_prefix};
+use once_cell::sync::Lazy;
+use regex::Regex;
 
 // ── Public entry point ─────────────────────────────────────────────────────────
 
@@ -428,7 +430,14 @@ fn kw_match(upper: &str, t: &Transaction, bank_ledger: &str) -> Option<KwResult>
         "SUBWAY",
         "BURGER KING",
         "STARBUCKS",
-        "CHAAYOS"
+        "CHAAYOS",
+        // Added 2026-08-24 — confirmed missing against the live imported
+        // dataset (a small kirana/retail shop's day-to-day UPI collections):
+        // narrations tagged "coffee"/"shevpuri" were falling through every
+        // category all the way to the generic UPI fallback.
+        "COFFEE",
+        "SHEVPURI",
+        "SHEV PURI"
     );
 
     // Grocery
@@ -467,7 +476,57 @@ fn kw_match(upper: &str, t: &Transaction, bank_ledger: &str) -> Option<KwResult>
         "MASALA",
         "SPICES",
         "PROVISION",
-        "BHAJI"
+        "BHAJI",
+        // Added 2026-08-24 — same live-dataset confirmation as COFFEE above.
+        "PAPAD",
+        "DAHI"
+    );
+
+    // Personal care (added 2026-08-24 — confirmed missing against the live
+    // imported dataset; narrations tagged "parlour"/"haircolour" had no
+    // matching category at all before this).
+    kw!(
+        "Personal Care",
+        "Personal Care Expense",
+        VoucherType::Payment,
+        "PARLOUR",
+        "PARLOR",
+        "SALON",
+        "HAIRCOLOUR",
+        "HAIR COLOUR",
+        "HAIRCUT",
+        "BEAUTY"
+    );
+
+    // Courier / postal (added 2026-08-24 — same confirmation; "courier" was
+    // recognized by `tally_group_engine`'s Tally-group keyword list but had
+    // no matching category here in the primary classifier at all).
+    kw!(
+        "Courier Service",
+        "Courier & Postage Expense",
+        VoucherType::Payment,
+        "COURIER",
+        "SPEEDPOST",
+        "SPEED POST",
+        "DTDC",
+        "BLUEDART",
+        "BLUE DART",
+        "FEDEX",
+        "DELHIVERY",
+        "POSTAGE"
+    );
+
+    // Printing / stationery (added 2026-08-24 — same confirmation;
+    // "photocopy" had no matching category).
+    kw!(
+        "Stationery Shop",
+        "Printing & Stationery Expense",
+        VoucherType::Payment,
+        "PHOTOCOPY",
+        "XEROX",
+        "STATIONERY",
+        "PRINTOUT",
+        "PRINTING"
     );
 
     // Medical / Pharmacy
@@ -774,8 +833,38 @@ pub fn infer_voucher_type(t: &Transaction, upper: &str) -> VoucherType {
     VoucherType::Unknown
 }
 
+// Real bank/UPI narrations frequently glue the numeric UTR/reference
+// directly onto a trailing merchant/category hint with no separator at
+// all — e.g. "UPI209584004029coffee" or "UPI209866832803haircolour"
+// (confirmed against live imported data, not hypothetical: every such
+// narration in the currently-loaded dataset was falling through to an
+// empty party name). Neither Case 1 (delimiter-split) nor Case 2
+// (whitespace-split) below can isolate "coffee"/"haircolour" from a
+// single fused alphanumeric token — `is_ref_code` correctly identifies
+// the *whole* glued token as looking like a reference code (9+ chars,
+// contains a digit, all-alphanumeric) and discards it entirely, hint and
+// all. This regex strips just the leading "UPI"/NEFT/etc. prefix (if
+// present) plus its digit run from such a token *before* either case
+// runs, leaving the trailing merchant hint as its own separate word.
+// `\b` alone can't anchor the digit run itself when it's glued directly
+// to the prefix letters (digit→letter and letter→digit are both
+// word→word, so no `\b` exists at that internal position) — anchoring
+// the optional prefix instead, then letting the digit match continue
+// from wherever the prefix match left off, sidesteps that.
+static GLUED_REF_PREFIX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(?:UPI|NEFT|RTGS|IMPS|INFT|NACH|ECS|ACH|BBPS)?[0-9]{6,}").unwrap()
+});
+
 /// Extract party name from NEFT/RTGS/UPI-style narrations.
 pub fn extract_party_name(narration: &str) -> String {
+    let cleaned_owned;
+    let narration: &str = if GLUED_REF_PREFIX.is_match(narration) {
+        cleaned_owned = GLUED_REF_PREFIX.replace_all(narration, " ").into_owned();
+        &cleaned_owned
+    } else {
+        narration
+    };
+
     const SKIP: &[&str] = &[
         "NEFT",
         "RTGS",
@@ -1069,11 +1158,70 @@ pub fn detect_duplicates(txns: &mut [Transaction]) {
             }
         }
     }
+
+    // Pass 3: Normalized-narration similarity within same date + amount +
+    // direction (added 2026-08-24 — this doc comment already promised "3
+    // passes (exact hash, ref+amount, similarity)", and `narr_similarity`
+    // already existed fully implemented and tested below, but nothing ever
+    // called it: `detect_duplicates` only ever ran the first two passes).
+    // Catches the case Pass 1/2 both miss — two imports of what's really
+    // the same transaction, but with a slightly different reference number
+    // or punctuation each time an OCR/PDF re-read it — while Pass 1's exact
+    // hash requires the narration to match byte-for-byte and Pass 2 requires
+    // a non-empty `reference` field at all. Bucketed by (date, amount,
+    // direction) first so this stays cheap (the Jaccard comparison below is
+    // O(n²) only *within* one bucket, and same-day-same-amount-same-
+    // direction transactions are typically few) rather than comparing every
+    // transaction against every other one. `>= 0.5` (at least half the
+    // meaningful narration tokens in common) is deliberately conservative —
+    // this flags for review, not silent deletion, so a false positive here
+    // just costs a glance at the Duplicates filter, but a threshold too low
+    // would flag *every* same-day-same-amount coincidence (two separate
+    // ₹50 kirana purchases on the same day are common and are not
+    // duplicates).
+    let mut buckets: HashMap<(String, String, bool), Vec<usize>> = HashMap::new();
+    for (i, t) in txns.iter().enumerate() {
+        if t.is_opening_balance || t.dup_flag || matches!(t.status, TransactionStatus::Manual) {
+            continue;
+        }
+        let (amt, is_debit) = match (t.debit, t.credit) {
+            (Some(d), _) if d > 0.0 => (d, true),
+            (_, Some(c)) if c > 0.0 => (c, false),
+            _ => continue,
+        };
+        buckets
+            .entry((t.date.clone(), format!("{:.2}", amt), is_debit))
+            .or_default()
+            .push(i);
+    }
+    for idxs in buckets.into_values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        for a in 0..idxs.len() {
+            if txns[idxs[a]].dup_flag {
+                continue;
+            }
+            for b in (a + 1)..idxs.len() {
+                if txns[idxs[b]].dup_flag {
+                    continue;
+                }
+                let sim = narr_similarity(&txns[idxs[a]].narration, &txns[idxs[b]].narration);
+                if sim >= 0.5 {
+                    let t = &mut txns[idxs[b]];
+                    t.dup_flag = true;
+                    if !t.tags.contains(&"DUP".to_string()) {
+                        t.tags.push("DUP".to_string());
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Narration token similarity (Jaccard overlap) ──────────────────────────────
 
-fn _narr_similarity(a: &str, b: &str) -> f64 {
+fn narr_similarity(a: &str, b: &str) -> f64 {
     let tokens = |s: &str| -> std::collections::HashSet<String> {
         let mut set = std::collections::HashSet::new();
         for m in s.to_uppercase().split(|c: char| !c.is_alphanumeric()) {
@@ -1114,6 +1262,22 @@ mod tests {
     fn extract_party_upi() {
         let name = extract_party_name("UPI/CR/12345/RAMESH KUMAR/ramesh@okaxis");
         assert!(!name.is_empty(), "should extract RAMESH KUMAR");
+    }
+
+    #[test]
+    fn extract_party_glued_upi_reference_with_no_separator() {
+        // Confirmed against a real, live-imported dataset (2026-08-24):
+        // narrations in exactly this shape — the numeric UTR glued directly
+        // onto a trailing merchant/category hint with no delimiter at all —
+        // were previously matched whole by `is_ref_code` (9+ chars,
+        // contains a digit, all-alphanumeric) and discarded entirely,
+        // silently returning an empty party for every one of them.
+        // `normalize_vendor_name` doesn't title-case — original casing
+        // (matching what was actually seen in the live dataset) survives.
+        assert_eq!(extract_party_name("UPI209498825681Papad"), "Papad");
+        assert_eq!(extract_party_name("UPI209584004029coffee"), "coffee");
+        assert_eq!(extract_party_name("UPI 209866832803haircolour"), "haircolour");
+        assert_eq!(extract_party_name("UPI209586364864courier"), "courier");
     }
 
     #[test]
@@ -1172,6 +1336,38 @@ mod tests {
         detect_duplicates(&mut txns);
         assert!(!txns[0].dup_flag);
         assert!(!txns[1].dup_flag);
+    }
+
+    #[test]
+    fn same_day_same_amount_similar_narration_no_reference_is_flagged_by_pass_three() {
+        // Neither Pass 1 (narrations differ — different UTR digits embedded
+        // in each) nor Pass 2 (both `reference` fields are empty) can catch
+        // this; only Pass 3's normalized-narration similarity can — exactly
+        // the "OCR re-read the reference number slightly differently on a
+        // duplicated import" scenario this pass exists for.
+        let mut txns = vec![
+            dup_txn("t1", "05/04/2026", "UPI 302498111222 KIRANA STORE PAYMENT", Some(255.0), ""),
+            dup_txn("t2", "05/04/2026", "UPI 302498999888 KIRANA STORE PAYMENT", Some(255.0), ""),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(!txns[0].dup_flag, "first occurrence is not itself a duplicate");
+        assert!(txns[1].dup_flag, "near-identical narration, same date+amount+direction, must be flagged");
+        assert!(txns[1].tags.contains(&"DUP".to_string()));
+    }
+
+    #[test]
+    fn same_day_same_amount_but_genuinely_different_purchases_are_not_flagged() {
+        // Two unrelated purchases that happen to share a date and amount
+        // (common — e.g. two separate ₹255 UPI payments the same day) must
+        // not be flagged just because Pass 3 exists; their narrations barely
+        // overlap once tokenized, so similarity stays well under threshold.
+        let mut txns = vec![
+            dup_txn("t1", "05/04/2026", "UPI 302498111222 KIRANA STORE PAYMENT", Some(255.0), ""),
+            dup_txn("t2", "05/04/2026", "UPI 302498999888 COFFEE SHOP PAYMENT", Some(255.0), ""),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(!txns[0].dup_flag);
+        assert!(!txns[1].dup_flag, "dissimilar narrations sharing only date+amount must not be flagged");
     }
 
     #[test]

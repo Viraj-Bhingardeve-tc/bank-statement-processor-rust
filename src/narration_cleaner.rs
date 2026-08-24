@@ -475,8 +475,19 @@ fn strip_noise(narr: &str) -> String {
 
     let mut joined = kept.join(" ");
 
-    // Strip long numeric tokens (UTR/txn IDs)
-    joined = regex_replace_all(&joined, r"\b[0-9]{6,22}\b", " ");
+    // Strip long numeric tokens (UTR/txn IDs) — deliberately *not* `\b`-
+    // bounded at all (was `\b[0-9]{6,22}\b`): real narrations routinely
+    // glue this straight onto a trailing merchant hint with no separator,
+    // on *either* side (e.g. "UPI209584004029coffee" has no boundary
+    // before the digits either, since the preceding "UPI" is letters, and
+    // letter→digit is a word→word transition just like digit→letter is)
+    // — confirmed against live imported data, `\b` on both sides was
+    // silently leaving the whole glued blob (prefix, UTR digits, and
+    // merchant hint all still stuck together) in `joined`, permanently
+    // hiding the merchant hint from every word downstream. A plain,
+    // unbounded match still only touches runs of 6-22 digits, so a short
+    // meaningful number elsewhere is untouched.
+    joined = regex_replace_all(&joined, r"[0-9]{6,22}", " ");
     // Strip long alphanumeric refs
     joined = regex_replace_all(&joined, r"\b[A-Z]{2,4}[0-9]{6,}\b", " ");
     // Strip IFSC-style

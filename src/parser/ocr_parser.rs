@@ -239,18 +239,38 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
             let (rest_clean, marker_ref) = strip_ref_marker(&rest_clean);
 
             let raw_amts = extract_amounts(&rest_clean);
-            // Bank amounts realistically never reach 11 integer digits; a
-            // longer bare digit run is a UTR/RRN/reference number that
-            // AMT_RE's no-decimal-required 5+-digit branch would otherwise
+            // Bank amounts realistically never reach 9 integer digits (≥10
+            // crore for one line item, essentially unheard of for the small-
+            // business/individual statements this app targets) — a longer
+            // bare digit run is a UTR/RRN/reference number that AMT_RE's
+            // no-decimal-required 5+-digit branch would otherwise
             // misclassify as a debit/credit/balance figure — mirrors
             // transaction_extractor.rs's identical `int_digit_count` guard,
             // same reasoning, kept as a local copy per this module's
             // existing convention of not exposing private cross-module
             // helpers (see csv_parser.rs's `apply_bank_detection` doc
             // comment for the same rationale).
+            //
+            // Tightened from <=10 to <=8 (2026-08-24) after finding real
+            // OCR-imported rows in a live dataset with debit values in the
+            // trillions (e.g. 2277239107622.0, 2340995652128303.0) — every
+            // one had a plausible-looking balance figure alongside it, so
+            // the corruption was specifically in the debit/credit amount,
+            // not the whole line. <=10 (up to ~1000 crore) evidently wasn't
+            // tight enough to catch every real-world OCR misread of this
+            // kind; <=8 leaves comfortable headroom below any realistic
+            // single-line amount while sitting far below every one of those
+            // observed bad values (13-17 integer digits). Paired with an
+            // explicit value ceiling below as defense-in-depth, since a
+            // digit-count check alone can't distinguish "genuinely 9+
+            // digits" from "9+ digits only because of how OCR garbled the
+            // comma grouping or decimal point" — the value check catches
+            // the latter even when the raw digit count of the matched
+            // string happens to look small.
+            const MAX_PLAUSIBLE_AMOUNT: f64 = 10_00_00_000.0; // ₹10 crore
             let amts: Vec<AmountMatch> = raw_amts
                 .into_iter()
-                .filter(|a| int_digit_count(&a.raw) <= 10)
+                .filter(|a| int_digit_count(&a.raw) <= 8 && a.val <= MAX_PLAUSIBLE_AMOUNT)
                 .collect();
             if amts.is_empty() {
                 continue;
@@ -808,6 +828,45 @@ Account No: 50100123456789
             (moved_amt - 610.0).abs() < 0.01,
             "debit/credit must be the real 610.00 figure, not the reference number: dr={:?} cr={:?}",
             real[0].debit,
+            real[0].credit
+        );
+    }
+
+    #[test]
+    fn implausibly_huge_comma_grouped_amount_is_rejected_not_accepted() {
+        // Reproduces the exact shape of amounts found in a real, live-
+        // imported dataset (2026-08-24): a plausible-looking balance
+        // alongside a comma-grouped "amount" whose integer part runs to 13
+        // digits — evidently still able to slip past the old <=10-integer-
+        // digit guard for some OCR-garbled inputs. The huge figure must be
+        // filtered out entirely rather than accepted as the debit/credit —
+        // with it gone, only the balance figure remains on the line, so
+        // the row is still created (real date/narration/balance are all
+        // genuine and worth keeping) but with no debit/credit rather than
+        // a corrupted one. Silently accepting ₹22,77,23,91,07,622.00 as a
+        // real debit corrupts every downstream sum; dropping the amount
+        // while keeping the row loses far less.
+        let text = "15/01/2024 UPI KGMOONG STICK 2,277,239,107,622.00 24,133.14\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert!(
+            (real[0].balance.unwrap() - 24133.14).abs() < 0.01,
+            "balance must be the real 24,133.14 figure: {:?}",
+            real[0].balance
+        );
+        assert_eq!(
+            real[0].debit, None,
+            "the implausible figure must not be accepted as a debit: {:?}",
+            real[0].debit
+        );
+        assert_eq!(
+            real[0].credit, None,
+            "the implausible figure must not be accepted as a credit: {:?}",
             real[0].credit
         );
     }
