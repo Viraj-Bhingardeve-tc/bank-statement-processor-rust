@@ -52,6 +52,14 @@ static DRCR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(?:DR|CR)\b\.?").u
 // JS `\w` = [A-Za-z0-9_]; Rust default `\w` is Unicode-aware, so we use explicit set.
 static STRAY_PUNCT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^A-Za-z0-9_\s/\-.@&]").unwrap());
 
+// UPI transaction identifier at the very start of a (by this point,
+// amount-stripped) narration: "UPI" + its digit-run ID, optionally with a
+// trailing descriptive/merchant hint the bank/OCR text glued directly onto
+// it with no separator (e.g. "UPI209584004029coffee") or with just a
+// space ("UPI 209474387500bhaji"). See `split_upi_reference`'s doc comment
+// for what this is for.
+static UPI_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)^UPI\s*([0-9]{6,})(.*)$").unwrap());
+
 // U+E020 (Unicode Private Use Area) — a delimiter that can never appear in
 // real bank-statement OCR/embedded-PDF text. `preprocess_multiline` wraps a
 // structurally-confirmed reference number (found on its own dedicated OCR
@@ -179,6 +187,32 @@ fn extract_embedded_reference(text: &str) -> Option<String> {
     best.map(|(start, len)| text[start..start + len].to_string())
 }
 
+/// Splits a UPI transaction's identifier from a trailing descriptive/
+/// merchant hint (2026-08-24) — explicit product requirement: for a UPI
+/// narration, `narration` should keep only "UPI" + its digit-run
+/// identifier (e.g. "UPI209498825681"); any descriptive text the bank/OCR
+/// text glued onto that ID with no delimiter ("UPI209584004029coffee") or
+/// just a space ("UPI 209474387500bhaji") belongs in `reference` instead
+/// — confirmed against every real UPI row in a live-imported dataset,
+/// none of which had a populated `reference` before this. Deliberately
+/// narrower than (and independent of) `extract_embedded_reference` above:
+/// that one recovers a bare reference *number* for narrations in general
+/// (NEFT/RTGS/IMPS/etc., where the surrounding text is already the
+/// meaningful description and the number is the noise to pull out); this
+/// one is UPI-specific and does the opposite assignment on purpose — the
+/// ID is what belongs in `narration` here, and any trailing text is what
+/// moves to `reference` — so it only ever matches a narration that starts
+/// with "UPI" and is applied *before*, not instead of, that fallback (see
+/// its call site in `parse_ocr_text`). Returns `None` for a narration that
+/// doesn't start with "UPI" + a 6+ digit run at all, leaving those
+/// untouched.
+fn split_upi_reference(narration: &str) -> Option<(String, String)> {
+    let caps = UPI_ID_RE.captures(narration)?;
+    let digits = caps.get(1)?.as_str();
+    let suffix = caps.get(2)?.as_str().trim().to_string();
+    Some((format!("UPI{digits}"), suffix))
+}
+
 // ── parse_ocr_text ────────────────────────────────────────────────────────────
 
 /// Port of `Parser._parseOCRText(rawText, fileName)`.
@@ -298,16 +332,38 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
                 narration = "(OCR)".to_string();
             }
 
-            // Reference: prefer the structurally-confirmed marker value
-            // (a whole line that was nothing but digits, per
+            // UPI narration/reference split (2026-08-24) — see
+            // `split_upi_reference`'s doc comment for what this does and
+            // why it's separate from `extract_embedded_reference` below.
+            // Applied *before* the general reference fallback so a UPI
+            // narration's trailing descriptive text wins over that fallback
+            // re-discovering the same digit run for a different purpose;
+            // `narration` itself is only ever replaced when this actually
+            // matched (a non-UPI narration reaches the code below
+            // unchanged).
+            let upi_suffix = if let Some((upi_id, suffix)) = split_upi_reference(&narration) {
+                narration = upi_id;
+                if suffix.is_empty() {
+                    None
+                } else {
+                    Some(suffix)
+                }
+            } else {
+                None
+            };
+
+            // Reference: a UPI narration's own descriptive suffix (above)
+            // takes priority; otherwise prefer the structurally-confirmed
+            // marker value (a whole line that was nothing but digits, per
             // `preprocess_multiline`'s own layout doc comment); otherwise
             // fall back to the longest embedded 9+ digit run still present
             // in narration — real bank-statement OCR text glues the
             // reference directly onto adjacent letters with no delimiter
             // (see `extract_embedded_reference`'s doc comment). Never
-            // invented: both sources only ever return a value actually
-            // present in the source text.
-            let reference = marker_ref
+            // invented: every source here only ever returns a value
+            // actually present in the source text.
+            let reference = upi_suffix
+                .or(marker_ref)
                 .or_else(|| extract_embedded_reference(&narration))
                 .unwrap_or_default();
 
@@ -751,9 +807,15 @@ Account No: 50100123456789
     // comment for the real-fixture evidence this is modeled on) ────────────
 
     #[test]
-    fn embedded_reference_fused_to_narration_is_extracted() {
+    fn upi_narration_keeps_only_the_id_moves_descriptive_text_to_reference() {
         // Exactly the shape real fixtures produce: no delimiter at all
-        // between the narration text and the reference digits.
+        // between the narration text and the reference digits. Updated
+        // 2026-08-24 for an explicit product requirement — a UPI
+        // narration's descriptive/merchant text (here "Papad") now belongs
+        // in `reference`, not glued onto the digit-run ID left in
+        // `narration` (this test's own name/assertions used to describe
+        // and check the opposite mapping; see `split_upi_reference`'s doc
+        // comment for the full reasoning).
         let text = "15/01/2024 UPI209498825681Papad 610.00 1,32,408.22\n";
         let result = parse_ocr_text(text, "x.pdf");
         let real: Vec<_> = result
@@ -762,11 +824,60 @@ Account No: 50100123456789
             .filter(|t| !t.is_opening_balance)
             .collect();
         assert_eq!(real.len(), 1);
-        assert_eq!(real[0].reference, "209498825681");
-        // Reference is not scrubbed out of narration — matches the existing
-        // transaction_extractor.rs Format B convention (narration keeps it
-        // inline too).
-        assert!(real[0].narration.contains("209498825681"));
+        assert_eq!(real[0].narration, "UPI209498825681");
+        assert_eq!(real[0].reference, "Papad");
+    }
+
+    #[test]
+    fn upi_narration_split_handles_a_space_before_the_id_too() {
+        // "UPI 209474387500bhaji" — a space between "UPI" and its digit
+        // ID, then the descriptive text glued directly onto the digits
+        // with no separator at all. Both real shapes seen in a live
+        // dataset; narration is normalized to the no-space form either way.
+        let text = "15/01/2024 UPI 209474387500bhaji 55.00 1,32,408.22\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert_eq!(real[0].narration, "UPI209474387500");
+        assert_eq!(real[0].reference, "bhaji");
+    }
+
+    #[test]
+    fn upi_narration_with_no_trailing_text_still_recovers_a_reference() {
+        // No descriptive suffix to move — falls through to the existing
+        // `extract_embedded_reference` fallback against the now-shortened
+        // narration, which still finds the same digit run.
+        let text = "15/01/2024 UPI209584004029 505.00 1,32,408.22\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert_eq!(real[0].narration, "UPI209584004029");
+        assert_eq!(real[0].reference, "209584004029");
+    }
+
+    #[test]
+    fn non_upi_narration_is_never_touched_by_the_upi_split() {
+        let text = "15/01/2024 NEFT-HDFCN52025050515108279-SMCGLOBAL SECURITIES 610.00 1,32,408.22\n";
+        let result = parse_ocr_text(text, "x.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1);
+        assert!(
+            real[0].narration.contains("SMCGLOBAL SECURITIES"),
+            "non-UPI narration must be unaffected: {:?}",
+            real[0].narration
+        );
     }
 
     #[test]
@@ -872,10 +983,17 @@ Account No: 50100123456789
     }
 
     #[test]
-    fn preprocess_multiline_carries_an_isolated_reference_line_through_to_the_transaction() {
+    fn preprocess_multiline_isolated_reference_line_yields_to_the_upi_split_for_a_upi_narration() {
         // Exactly the layout preprocess_multiline's own doc comment
         // describes: date / narration / bare reference number / amount /
-        // balance, each on its own OCR line.
+        // balance, each on its own OCR line — but the narration here is a
+        // UPI one, so (2026-08-24) the UPI split now wins over this
+        // isolated-line marker: "Papad" is genuinely more useful than
+        // re-surfacing the exact same digit ID that's already sitting in
+        // `narration` as "UPI209498825681". See
+        // `preprocess_multiline_isolated_reference_line_still_wins_for_a_non_upi_narration`
+        // right below for confirmation the marker mechanism itself is
+        // unchanged for a narration the UPI split doesn't touch.
         let text = "\
 04/04/2022
 UPI209498825681Papad
@@ -891,12 +1009,38 @@ UPI209498825681Papad
             .filter(|t| !t.is_opening_balance)
             .collect();
         assert_eq!(real.len(), 1, "preprocessed text: {pre:?}");
-        assert_eq!(real[0].reference, "209498825681");
+        assert_eq!(real[0].narration, "UPI209498825681");
+        assert_eq!(real[0].reference, "Papad");
         assert!(
             (real[0].balance.unwrap() - 1324083.22).abs() < 0.01,
             "balance must be the real running-balance figure, not the reference: {:?}",
             real[0].balance
         );
+    }
+
+    #[test]
+    fn preprocess_multiline_isolated_reference_line_still_wins_for_a_non_upi_narration() {
+        // Same isolated-reference-line layout as the UPI test above, but a
+        // plain (non-UPI) narration the UPI split never touches — confirms
+        // `marker_ref`'s own recovery mechanism is unaffected by the UPI
+        // split being added ahead of it.
+        let text = "\
+04/04/2022
+NEFT PAYMENT ACME TRADERS
+209498825681
+610.00
+13,24,083.22
+";
+        let pre = preprocess_multiline(text);
+        let result = parse_ocr_text(&pre, "bom.pdf");
+        let real: Vec<_> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
+        assert_eq!(real.len(), 1, "preprocessed text: {pre:?}");
+        assert_eq!(real[0].narration, "NEFT PAYMENT ACME TRADERS");
+        assert_eq!(real[0].reference, "209498825681");
     }
 
     #[test]

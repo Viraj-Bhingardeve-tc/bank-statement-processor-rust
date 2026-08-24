@@ -63,6 +63,39 @@ pub fn classify_all(
     changed
 }
 
+/// `narration` + `reference`, space-joined (2026-08-24). Every keyword-
+/// matching/party-extraction call site in this module used to read
+/// `narration` alone, back when a UPI transaction's whole descriptive text
+/// ("UPI209584004029coffee") lived there. Now that `ocr_parser.rs` splits
+/// the descriptive suffix out into `reference` (keeping just the ID —
+/// "UPI209584004029" — in narration), those same call sites need to see
+/// both fields combined to keep matching exactly the same real-world
+/// transactions they did before that split existed — a keyword like
+/// "COFFEE" or a fallback party name isn't in `narration` on its own any
+/// more. Reference is appended, not prepended, so `narration`'s own
+/// content still comes first in the combined text (matters for
+/// `extract_party_name`'s Case 1/Case 2, which both favor earlier tokens).
+fn combined_narration_and_reference(t: &Transaction) -> String {
+    if t.reference.is_empty() {
+        t.narration.clone()
+    } else {
+        format!("{} {}", t.narration, t.reference)
+    }
+}
+
+/// Does `r` look like a real reference/UTR/RRN number, rather than a plain
+/// descriptive word? Used by `detect_duplicates`'s Pass 2 (see its own doc
+/// comment) to decide whether a `reference` match is trustworthy as a
+/// date-independent duplicate signal. A real reference number is always
+/// mostly/entirely digits; a descriptive word ("kirana", "water", "UPI")
+/// never has more than an incidental digit in it — 4+ digits is a
+/// deliberately low bar (a genuine UTR/RRN is typically 9-22 digits) that
+/// still comfortably clears every real reference value already covered by
+/// this module's own tests (e.g. "UTR12345").
+fn looks_like_reference_number(r: &str) -> bool {
+    r.chars().filter(|c| c.is_ascii_digit()).count() >= 4
+}
+
 /// Apply stored classification rules — returns matched rule or None.
 fn apply_rules<'a>(upper: &str, rules: &'a [ClassificationRule]) -> Option<&'a ClassificationRule> {
     rules
@@ -78,7 +111,18 @@ fn classify_one(
     gst_enabled: bool,
     gst_auto_ledgers: bool,
 ) {
-    let upper = t.narration.to_uppercase();
+    // Keyword matching and party extraction both need to see `reference`
+    // too, not just `narration` (2026-08-24) — a UPI narration's own
+    // descriptive/merchant hint ("coffee", "kirana", ...) now lives in
+    // `reference` instead (ocr_parser.rs's UPI narration/reference split),
+    // so classifying against `narration` alone would silently stop
+    // matching every keyword category that split moved out of it. Reusing
+    // this same combined text for both `apply_rules`/`kw_match` below and
+    // `extract_party_name`'s two call sites keeps every one of them
+    // matching exactly the same real-world transactions they did before
+    // that split existed.
+    let combined_text = combined_narration_and_reference(t);
+    let upper = combined_text.to_uppercase();
 
     // 1. Stored user rules (highest priority)
     if let Some(rule) = apply_rules(&upper, rules) {
@@ -111,7 +155,7 @@ fn classify_one(
         t.classification_source = "keyword".to_string();
     } else {
         // 3. Extract party name for unreviewed
-        let party = extract_party_name(&t.narration);
+        let party = extract_party_name(&combined_text);
         if !party.is_empty() {
             t.vendor = party;
         }
@@ -734,7 +778,7 @@ fn kw_match(upper: &str, t: &Transaction, bank_ledger: &str) -> Option<KwResult>
     .iter()
     .any(|k| upper.contains(k))
     {
-        let party = extract_party_name(&t.narration);
+        let party = extract_party_name(&combined_narration_and_reference(t));
         let (head, tp) = if t.credit.is_some() && t.debit.is_none() {
             (
                 if party.is_empty() {
@@ -1143,7 +1187,22 @@ pub fn detect_duplicates(txns: &mut [Transaction]) {
         }
         let r = t.reference.trim().to_string();
         let amt = t.debit.or(t.credit).unwrap_or(0.0);
-        if !r.is_empty() && amt > 0.0 {
+        // `looks_like_reference_number` guard (2026-08-24) — this pass's
+        // whole premise is that a matching `reference` is a strong,
+        // near-unique duplicate signal even across different dates (the
+        // OCR-misread-the-date-on-a-repeated-PDF-page scenario its own
+        // test covers) — true for a real UTR/RRN number, but `reference`
+        // can now also be the *generic descriptive word* ocr_parser.rs's
+        // UPI narration split moves there ("kirana", "water", "UPI",
+        // ...), which is neither unique nor date-independent-safe: dozens
+        // of genuinely distinct real transactions in a live dataset shared
+        // an identical (reference, amount) pair on different dates purely
+        // because they were the same recurring, generically-worded
+        // purchase amount. Requiring a handful of digits — true for any
+        // real reference number, never true for a plain descriptive word —
+        // keeps this pass's original guarantee intact for the case it was
+        // built for while no longer misfiring on the new one.
+        if !r.is_empty() && amt > 0.0 && looks_like_reference_number(&r) {
             let key = format!("{}|{:.2}", r, amt);
             match ref_amt.entry(key) {
                 std::collections::hash_map::Entry::Occupied(_) => {
@@ -1327,6 +1386,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_word_reference_same_amount_different_dates_is_not_flagged_by_pass_two() {
+        // Confirmed against a real, live-imported dataset (2026-08-24):
+        // `reference` can now be a generic descriptive word (from
+        // ocr_parser.rs's UPI narration split — "kirana", "water", "UPI",
+        // ...) instead of a unique UTR number. Two genuinely distinct
+        // ₹255 "bhaji" purchases on different days sharing that same
+        // (reference, amount) pair must NOT be flagged — unlike a real
+        // UTR/RRN number (see the test right above this one), a plain word
+        // recurring across unrelated transactions is not a duplicate
+        // signal at all.
+        let mut txns = vec![
+            dup_txn("t1", "01/04/2026", "UPI209111111111", Some(255.0), "bhaji"),
+            dup_txn("t2", "02/04/2026", "UPI209222222222", Some(255.0), "bhaji"),
+        ];
+        detect_duplicates(&mut txns);
+        assert!(!txns[0].dup_flag);
+        assert!(
+            !txns[1].dup_flag,
+            "a generic word reference shared by coincidence must not be treated as a duplicate signal"
+        );
+    }
+
+    #[test]
     fn distinct_transactions_are_never_flagged() {
         let mut txns = vec![
             dup_txn("t1", "01/04/2026", "AIRTEL POSTPAID BILL", Some(499.0), "REF1"),
@@ -1475,6 +1557,26 @@ mod tests {
         assert!(t.gst_amount.is_some());
         assert!(t.gst_type.is_some());
         assert!(t.tags.contains(&"GST".to_string()));
+    }
+
+    #[test]
+    fn classify_one_still_keyword_matches_after_the_upi_narration_reference_split() {
+        // A transaction in the *new* shape ocr_parser.rs's UPI split now
+        // produces — narration holds only the ID, the descriptive hint is
+        // in `reference` — must still classify exactly as it would have
+        // when that same text was still all in `narration`. Without
+        // `combined_narration_and_reference`, `kw_match`'s Grocery category
+        // (which matches "COFFEE"... actually "kirana"/"bhaji" are the
+        // built-in ones; using "kirana" here since it's a real keyword)
+        // would never see this word at all.
+        let mut t = crate::parser::Transaction::new("test");
+        t.narration = "UPI209584004029".to_string();
+        t.reference = "kirana".to_string();
+        t.debit = Some(505.0);
+        classify_one(&mut t, "Bank Ledger", &[], false, false);
+        assert_eq!(t.vendor, "Grocery / Kirana");
+        assert_eq!(t.account_head, "Grocery Expense");
+        assert_eq!(t.classification_source, "keyword");
     }
 
     #[test]
