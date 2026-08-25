@@ -7,7 +7,7 @@
 // login.slint's header) only touches the one cosmetic line below.
 
 import { LoginScreen } from "login.slint";
-import { MainScreen, TxnRow, BatchFileRow, SummaryListRow, AccountSummaryRow } from "main_screen.slint";
+import { MainScreen, TxnRow, BatchFileRow, SummaryListRow, AccountSummaryRow, RuleRow } from "main_screen.slint";
 import { DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 export component AppWindow inherits Window {
@@ -142,8 +142,7 @@ export component AppWindow inherits Window {
     in property <[string]> import-records: [];
 
     // ── Rules records (set by Rust in do-view-rules) ─────────────────────────
-    // Each entry: "PATTERN\tVENDOR\tHEAD\tTYPE\tID"
-    in property <[string]> rule-records: [];
+    in property <[RuleRow]> rule-records: [];
 
     // ── Edit Transaction (set by Rust when a row is selected) ─────────────────
     in property <string> edit-txn-date:     "";

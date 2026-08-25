@@ -36,18 +36,7 @@ pub fn classify_all(
         if t.is_opening_balance {
             continue;
         }
-        // Don't overwrite user-confirmed rows
-        if matches!(t.status, TransactionStatus::Classified) && t.confidence >= 1.0 {
-            continue;
-        }
-        // Don't overwrite AI classifications, even below confidence 1.0 — mirrors
-        // Electron's explicit `classifiedBy === 'ai'` guard (app.js:554), since AI
-        // confidence comes from the model and isn't guaranteed to be 1.0.
-        if matches!(t.status, TransactionStatus::Classified) && t.classification_source == "ai" {
-            continue;
-        }
-        // Don't overwrite suspense
-        if matches!(t.status, TransactionStatus::Suspense) {
+        if is_locked_from_auto_classify(t) {
             continue;
         }
 
@@ -90,6 +79,104 @@ pub fn classify_all(
         detect_duplicates(txns);
     }
     changed
+}
+
+// ── Eligibility: which rows may Auto-Classify All ever touch? ────────────────
+
+/// True when `t` must never be touched by `classify_all` — pulled out into
+/// its own testable predicate (2026-08-25) after two real gaps traced
+/// against live data:
+///
+/// - `TransactionStatus::Manual` (a row added via "+ Add Row") was never
+///   excluded at all — only `Suspense` and a confidence-1.0 `Classified` row
+///   were. A manually added transaction went straight back through
+///   `classify_one` on every Auto-Classify All run and had its hand-entered
+///   vendor/ledger/type silently overwritten — which also means its
+///   "manually classified" visual state couldn't survive a second run.
+/// - A manual **edit** to an existing imported row (the "Save" button,
+///   `classification_source = "user"`, `confidence = 0.75` — see
+///   `main.rs`'s `on_do_save_txn`) was likewise never excluded: only "Save &
+///   Learn" (confidence 1.0) happened to dodge the old confidence>=1.0
+///   guard. Both are "a user manually assigned this classification" (the
+///   spec's own words) and must be protected identically.
+///
+/// An AI classification is protected regardless of status, not just when
+/// `Classified` — AI never produces any other status today, but protecting
+/// by source rather than by status+source is the more honest invariant.
+fn is_locked_from_auto_classify(t: &Transaction) -> bool {
+    if matches!(
+        t.status,
+        TransactionStatus::Manual | TransactionStatus::Suspense
+    ) {
+        return true;
+    }
+    if t.classification_source == "user" || t.classification_source == "ai" {
+        return true;
+    }
+    if matches!(t.status, TransactionStatus::Classified) && t.confidence >= 1.0 {
+        return true;
+    }
+    false
+}
+
+/// Derive a reusable narration pattern for a "Save & Learn" rule from a
+/// transaction (2026-08-25) — used by `main.rs`'s `on_do_save_txn`, kept
+/// here (not in `main.rs`) so rule *creation* stays next to rule *matching*
+/// (`apply_rules`) and can never drift out of sync with what it will later
+/// be evaluated against.
+///
+/// Two real bugs in the previous ad hoc version (`main.rs` deriving its own
+/// pattern independently) made a freshly-learned rule silently useless:
+///
+/// 1. It read `narration` alone, ignoring `reference` — but a UPI
+///    narration's own descriptive/merchant hint ("coffee", "kirana", ...)
+///    now lives in `reference` (`ocr_parser.rs`'s UPI split), so the pattern
+///    lost exactly the part of the text that made it specific.
+/// 2. It stripped digit runs with `\b\d{6,}\b` — a `\b` word boundary
+///    requires a transition between a word and non-word character, but a
+///    letter and a digit are *both* word characters, so a boundary never
+///    exists at the seam of a glued reference number ("UPI209584004029" —
+///    no separator between "UPI" and the digits at all, the dominant real-
+///    world shape confirmed repeatedly elsewhere in this codebase). The old
+///    regex left the whole unique-per-transaction ID baked into the
+///    pattern, so the rule could only ever match the exact transaction it
+///    was learned from — never "a future matching transaction", silently
+///    defeating the entire point of "Save & Learn".
+///
+/// Fixed by matching against the same combined narration+reference text
+/// `classify_one`/`apply_rules` themselves match against, and by dropping
+/// the boundary requirement entirely — a run of 6+ digits is reference-
+/// number-like regardless of what letters are glued to either side of it.
+///
+/// Returns `None` when nothing meaningful survives — including when the
+/// *only* thing left is a bare payment-network keyword ("UPI", "NEFT", ...),
+/// which would otherwise silently create a dangerously over-broad rule that
+/// force-classifies every future transaction of that payment type the same
+/// way. `main.rs` must not save a rule at all in that case, matching the
+/// spec's own "must not create arbitrary global rules" principle.
+pub fn derive_rule_pattern(t: &Transaction) -> Option<String> {
+    static DIGIT_RUN: Lazy<Regex> = Lazy::new(|| Regex::new(r"[0-9]{6,}").unwrap());
+    const GENERIC_PREFIXES: &[&str] = &[
+        "UPI", "NEFT", "RTGS", "IMPS", "INFT", "NACH", "ECS", "ACH", "BBPS", "CHQ", "ATM", "POS",
+    ];
+
+    let combined = combined_narration_and_reference(t);
+    let stripped = GLUED_REF_PREFIX.replace_all(&combined, " ");
+    let stripped = DIGIT_RUN.replace_all(&stripped, " ");
+    let pattern: String = stripped
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_uppercase()
+        .chars()
+        .take(40)
+        .collect();
+
+    if pattern.is_empty() || GENERIC_PREFIXES.contains(&pattern.as_str()) {
+        return None;
+    }
+    Some(pattern)
 }
 
 /// `narration` + `reference`, space-joined (2026-08-24). Every keyword-
@@ -1765,6 +1852,106 @@ mod tests {
         t.debit = Some(999.0);
         classify_one(&mut t, "Bank Ledger", &[], true, true);
         assert_eq!(t.account_head, "Internet Charges");
+    }
+
+    // ── Manual-classification protection ──────────────────────────────────────
+
+    #[test]
+    fn manually_saved_row_below_confidence_1_is_never_overwritten_by_auto_classify_all() {
+        // A plain "Save" (not "Save & Learn") stamps confidence 0.75 and
+        // classification_source "user" (see main.rs's on_do_save_txn) —
+        // below the old confidence>=1.0 guard, so the very next Auto-
+        // Classify All run used to silently discard the user's correction.
+        let mut t = Transaction {
+            narration: "UPI209584004029somebrandnewmerchant".to_string(),
+            credit: Some(100.0),
+            vendor: "The Vendor The User Chose".to_string(),
+            account_head: "The Ledger The User Chose".to_string(),
+            status: TransactionStatus::Classified,
+            confidence: 0.75,
+            classification_source: "user".to_string(),
+            ..Transaction::new("t1")
+        };
+        let changed = classify_all(std::slice::from_mut(&mut t), "Bank Ledger", &[], false, false, false);
+        assert_eq!(changed, 0, "a manually-confirmed row must never be reported as changed");
+        assert_eq!(t.vendor, "The Vendor The User Chose");
+        assert_eq!(t.account_head, "The Ledger The User Chose");
+        assert_eq!(t.confidence, 0.75);
+    }
+
+    #[test]
+    fn manually_added_row_is_never_touched_by_auto_classify_all() {
+        // A "+ Add Row" manual entry (TransactionStatus::Manual) was never
+        // excluded by the old skip-guards at all (only Suspense and
+        // confidence>=1.0 Classified rows were) — it went straight back
+        // through `classify_one` and had its hand-entered fields reset.
+        let mut t = Transaction {
+            narration: "Cash received from owner".to_string(),
+            credit: Some(10_000.0),
+            vendor: "Owner's Capital".to_string(),
+            account_head: "Capital Account".to_string(),
+            status: TransactionStatus::Manual,
+            confidence: 1.0,
+            classification_source: "user".to_string(),
+            ..Transaction::new("m1")
+        };
+        let before = t.clone();
+        let changed = classify_all(std::slice::from_mut(&mut t), "Bank Ledger", &[], false, false, false);
+        assert_eq!(changed, 0);
+        assert_eq!(t.vendor, before.vendor);
+        assert_eq!(t.account_head, before.account_head);
+        assert!(matches!(t.status, TransactionStatus::Manual));
+    }
+
+    // ── derive_rule_pattern ("Save & Learn") ──────────────────────────────────
+
+    #[test]
+    fn derive_rule_pattern_uses_reference_not_just_narration() {
+        // Narration holds only the ID, the descriptive hint is in
+        // `reference` (ocr_parser.rs's UPI split) — the pattern must still
+        // see it.
+        let mut t = Transaction::new("t1");
+        t.narration = "UPI209584004029".to_string();
+        t.reference = "kirana".to_string();
+        let pattern = derive_rule_pattern(&t).expect("should derive a pattern");
+        assert!(
+            pattern.contains("KIRANA"),
+            "pattern must include the reference's descriptive text: {pattern:?}"
+        );
+    }
+
+    #[test]
+    fn derive_rule_pattern_strips_a_glued_reference_number_with_no_word_boundary() {
+        // "UPI209584004029somebrandnewmerchant" — no separator at all
+        // between the prefix, the digit run, and the merchant hint, so a
+        // `\b`-anchored digit strip can never find a boundary to anchor on.
+        let mut t = Transaction::new("t1");
+        t.narration = "UPI209584004029somebrandnewmerchant".to_string();
+        let pattern = derive_rule_pattern(&t).expect("should derive a pattern");
+        assert!(
+            !pattern.contains("209584004029"),
+            "the unique transaction id must not survive into the pattern: {pattern:?}"
+        );
+        assert!(
+            pattern.to_uppercase().contains("SOMEBRANDNEWMERCHANT"),
+            "the real merchant hint must survive: {pattern:?}"
+        );
+    }
+
+    #[test]
+    fn derive_rule_pattern_rejects_a_bare_generic_payment_keyword() {
+        // Nothing survives stripping except "UPI" itself — saving this as a
+        // rule would force-classify every future UPI transaction the same
+        // way, an arbitrary/over-broad rule the spec explicitly rules out.
+        let mut t = Transaction::new("t1");
+        t.narration = "UPI209584004029".to_string();
+        assert_eq!(derive_rule_pattern(&t), None);
+    }
+
+    #[test]
+    fn derive_rule_pattern_none_on_empty_narration() {
+        let t = Transaction::new("t1");
+        assert_eq!(derive_rule_pattern(&t), None);
     }
 
     // ── UTF-8 crash hardening (Phase 4L.2.2) ────────────────────────────────

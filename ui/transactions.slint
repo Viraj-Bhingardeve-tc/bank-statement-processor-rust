@@ -280,10 +280,15 @@ export component TxnDataRow inherits Rectangle {
 
         TxnCell { w: TxnCols.basis; text: root.data.classification-basis; fg: OriginColor.generated; font-sz: Type.small; }
 
-        // Type/Status — same row-color-driven chip set as before, Badge-rendered.
+        // Type/Status — row-color-driven chip set, Badge-rendered. AUTO (row-
+        // color 1) vs MANUAL (row-color 6) is who classified the row —
+        // engine (rule/keyword/AI) vs a human (Save/Save & Learn/manually
+        // added) — not a confidence measure (that's the separate HIGH/
+        // MEDIUM/LOW badge in the Confidence column above); see
+        // `classified_row_color` in main.rs.
         Rectangle {
             width: TxnCols.status;
-            if root.data.row-color == 1 : Badge { text: "HIGH";     fg: #1B5E20; bg: #C8E6C9; }
+            if root.data.row-color == 1 : Badge { text: "AUTO";     fg: #1B5E20; bg: #C8E6C9; }
             if root.data.row-color == 3 : Badge { text: "REVIEW";   fg: #B71C1C; bg: #FFCDD2; }
             if root.data.row-color == 4 : Badge { text: "SUSPENSE"; fg: #6A1B9A; bg: #E1BEE7; }
             if root.data.row-color == 5 : Badge { text: "DUP";      fg: #880E4F; bg: #FCE4EC; }

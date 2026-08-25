@@ -252,6 +252,67 @@ fn apply_txn_filters<'a>(
         .collect()
 }
 
+/// Build the "View Rules" list model from stored rules (2026-08-25 fix) —
+/// shared by `on_do_view_rules` and `on_do_delete_rule`'s post-delete
+/// reload, which used to duplicate an identical pipe-joined-string mapping
+/// inline in both places. Confidence shown is the rule's real, deterministic
+/// classify-time value (`classifier::classify_one`'s own rule branch: 0.9
+/// for a client-specific rule, 0.6 for a global one) — a rule has no
+/// confidence field of its own to read, but its *effect* on a matching
+/// transaction is fully determined by scope alone, so this is honest, not
+/// fabricated.
+#[cfg(feature = "slint-ui")]
+fn build_rule_rows(rules: &[db::ClassificationRule]) -> Vec<RuleRow> {
+    rules
+        .iter()
+        .map(|r| {
+            let (scope, confidence_label) = if r.client_id == 0 {
+                ("Global", "60%")
+            } else {
+                ("This Client", "90%")
+            };
+            RuleRow {
+                pattern: SharedString::from(r.pattern.as_str()),
+                vendor: SharedString::from(r.vendor.as_str()),
+                account_head: SharedString::from(r.account_head.as_str()),
+                txn_type: SharedString::from(r.txn_type.as_str()),
+                scope: SharedString::from(scope),
+                confidence_label: SharedString::from(confidence_label),
+            }
+        })
+        .collect()
+}
+
+/// Row highlight/badge code for a `Classified` transaction — split by *who*
+/// classified it, not by confidence (2026-08-25 fix). Previously this was
+/// `confidence >= 0.7 ? 1 : 2`, which meant a bare keyword match (0.45,
+/// fully automatic) and a user's own manual "Save" (0.75, fully manual)
+/// could land in *either* bucket depending on confidence alone — there was
+/// no way to tell "the engine decided this" from "a person confirmed this"
+/// just by looking at the row, and running Auto-Classify All again produced
+/// no visible change at all. Confidence itself is unaffected and still has
+/// its own dedicated HIGH/MEDIUM/LOW badge (`classification-type`,
+/// `analytics::confidence_tier`) in the Confidence column — this only
+/// changes which of the two existing row tints/badges (green "AUTO" vs blue
+/// "MANUAL") a Classified row gets. Driven purely by `classification_source`
+/// /`status`, both already persisted on every transaction, so the
+/// distinction survives filtering, sorting, reloading the client, and
+/// reopening the app with no new state to track.
+#[cfg(feature = "slint-ui")]
+fn classified_row_color(t: &parser::Transaction) -> i32 {
+    // "user" covers both a manual edit/confirmation of an imported row (the
+    // Save/Save & Learn buttons) and a manually-added row that somehow still
+    // carries `TransactionStatus::Classified` rather than `Manual` — either
+    // way, a human is the classifier of record. Every other source (a
+    // stored rule, a built-in keyword match, or AI) is the engine acting on
+    // its own, so all of those share the one "auto-classified" treatment.
+    if t.classification_source == "user" {
+        6
+    } else {
+        1
+    }
+}
+
 // ── Build Slint TxnRow model from filtered transaction slice ──────────────────
 #[cfg(feature = "slint-ui")]
 fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
@@ -291,13 +352,7 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
                     parser::TransactionStatus::Suspense => 4,
                     parser::TransactionStatus::Manual => 6,
                     _ if t.dup_flag => 5,
-                    parser::TransactionStatus::Classified => {
-                        if t.confidence >= 0.7 {
-                            1
-                        } else {
-                            2
-                        }
-                    }
+                    parser::TransactionStatus::Classified => classified_row_color(t),
                     _ => 0,
                 }
             };
@@ -1398,13 +1453,7 @@ fn apply_parse_result(
                     parser::TransactionStatus::Suspense => 4,
                     parser::TransactionStatus::Manual => 6,
                     _ if t.dup_flag => 5,
-                    parser::TransactionStatus::Classified => {
-                        if t.confidence >= 0.7 {
-                            1
-                        } else {
-                            2
-                        }
-                    }
+                    parser::TransactionStatus::Classified => classified_row_color(t),
                     _ => 0,
                 }
             };
@@ -3311,35 +3360,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(conn) = db.as_ref() {
                     match db::get_rules(conn, client_id) {
                         Ok(rules) => {
-                            // Format: "PATTERN  |  VENDOR  |  HEAD  |  TYPE"
-                            let recs: Vec<SharedString> = rules
-                                .iter()
-                                .map(|r| {
-                                    SharedString::from(
-                                        format!(
-                                            "{}  |  {}  |  {}  |  {}",
-                                            r.pattern,
-                                            if r.vendor.is_empty() {
-                                                "—"
-                                            } else {
-                                                &r.vendor
-                                            },
-                                            if r.account_head.is_empty() {
-                                                "—"
-                                            } else {
-                                                &r.account_head
-                                            },
-                                            if r.txn_type.is_empty() {
-                                                "—"
-                                            } else {
-                                                &r.txn_type
-                                            },
-                                        )
-                                        .as_str(),
-                                    )
-                                })
-                                .collect();
-                            h.set_rule_records(slint::ModelRc::new(slint::VecModel::from(recs)));
+                            h.set_rule_records(slint::ModelRc::new(slint::VecModel::from(
+                                build_rule_rows(&rules),
+                            )));
                             log::info!(
                                 "[ViewRules] loaded {} rules for client_id={}",
                                 rules.len(),
@@ -3388,34 +3411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log::info!("[DeleteRule] deleted rule id={}", rule.id);
                 match db::get_rules(conn, client_id) {
                     Ok(remaining) => {
-                        let recs: Vec<SharedString> = remaining
-                            .iter()
-                            .map(|r| {
-                                SharedString::from(
-                                    format!(
-                                        "{}  |  {}  |  {}  |  {}",
-                                        r.pattern,
-                                        if r.vendor.is_empty() {
-                                            "—"
-                                        } else {
-                                            &r.vendor
-                                        },
-                                        if r.account_head.is_empty() {
-                                            "—"
-                                        } else {
-                                            &r.account_head
-                                        },
-                                        if r.txn_type.is_empty() {
-                                            "—"
-                                        } else {
-                                            &r.txn_type
-                                        },
-                                    )
-                                    .as_str(),
-                                )
-                            })
-                            .collect();
-                        h.set_rule_records(slint::ModelRc::new(slint::VecModel::from(recs)));
+                        h.set_rule_records(slint::ModelRc::new(slint::VecModel::from(
+                            build_rule_rows(&remaining),
+                        )));
                     }
                     Err(e) => log::error!("[DeleteRule] reload DB error: {}", e),
                 }
@@ -6522,22 +6520,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     t.confidence = if learn { 1.0 } else { 0.75 };
                     t.classification_source = "user".to_string();
 
-                    // Save & Learn: derive a narration pattern and persist as a rule
+                    // Save & Learn: derive a narration pattern and persist as a rule.
+                    // Uses the transaction's own *resolved* vendor/account_head/
+                    // txn_type (2026-08-25 fix) — not the raw `vendor`/`head`/`typ`
+                    // callback parameters, which can be empty when the user left a
+                    // field blank to keep its existing value (e.g. only correcting
+                    // the ledger on an already-vendor-tagged row): the transaction
+                    // itself correctly keeps its prior value via the `if !empty`
+                    // guards above, but the rule used to be saved straight from the
+                    // blank parameter regardless, silently creating a rule with a
+                    // missing vendor or ledger that could never be usefully reused.
+                    // `derive_rule_pattern` (classifier.rs, next to `apply_rules`
+                    // it must stay in sync with) also fixes the pattern itself:
+                    // the old version read `narration` alone and stripped digits
+                    // with a `\b`-anchored regex that can never match a glued
+                    // reference number ("UPI209584004029merchant" — letters and
+                    // digits are both word characters, so no boundary exists at
+                    // the seam) — silently baking the unique transaction id into
+                    // every learned pattern and making the rule match nothing else
+                    // ever again.
                     if learn {
-                        let pattern = {
-                            // Port of JS _pattern(): strip long digit runs, take first 30 chars uppercase
-                            let stripped = regex::Regex::new(r"\b\d{6,}\b").unwrap()
-                                .replace_all(&t.narration, "").to_string();
-                            stripped.trim().to_uppercase().chars().take(30).collect::<String>()
-                        };
-                        if !pattern.is_empty() {
-                            let db = db_ref.lock().unwrap();
-                            if let Some(conn) = db.as_ref() {
-                                match db::add_rule(conn, client_id, &pattern, &vendor, &head, &typ) {
-                                    Ok(true)  => log::info!("[SaveLearn] rule saved: pattern='{}' head='{}' vendor='{}'", pattern, head, vendor),
-                                    Ok(false) => log::info!("[SaveLearn] rule already exists, skipped: pattern='{}'", pattern),
-                                    Err(e)    => log::error!("[SaveLearn] DB error: {}", e),
+                        match classifier::derive_rule_pattern(t) {
+                            Some(pattern) => {
+                                let db = db_ref.lock().unwrap();
+                                if let Some(conn) = db.as_ref() {
+                                    match db::add_rule(
+                                        conn, client_id, &pattern, &t.vendor, &t.account_head,
+                                        &t.txn_type.to_string(),
+                                    ) {
+                                        Ok(true) => {
+                                            log::info!(
+                                                "[SaveLearn] rule saved: pattern='{}' head='{}' vendor='{}'",
+                                                pattern, t.account_head, t.vendor
+                                            );
+                                            h.set_toast_msg(SharedString::from(
+                                                format!("Saved & learned: \"{}\" \u{2192} {}", pattern, t.account_head).as_str(),
+                                            ));
+                                            h.set_toast_kind(1);
+                                        }
+                                        Ok(false) => {
+                                            log::info!("[SaveLearn] rule already exists, skipped: pattern='{}'", pattern);
+                                            h.set_toast_msg(SharedString::from("Saved (rule already existed)"));
+                                            h.set_toast_kind(1);
+                                        }
+                                        Err(e) => {
+                                            log::error!("[SaveLearn] DB error: {}", e);
+                                            h.set_toast_msg(SharedString::from(
+                                                format!("Saved, but the rule failed to persist: {}", e).as_str(),
+                                            ));
+                                            h.set_toast_kind(2);
+                                        }
+                                    }
                                 }
+                            }
+                            None => {
+                                log::info!(
+                                    "[SaveLearn] narration too generic to learn a reusable rule from — transaction saved without one"
+                                );
+                                h.set_toast_msg(SharedString::from(
+                                    "Saved (narration too generic to learn a reusable rule from)",
+                                ));
+                                h.set_toast_kind(1);
                             }
                         }
                     }

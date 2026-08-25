@@ -6,6 +6,25 @@ import { Button, VerticalBox, HorizontalBox, ComboBox,
 import { DashboardScreen, DashMonthBar, DashExpBar, DashCashPt, DashVendorBar } from "dashboard.slint";
 
 // ── Batch monitor per-file row ────────────────────────────────────────────────
+// A "View Rules" list row (2026-08-25 fix) — previously this was a single
+// pre-joined `string` per rule ("PATTERN  |  VENDOR  |  HEAD  |  TYPE"),
+// rendered as one un-columned Text block even though the header row above
+// it already promised 4 separate aligned columns — the two visibly didn't
+// line up. Split into real fields so the body can actually align under its
+// own header, and a `confidence-label`/`scope` pair added so the rule's
+// real, deterministic classify-time confidence (0.9 for a client-specific
+// rule, 0.6 for a global one — see `classifier::classify_one`'s own rule
+// branch) is visible per the spec's "classification source/confidence"
+// requirement, which a bare rule row has no other field to answer with.
+export struct RuleRow {
+    pattern: string,
+    vendor: string,
+    account-head: string,
+    txn-type: string,
+    scope: string,             // "This Client" | "Global"
+    confidence-label: string,  // "90%" | "60%"
+}
+
 export struct BatchFileRow {
     file:    string,
     bank:    string,
@@ -796,10 +815,14 @@ component TxnTableRow inherits Rectangle {
                 padding-left: 4px; padding-right: 4px;
                 padding-top: 0px; padding-bottom: 0px;
                 spacing: 2px; alignment: start;
+                // AUTO (row-color 1) vs MANUAL (row-color 6) is who classified
+                // the row — engine (rule/keyword/AI) vs a human (Save/Save &
+                // Learn/manually added) — not a confidence measure; see
+                // `classified_row_color` in main.rs.
                 if root.data.row-color == 1 : Rectangle {
                     height: 14px; min-width: 34px; background: #C8E6C9;
                     border-radius: 7px; border-width: 1px; border-color: #81C784;
-                    Text { text: "HIGH"; font-size: 9px; font-weight: 800; color: #1B5E20;
+                    Text { text: "AUTO"; font-size: 9px; font-weight: 800; color: #1B5E20;
                            horizontal-alignment: center; vertical-alignment: center; }
                 }
                 if root.data.row-color == 3 : Rectangle {
@@ -955,7 +978,7 @@ export component MainScreen inherits Rectangle {
     in-out property <int>    ai-scope-idx:    0;
     // Import history + rules records set by Rust
     in property <[string]> import-records: [];
-    in property <[string]> rule-records:   [];
+    in property <[RuleRow]> rule-records:   [];
     in property <string>   status-bank:  "";
     in property <string>   status-file:  "";
     in property <[TxnRow]>  transaction-rows: [];
@@ -1974,10 +1997,17 @@ export component MainScreen inherits Rectangle {
                                     padding-top: 5px; padding-bottom: 5px;
                                     spacing: 18px;
 
-                                    // Row-colour key items: coloured square dot + dark text label
+                                    // Row-colour key items: coloured square dot + dark text label.
+                                    // "Auto-Classified" vs "Manual" (2026-08-25) is who classified
+                                    // the row — engine (rule/keyword/AI) vs a human (Save/Save &
+                                    // Learn/manually added) — see `classified_row_color` in
+                                    // main.rs. Was "High Conf."/"Medium", a confidence split that
+                                    // could put a fully-automatic keyword match and a human's own
+                                    // manual confirmation in the same bucket; confidence itself
+                                    // still has its own separate HIGH/MEDIUM/LOW badge in the
+                                    // table's Confidence column.
                                     for item in [
-                                        {lbl: "High Conf.", dot: #A5D6A7},
-                                        {lbl: "Medium",     dot: #FFF176},
+                                        {lbl: "Auto-Classified", dot: #A5D6A7},
                                         {lbl: "Needs Review", dot: #EF9A9A},
                                         {lbl: "Suspense",   dot: #CE93D8},
                                         {lbl: "Manual",     dot: #90CAF9},
@@ -2027,7 +2057,7 @@ export component MainScreen inherits Rectangle {
                                     // bumped 8px -> 10px to keep the pill fully rounded at the new,
                                     // slightly taller content-driven height.
                                     for chip in [
-                                        {lbl: "HIGH",     bg: #C8E6C9, fg: #1B5E20, bc: #81C784},
+                                        {lbl: "AUTO",     bg: #C8E6C9, fg: #1B5E20, bc: #81C784},
                                         {lbl: "REVIEW",   bg: #FFCDD2, fg: #B71C1C, bc: #EF9A9A},
                                         {lbl: "SUSPENSE", bg: #E1BEE7, fg: #6A1B9A, bc: #BA68C8},
                                     ] : Rectangle {
@@ -2999,8 +3029,8 @@ export component MainScreen inherits Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         TouchArea { clicked => { root.modal-state = ""; } }
         Rectangle {
-            x: (parent.width - 700px) / 2; y: (parent.height - 400px) / 2;
-            width: 700px; height: 400px; background: white; border-radius: 8px;
+            x: (parent.width - 800px) / 2; y: (parent.height - 400px) / 2;
+            width: 800px; height: 400px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
@@ -3019,19 +3049,49 @@ export component MainScreen inherits Rectangle {
                             Text { text: "Pattern"; font-size: 12px; font-weight: 600; color: white; horizontal-stretch: 2; vertical-alignment: center; }
                             Text { text: "Vendor"; font-size: 12px; font-weight: 600; color: white; min-width: 110px; vertical-alignment: center; }
                             Text { text: "Account Head"; font-size: 12px; font-weight: 600; color: white; min-width: 110px; vertical-alignment: center; }
-                            Text { text: "Type"; font-size: 12px; font-weight: 600; color: white; min-width: 60px; vertical-alignment: center; }
+                            Text { text: "Type"; font-size: 12px; font-weight: 600; color: white; min-width: 55px; vertical-alignment: center; }
+                            Text { text: "Confidence"; font-size: 12px; font-weight: 600; color: white; min-width: 90px; vertical-alignment: center; }
                         }
                     }
                     ListView {
                         y: 28px; height: parent.height - 28px;
                         for rec[i] in root.rule-records : Rectangle {
-                            height: 26px; background: #FFFFFF;
-                            Rectangle { y: 25px; height: 1px; background: #E3F2FD; }
-                            Text {
-                                x: 10px; width: parent.width - 86px; height: parent.height;
-                                text: rec;
-                                font-size: 11px; color: #0A1929;
-                                vertical-alignment: center; overflow: elide;
+                            height: 30px; background: #FFFFFF;
+                            Rectangle { y: 29px; height: 1px; background: #E3F2FD; }
+                            HorizontalBox {
+                                x: 10px; width: parent.width - 96px; height: parent.height;
+                                padding: 0px; spacing: 6px;
+                                Text {
+                                    text: rec.pattern == "" ? "—" : rec.pattern;
+                                    font-size: 11px; color: #0A1929; horizontal-stretch: 2;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                Text {
+                                    text: rec.vendor == "" ? "—" : rec.vendor;
+                                    font-size: 11px; color: #0D47A1; min-width: 110px;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                Text {
+                                    text: rec.account-head == "" ? "—" : rec.account-head;
+                                    font-size: 11px; color: #0D47A1; min-width: 110px;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                Text {
+                                    text: rec.txn-type == "" ? "—" : rec.txn-type;
+                                    font-size: 11px; color: #455A64; min-width: 55px;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                VerticalLayout {
+                                    min-width: 90px; alignment: center; spacing: 1px;
+                                    Text {
+                                        text: rec.confidence-label;
+                                        font-size: 11px; font-weight: 700; color: #1B5E20;
+                                    }
+                                    Text {
+                                        text: rec.scope;
+                                        font-size: 9px; color: #90A4AE;
+                                    }
+                                }
                             }
                             delChip := MChipBtn {
                                 x: parent.width - self.width - 10px; y: (parent.height - self.height) / 2;
