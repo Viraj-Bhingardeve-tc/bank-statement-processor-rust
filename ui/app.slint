@@ -106,6 +106,17 @@ export component AppWindow inherits Window {
     in-out property <string> new-client-name:   "";
     in-out property <string> new-client-ledger: "";
 
+    // ── Client dropdown's own selection (2026-08-25) ──────────────────────────
+    // The ComboBox's `current-index` used to be a one-time `0` (see
+    // main_screen.slint) with no way for Rust to ever move it — so after
+    // `do-select-client` ran (on startup auto-select, or here after creating
+    // a new client), the dropdown kept showing "-- Select Client --" even
+    // though the right client's data was genuinely loaded underneath.
+    // Rust sets this to the new selection's index into `client-names` right
+    // after a successful select/create so the visible dropdown always
+    // matches what's actually loaded.
+    in-out property <int>    client-selected-idx: 0;
+
     // ── AI settings (read by Rust in do-ai-classify) ─────────────────────────
     in-out property <int>    ai-provider-idx: 0;
     in-out property <string> ai-api-key:      "";
@@ -203,6 +214,14 @@ export component AppWindow inherits Window {
     in property <bool>            batch-paused:  false;
     callback do-batch-pause();
     callback do-batch-abort();
+    // ── Batch pre-flight review (2026-08-25) ──────────────────────────────────
+    in property <[string]>        batch-review-rows: [];
+    in property <string>          batch-review-summary: "";
+    in property <bool>            batch-review-can-process: false;
+    callback do-batch-pick-folder();
+    callback do-batch-pick-files();
+    callback do-batch-process-reviewed();
+    callback do-batch-review-cancel();
     // ── Export wizard step 4 preview ──────────────────────────────────────────
     in property <string>          export-preview-text: "";
     in property <bool>            wiz-can-export: true;
@@ -258,7 +277,6 @@ export component AppWindow inherits Window {
     // ── Callbacks implemented in Rust ─────────────────────────────────────────
     callback do-login(string, string);
     callback do-load-file();
-    callback do-batch-folder();
     callback do-new-client() -> bool;
     callback do-auto-classify();
     callback do-ai-classify();
@@ -377,6 +395,7 @@ export component AppWindow inherits Window {
         width: root.width; height: root.height;
         client-names:      root.client-names;
         new-client-name   <=> root.new-client-name;
+        client-selected-idx <=> root.client-selected-idx;
         new-client-ledger <=> root.new-client-ledger;
         ai-provider-idx   <=> root.ai-provider-idx;
         ai-api-key        <=> root.ai-api-key;
@@ -501,6 +520,9 @@ export component AppWindow inherits Window {
         batch-file-rows:       root.batch-file-rows;
         batch-running:         root.batch-running;
         batch-paused:          root.batch-paused;
+        batch-review-rows:         root.batch-review-rows;
+        batch-review-summary:      root.batch-review-summary;
+        batch-review-can-process:  root.batch-review-can-process;
         export-preview-text:   root.export-preview-text;
         wiz-can-export:        root.wiz-can-export;
         recon-matched:         root.recon-matched;
@@ -556,7 +578,10 @@ export component AppWindow inherits Window {
         // callback doc comment).
         change-plan         => { root.logged-in = false; root.show-subscribe-page = true; }
         load-file           => { root.do-load-file();           }
-        batch-folder        => { root.do-batch-folder();        }
+        batch-pick-folder      => { root.do-batch-pick-folder();      }
+        batch-pick-files       => { root.do-batch-pick-files();       }
+        batch-process-reviewed => { root.do-batch-process-reviewed(); }
+        batch-review-cancel    => { root.do-batch-review-cancel();    }
         new-client          => { return root.do-new-client();   }
         auto-classify       => { root.do-auto-classify();       }
         ai-classify         => { root.do-ai-classify();         }

@@ -1625,6 +1625,20 @@ enum BatchFileOutcome {
     Failed,
 }
 
+/// Every extension `try_parse_batch_file` below actually has a code path
+/// for (pdf, the Excel formats, and every image OCR falls back to) — single
+/// source of truth for both the "Choose Multiple Files" OS dialog's filter
+/// and "Choose Folder"'s manual directory-scan filter, so the two selection
+/// modes can never disagree about what counts as a supported statement
+/// file. Kept as a plain slice rather than duplicating `ocr_extractor::
+/// IMAGE_EXTS` inline.
+#[cfg(feature = "slint-ui")]
+fn batch_supported_exts() -> Vec<&'static str> {
+    let mut exts = vec!["pdf", "xlsx", "xls", "xlsm"];
+    exts.extend_from_slice(parser::ocr_extractor::IMAGE_EXTS);
+    exts
+}
+
 /// Try to parse one batch file. Mirrors the dispatch logic previously inline
 /// in `on_do_batch_folder`'s loop body.
 #[cfg(feature = "slint-ui")]
@@ -2100,6 +2114,157 @@ fn batch_step(aborted: bool, paused: bool) -> BatchStep {
     } else {
         BatchStep::ProcessNext
     }
+}
+
+/// Pure dedup/partition/format logic behind `stage_batch_review` — no
+/// Slint/filesystem dependency beyond `Path::extension`/`file_name` (which
+/// work on a `PathBuf` whether or not it exists on disk), so this is
+/// unit-testable without a live `AppWindow`. Takes the already-canonicalized
+/// key for each path separately (rather than calling `std::fs::canonicalize`
+/// itself) so a test can exercise the dedup logic against paths that don't
+/// exist on the test machine.
+fn plan_batch_review(
+    paths: Vec<(std::path::PathBuf, String)>, // (path, dedup key)
+    supported_exts: &[&str],
+) -> (Vec<std::path::PathBuf>, Vec<String>, String) {
+    let mut seen = std::collections::HashSet::new();
+    let mut supported: Vec<std::path::PathBuf> = Vec::new();
+    let mut rows: Vec<String> = Vec::new();
+    let mut dup_count = 0usize;
+    let mut unsupported_count = 0usize;
+
+    for (path, key) in paths {
+        if !seen.insert(key.to_lowercase()) {
+            dup_count += 1;
+            continue; // already in this same selection — silently collapsed, not listed twice
+        }
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if supported_exts.contains(&ext.as_str()) {
+            rows.push(format!("✓  {file_name}"));
+            supported.push(path);
+        } else {
+            unsupported_count += 1;
+            rows.push(format!(
+                "✗  {file_name}  —  unsupported file type, will be skipped"
+            ));
+        }
+    }
+
+    let mut summary = format!(
+        "{} file{} ready to process",
+        supported.len(),
+        if supported.len() == 1 { "" } else { "s" }
+    );
+    if unsupported_count > 0 {
+        summary.push_str(&format!("  •  {unsupported_count} unsupported (skipped)"));
+    }
+    if dup_count > 0 {
+        summary.push_str(&format!(
+            "  •  {dup_count} duplicate selection{} removed",
+            if dup_count == 1 { "" } else { "s" }
+        ));
+    }
+
+    (supported, rows, summary)
+}
+
+/// Stage a raw OS-picker/folder-scan result into the "batch-review" modal
+/// (2026-08-25) — dedupes by canonicalized path (falling back to the raw
+/// path if canonicalization fails, e.g. a file removed between picking and
+/// staging), partitions into supported vs. not by extension, builds the
+/// "✓"/"✗" display rows and the count summary, and opens the modal. Never
+/// starts parsing itself — `on_do_batch_process_reviewed` is what reads
+/// `st.batch_review` back out and actually calls `start_batch`, so nothing
+/// runs until the user has seen this exact list and confirmed it.
+#[cfg(feature = "slint-ui")]
+fn stage_batch_review(h: &AppWindow, state_ref: &Arc<Mutex<ui::AppState>>, paths: Vec<std::path::PathBuf>) {
+    let keyed: Vec<(std::path::PathBuf, String)> = paths
+        .into_iter()
+        .map(|p| {
+            let key = std::fs::canonicalize(&p)
+                .unwrap_or_else(|_| p.clone())
+                .to_string_lossy()
+                .into_owned();
+            (p, key)
+        })
+        .collect();
+    let (supported, rows, summary) = plan_batch_review(keyed, &batch_supported_exts());
+
+    let can_process = !supported.is_empty();
+    {
+        let mut st = state_ref.lock().unwrap();
+        st.batch_review = supported;
+    }
+    h.set_batch_review_rows(slint::ModelRc::new(slint::VecModel::from(
+        rows.into_iter()
+            .map(|r| SharedString::from(r.as_str()))
+            .collect::<Vec<_>>(),
+    )));
+    h.set_batch_review_summary(SharedString::from(summary.as_str()));
+    h.set_batch_review_can_process(can_process);
+    h.set_modal_state(SharedString::from("batch-review"));
+}
+
+/// Actually starts a batch run against `paths` — the tail end of what used
+/// to be `on_do_batch_folder` inline, now shared between it and (in the
+/// future) any other caller that already has a concrete file list, since
+/// "review, then process" means the OS-dialog result and the confirmed
+/// process-this list are no longer the same moment.
+#[cfg(feature = "slint-ui")]
+fn start_batch(
+    h: &AppWindow,
+    state_ref: &Arc<Mutex<ui::AppState>>,
+    db_ref: &Arc<Mutex<Option<rusqlite::Connection>>>,
+    paths: Vec<std::path::PathBuf>,
+) {
+    let (all_txns, batch_client_id) = {
+        let st = state_ref.lock().unwrap();
+        (st.transactions.clone(), st.client_id)
+    };
+    let persisted_hashes: std::collections::HashSet<String> = batch_client_id
+        .and_then(|cid| {
+            let db = db_ref.lock().unwrap();
+            db.as_ref()
+                .and_then(|conn| db::get_dedupe_hashes(conn, cid).ok())
+        })
+        .unwrap_or_default();
+
+    {
+        let mut st = state_ref.lock().unwrap();
+        st.batch_progress = Some(ui::BatchProgress {
+            remaining: paths.into_iter().collect(),
+            all_txns,
+            loaded: 0,
+            skipped: 0,
+            errors: 0,
+            first_bank: String::new(),
+            first_ob: None,
+            new_import_ids: vec![],
+            batch_results: vec![],
+            persisted_hashes,
+            client_id: batch_client_id,
+            paused: false,
+            aborted: false,
+        });
+        // Requirement #11 fix: clear the previous run's Batch Monitor table
+        // now, not just at the end — otherwise a user who opens the monitor
+        // while this new batch is still in progress would see stale
+        // results from the *last* batch and could mistake them for live
+        // progress.
+        st.batch_file_results.clear();
+        refresh_batch_monitor_display(h, &st);
+    }
+    h.set_batch_running(true);
+    h.set_batch_paused(false);
+    continue_batch(h, state_ref, db_ref);
 }
 
 #[cfg(feature = "slint-ui")]
@@ -2661,25 +2826,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Processing itself lives in continue_batch/finish_batch (module scope)
         // so it can pause mid-batch for a PDF password prompt and resume from
         // on_do_pdf_pwd_confirm/on_do_pdf_pwd_cancel — see those handlers.
+        // Selection is a separate step from starting the batch (2026-08-25):
+        // "Choose Folder"/"Choose Multiple Files" both just stage a file list
+        // into the "batch-review" modal via `stage_batch_review`; only
+        // `on_do_batch_process_reviewed` (the modal's own "Process Batch"
+        // button) actually calls `start_batch`.
         {
             let handle = app.as_weak();
             let state_ref = app_state.clone();
-            let db_ref = db_conn.clone();
-            app.on_do_batch_folder(move || {
+            app.on_do_batch_pick_folder(move || {
                 let h = match handle.upgrade() {
                     Some(h) => h,
                     None => return,
                 };
-
+                let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Select a folder of bank statement files")
+                    .pick_folder()
+                else {
+                    return;
+                };
+                // Non-recursive: matches the folder layout in the feature
+                // request ("Bank Statements Folder" with the statement
+                // files directly inside it), and avoids silently pulling in
+                // files from an unrelated subfolder a user didn't mean to
+                // include. Sorted by name so a Jan/Feb/Mar-style set lists
+                // (and processes) in the order a person would expect.
+                let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.path())
+                            .filter(|p| p.is_file())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                paths.sort();
+                if paths.is_empty() {
+                    h.set_toast_msg(SharedString::from(
+                        format!("No files found in \"{}\"", dir.display()).as_str(),
+                    ));
+                    h.set_toast_kind(2);
+                    return;
+                }
+                stage_batch_review(&h, &state_ref, paths);
+            });
+        }
+        {
+            let handle = app.as_weak();
+            let state_ref = app_state.clone();
+            app.on_do_batch_pick_files(move || {
+                let h = match handle.upgrade() {
+                    Some(h) => h,
+                    None => return,
+                };
+                let exts = batch_supported_exts();
                 let paths = match rfd::FileDialog::new()
                     .set_title("Select Bank Statement Files (multiple)")
-                    .add_filter(
-                        "Bank Statements",
-                        &[
-                            "pdf", "xlsx", "xls", "xlsm", "png", "jpg", "jpeg", "tiff", "tif",
-                            "bmp",
-                        ],
-                    )
+                    .add_filter("Bank Statements", &exts)
                     .add_filter(
                         "Images (OCR)",
                         &["png", "jpg", "jpeg", "tiff", "tif", "bmp"],
@@ -2689,47 +2892,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(p) if !p.is_empty() => p,
                     _ => return,
                 };
-
-                let (all_txns, batch_client_id) = {
-                    let st = state_ref.lock().unwrap();
-                    (st.transactions.clone(), st.client_id)
+                stage_batch_review(&h, &state_ref, paths);
+            });
+        }
+        {
+            let handle = app.as_weak();
+            let state_ref = app_state.clone();
+            let db_ref = db_conn.clone();
+            app.on_do_batch_process_reviewed(move || {
+                let h = match handle.upgrade() {
+                    Some(h) => h,
+                    None => return,
                 };
-                let persisted_hashes: std::collections::HashSet<String> = batch_client_id
-                    .and_then(|cid| {
-                        let db = db_ref.lock().unwrap();
-                        db.as_ref()
-                            .and_then(|conn| db::get_dedupe_hashes(conn, cid).ok())
-                    })
-                    .unwrap_or_default();
-
-                {
+                let paths = {
                     let mut st = state_ref.lock().unwrap();
-                    st.batch_progress = Some(ui::BatchProgress {
-                        remaining: paths.into_iter().collect(),
-                        all_txns,
-                        loaded: 0,
-                        skipped: 0,
-                        errors: 0,
-                        first_bank: String::new(),
-                        first_ob: None,
-                        new_import_ids: vec![],
-                        batch_results: vec![],
-                        persisted_hashes,
-                        client_id: batch_client_id,
-                        paused: false,
-                        aborted: false,
-                    });
-                    // Requirement #11 fix: clear the previous run's Batch
-                    // Monitor table now, not just at the end — otherwise a
-                    // user who opens the monitor while this new batch is
-                    // still in progress would see stale results from the
-                    // *last* batch and could mistake them for live progress.
-                    st.batch_file_results.clear();
-                    refresh_batch_monitor_display(&h, &st);
+                    std::mem::take(&mut st.batch_review)
+                };
+                if paths.is_empty() {
+                    return;
                 }
-                h.set_batch_running(true);
-                h.set_batch_paused(false);
-                continue_batch(&h, &state_ref, &db_ref);
+                start_batch(&h, &state_ref, &db_ref, paths);
+            });
+        }
+        {
+            let state_ref = app_state.clone();
+            app.on_do_batch_review_cancel(move || {
+                state_ref.lock().unwrap().batch_review.clear();
             });
         }
         // ── Batch Pause/Resume, Abort ────────────────────────────────────────────
@@ -2880,9 +3068,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     )
                                     .collect();
                             h.set_client_names(slint::ModelRc::new(slint::VecModel::from(names)));
+                            // Position of the just-created client in this same
+                            // freshly-rebuilt list, +1 for the "-- Select
+                            // Client --" placeholder at index 0 — feeds the
+                            // dropdown's own current-index below so it visibly
+                            // shows the new client, not the placeholder.
+                            if let Some(pos) = clients.iter().position(|c| c.id == id) {
+                                h.set_client_selected_idx((pos + 1) as i32);
+                            }
                         }
                     }
                 }
+                // Auto-select the new client (2026-08-25): reuse the exact
+                // same load path startup auto-select uses so its (empty)
+                // workspace — transactions, dashboard, Summary panel — loads
+                // immediately, instead of leaving the user to pick it from
+                // the dropdown by hand right after creating it.
+                h.invoke_do_select_client(SharedString::from(name.trim()));
                 h.set_toast_msg(SharedString::from(format!(
                     "Client \"{}\" created",
                     name.trim()
@@ -5931,6 +6133,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let st = state_ref.lock().unwrap();
                 h.set_dash_client_name(SharedString::from(client.name.as_str()));
                 h.set_dash_client_ledger(SharedString::from(client.tally_ledger.as_str()));
+                // Keep the dropdown's own visible selection in sync (2026-08-
+                // 25) — it used to be a one-time `current-index: 0` with no
+                // way for Rust to move it, so this client's data would load
+                // correctly underneath while the dropdown kept showing
+                // "-- Select Client --" until the user clicked it by hand.
+                // Covers both a manual pick and the startup auto-select call
+                // (`invoke_do_select_client`), since both land here.
+                {
+                    let db = db_ref.lock().unwrap();
+                    if let Some(conn) = db.as_ref() {
+                        if let Ok(clients) = db::get_clients(conn) {
+                            if let Some(pos) = clients.iter().position(|c| c.id == client.id) {
+                                h.set_client_selected_idx((pos + 1) as i32);
+                            }
+                        }
+                    }
+                }
                 h.set_status_bank(SharedString::from(if txns.is_empty() {
                     "No transactions — load a file to begin"
                 } else {
@@ -6943,5 +7162,121 @@ mod batch_pause_abort_tests {
         // actually left behind, so the message shouldn't claim otherwise.
         let (msg, _kind) = batch_summary_message(4, 0, 0, true, 0);
         assert!(!msg.contains("not processed"), "got: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod batch_review_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // `plan_batch_review` takes (path, dedup-key) pairs rather than calling
+    // `std::fs::canonicalize` itself — these tests use the raw path string
+    // as its own key, which is exactly what `stage_batch_review` falls back
+    // to for a path that doesn't (or doesn't yet) exist on disk, e.g. a
+    // freshly-picked file the OS dialog just returned.
+    fn kv(p: &str) -> (PathBuf, String) {
+        (PathBuf::from(p), p.to_string())
+    }
+
+    #[test]
+    fn folder_of_four_pdfs_all_supported_and_none_duplicated() {
+        // The exact shape from the feature request: a folder containing
+        // January.pdf/February.pdf/March.pdf/April.pdf, nothing else.
+        let paths = vec![
+            kv("C:/Statements/January.pdf"),
+            kv("C:/Statements/February.pdf"),
+            kv("C:/Statements/March.pdf"),
+            kv("C:/Statements/April.pdf"),
+        ];
+        let (supported, rows, summary) = plan_batch_review(paths, &batch_supported_exts());
+        assert_eq!(supported.len(), 4);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r.starts_with('✓')), "got: {rows:?}");
+        assert_eq!(summary, "4 files ready to process");
+    }
+
+    #[test]
+    fn manually_selected_subset_of_three_files_all_supported() {
+        // The other half of the feature request: picking 2/3/4 individual
+        // files rather than a whole folder — same planning logic either way.
+        let paths = vec![
+            kv("C:/Statements/January.pdf"),
+            kv("C:/Statements/March.pdf"),
+            kv("C:/Statements/April.pdf"),
+        ];
+        let (supported, _rows, summary) = plan_batch_review(paths, &batch_supported_exts());
+        assert_eq!(supported.len(), 3);
+        assert_eq!(summary, "3 files ready to process");
+    }
+
+    #[test]
+    fn unsupported_extension_is_excluded_from_the_process_list_but_still_listed() {
+        let paths = vec![
+            kv("C:/Statements/January.pdf"),
+            kv("C:/Statements/readme.docx"),
+        ];
+        let (supported, rows, summary) = plan_batch_review(paths, &batch_supported_exts());
+        assert_eq!(supported.len(), 1, "the unsupported file must not be queued for parsing");
+        assert_eq!(supported[0], PathBuf::from("C:/Statements/January.pdf"));
+        assert_eq!(rows.len(), 2, "the unsupported file must still be shown, just marked as skipped");
+        assert!(
+            rows.iter().any(|r| r.starts_with('✗') && r.contains("readme.docx") && r.contains("unsupported")),
+            "got: {rows:?}"
+        );
+        assert!(summary.contains("1 file"), "got: {summary}");
+        assert!(summary.contains("1 unsupported"), "got: {summary}");
+    }
+
+    #[test]
+    fn duplicate_path_within_one_selection_is_collapsed_to_a_single_row() {
+        // Same canonical path picked twice (e.g. a folder scan somehow
+        // yielding the same entry twice) must not queue it, or list it,
+        // more than once.
+        let paths = vec![
+            kv("C:/Statements/January.pdf"),
+            kv("C:/Statements/January.pdf"),
+            kv("C:/Statements/February.pdf"),
+        ];
+        let (supported, rows, summary) = plan_batch_review(paths, &batch_supported_exts());
+        assert_eq!(supported.len(), 2, "the repeated file must be queued only once");
+        assert_eq!(rows.len(), 2, "the repeated file must be listed only once");
+        assert!(summary.contains("1 duplicate"), "got: {summary}");
+    }
+
+    #[test]
+    fn duplicate_path_differing_only_by_case_is_still_collapsed() {
+        // Windows paths are case-insensitive on disk; the dedup key is
+        // lower-cased so "Jan.pdf" picked via two different-cased paths to
+        // the same file still collapses to one.
+        let paths = vec![
+            kv("C:/Statements/January.pdf"),
+            (PathBuf::from("c:/statements/January.pdf"), "C:/STATEMENTS/JANUARY.PDF".to_string()),
+        ];
+        let (supported, _rows, _summary) = plan_batch_review(paths, &batch_supported_exts());
+        assert_eq!(supported.len(), 1);
+    }
+
+    #[test]
+    fn empty_selection_yields_no_supported_files_and_a_zero_summary() {
+        let (supported, rows, summary) = plan_batch_review(vec![], &batch_supported_exts());
+        assert!(supported.is_empty());
+        assert!(rows.is_empty());
+        assert_eq!(summary, "0 files ready to process");
+    }
+
+    #[test]
+    fn batch_supported_exts_matches_every_extension_try_parse_batch_file_actually_handles() {
+        // Keeps the OS-dialog filter and the folder-scan filter honest
+        // against `try_parse_batch_file`'s own dispatch — if that function
+        // ever grows a new format, this is the test that should start
+        // failing until this list is updated to match.
+        let exts = batch_supported_exts();
+        for e in ["pdf", "xlsx", "xls", "xlsm"] {
+            assert!(exts.contains(&e), "missing {e}");
+        }
+        for e in parser::ocr_extractor::IMAGE_EXTS {
+            assert!(exts.contains(e), "missing image ext {e}");
+        }
     }
 }

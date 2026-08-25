@@ -159,6 +159,12 @@ pub struct AppState {
     // Set while a batch-folder import is paused waiting for a PDF password —
     // see BatchProgress doc comment.
     pub batch_progress: Option<BatchProgress>,
+    // Batch pre-flight review (2026-08-25): the supported, deduplicated file
+    // list staged by "Choose Folder"/"Choose Multiple Files" and shown in
+    // the "batch-review" modal — `do_batch_process_reviewed` reads this
+    // (not the raw OS dialog result) to actually start the batch, so
+    // whatever the user saw listed is exactly what runs.
+    pub batch_review: Vec<std::path::PathBuf>,
 
     // Set true to abort an in-flight AI classification run (checked between
     // batches in ai_classifier::classify_with_ai). Reset to false at the start
