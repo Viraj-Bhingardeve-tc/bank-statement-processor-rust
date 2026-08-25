@@ -51,9 +51,38 @@ pub fn classify_all(
             continue;
         }
 
-        let before_status = t.status.clone();
+        // Track more than just `status`: for an already-`Classified` row
+        // below confidence 1.0 (the common case for anything that came
+        // through the keyword/party-extraction fallback rather than a rule
+        // or AI), `classify_one` re-derives `vendor`/`account_head` from
+        // scratch on every call — status goes in as "Classified" and comes
+        // back out as "Classified", so comparing status alone missed a real
+        // mutation. Traced against a live dataset (2026-08-25): every time
+        // this client's self-healing reclassify ran, it silently re-split a
+        // `party_master::normalize_vendors` merge that had already been
+        // applied and persisted (e.g. "Vidwans" re-diverging back out of
+        // "Vidwansgaurav Moreshw") — `changed` stayed 0 because `status`
+        // never moved, so the caller's `if changed > 0 { normalize_vendors
+        // (...); persist(...) }` never ran to re-merge or save it, leaving
+        // the in-memory copy (and everything rendered from it, like the
+        // Summary Panel's Receipts/Payments by Ledger) silently out of sync
+        // with the correctly-merged database row underneath. Comparing
+        // `vendor`/`account_head`/`confidence` too makes `changed` reflect
+        // any actual mutation, not just a status transition.
+        let before = (
+            t.status.clone(),
+            t.vendor.clone(),
+            t.account_head.clone(),
+            t.confidence,
+        );
         classify_one(t, bank_ledger, rules, gst_enabled, gst_auto_ledgers);
-        if t.status != before_status {
+        let after = (
+            t.status.clone(),
+            t.vendor.clone(),
+            t.account_head.clone(),
+            t.confidence,
+        );
+        if after != before {
             changed += 1;
         }
     }
@@ -895,8 +924,22 @@ pub fn infer_voucher_type(t: &Transaction, upper: &str) -> VoucherType {
 // word→word, so no `\b` exists at that internal position) — anchoring
 // the optional prefix instead, then letting the digit match continue
 // from wherever the prefix match left off, sidesteps that.
+//
+// `[A-Z]{0,10}` between the payment-type prefix and the digit run (added
+// 2026-08-25) — some real RTGS narrations insert a short bank-code
+// segment there too: "RTGSMAHBR52022052712140814..." is "RTGS" + "MAHBR"
+// (the bank code) + the actual UTR digits, all glued with no separator at
+// all. Without this, that whole reference (bank code and all) was
+// surviving into the extracted party name — three RTGS credits to the
+// same real beneficiary, otherwise byte-identical narrations apart from
+// their own UTR, were showing up as three separate Payments-by-Ledger
+// entries instead of merging like they should have. `{0,10}` keeps this
+// from swallowing a genuine multi-word merchant name that happens to
+// start right after the payment-type prefix with no space (there's no
+// real bank-code abbreviation anywhere near that long).
 static GLUED_REF_PREFIX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:UPI|NEFT|RTGS|IMPS|INFT|NACH|ECS|ACH|BBPS)?[0-9]{6,}").unwrap()
+    Regex::new(r"(?i)\b(?:(?:UPI|NEFT|RTGS|IMPS|INFT|NACH|ECS|ACH|BBPS)[A-Z]{0,10})?[0-9]{6,}")
+        .unwrap()
 });
 
 /// Extract party name from NEFT/RTGS/UPI-style narrations.
@@ -1337,6 +1380,82 @@ mod tests {
         assert_eq!(extract_party_name("UPI209584004029coffee"), "coffee");
         assert_eq!(extract_party_name("UPI 209866832803haircolour"), "haircolour");
         assert_eq!(extract_party_name("UPI209586364864courier"), "courier");
+    }
+
+    #[test]
+    fn classify_all_reports_changed_when_an_already_classified_low_confidence_row_is_silently_remutated() {
+        // Root cause of a live "still shows split, database already shows
+        // merged" report (2026-08-25): a row that's already `Classified`
+        // but below confidence 1.0 (the common case — anything that came
+        // through the keyword/party-extraction fallback rather than a rule
+        // or AI) still gets fully reprocessed by `classify_one` on every
+        // `classify_all` call. That's fine and intended for a first pass,
+        // but the *caller* (main.rs's self-healing re-classify on client
+        // select) only re-runs `party_master::normalize_vendors` and
+        // persists when `classify_all`'s returned count is > 0 — and the
+        // old implementation counted only `status` transitions. A row whose
+        // `vendor`/`account_head` a prior `normalize_vendors` pass had
+        // already canonicalized (e.g. "Vidwans" → "Vidwansgaurav Moreshw")
+        // goes back into `classify_one` as Classified and comes out as
+        // Classified — `status` never moves — even though `account_head`
+        // just got silently reset to a fresh, unmerged raw extraction.
+        // `changed` staying 0 meant the caller never re-ran
+        // `normalize_vendors` to re-merge it, so the in-memory copy (and
+        // anything rendered from it) silently diverged from the correctly-
+        // merged database row underneath. This asserts the field-level
+        // regression itself, independent of any particular narration.
+        let mut t = Transaction {
+            narration: "UPI209584004029somebrandnewmerchant".to_string(),
+            reference: String::new(),
+            credit: Some(100.0),
+            vendor: "A Deliberately Different Canonical Vendor".to_string(),
+            account_head: "A Deliberately Different Canonical Vendor".to_string(),
+            status: TransactionStatus::Classified,
+            confidence: 0.45,
+            ..Transaction::new("t1")
+        };
+        let changed = classify_all(std::slice::from_mut(&mut t), "Bank Ledger", &[], false, false, false);
+        assert_eq!(
+            t.account_head, "somebrandnewmerchant",
+            "classify_one is expected to overwrite account_head from raw narration in this scenario"
+        );
+        assert_eq!(
+            changed, 1,
+            "classify_all must report this row as changed even though status stayed Classified, \
+             so the caller's `if changed > 0` re-normalize/persist branch actually runs"
+        );
+    }
+
+    #[test]
+    fn extract_party_glued_rtgs_reference_with_bank_code() {
+        // Confirmed against a real, live-imported dataset (2026-08-25):
+        // RTGS narrations glue a short bank-code segment ("MAHBR") between
+        // the "RTGS" payment-type prefix and the numeric UTR, with no
+        // separator anywhere: "RTGSMAHBR52022052712140814...". Before the
+        // `GLUED_REF_PREFIX` fix, only the payment-type prefix was
+        // stripped, leaving the bank code glued onto the front of the
+        // extracted party name (e.g. "Mahbr52022052712140814
+        // Globalconstru..."), so three real RTGS credits to the same
+        // beneficiary — otherwise byte-identical apart from their own UTR —
+        // extracted three different party names and showed up as three
+        // separate Payments-by-Ledger entries instead of merging into one.
+        let n1 = "RTGSMAHBR52022052712140814 GLOBALCONSTRUCTIONS 1208-PUNEBHUSARICOLONY";
+        let n2 = "RTGSMAHBR52022053112164398 GLOBALCONSTRUCTIONS 1208-PUNEBHUSARICOLONY";
+        let n3 = "RTGSMAHBR52022061512263034 GLOBALCONSTRUCTIONS 1208-PUNEBHUSARICOLONY";
+        let p1 = extract_party_name(n1);
+        let p2 = extract_party_name(n2);
+        let p3 = extract_party_name(n3);
+        assert_eq!(p1, p2);
+        assert_eq!(p2, p3);
+        assert!(
+            !p1.to_uppercase().contains("MAHBR"),
+            "bank code must not survive into the extracted party name: {p1:?}"
+        );
+        assert!(
+            p1.to_uppercase().contains("GLOBALCONSTRUCTIONS")
+                || p1.to_uppercase().contains("GLOBAL CONSTRUCTIONS"),
+            "expected the real beneficiary to survive: {p1:?}"
+        );
     }
 
     #[test]
