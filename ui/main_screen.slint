@@ -3987,12 +3987,26 @@ export component MainScreen inherits Rectangle {
                 padding: 28px; spacing: 10px; alignment: center;
                 Text { text: "OCR Processing"; font-size: 15px; font-weight: 700; color: #0A1929; horizontal-alignment: center; }
                 Text { text: root.ocr-msg; font-size: 13px; color: #555555; horizontal-alignment: center; min-height: 18px; }
-                // Progress bar
+                // Progress bar — fills left-to-right, driven entirely by
+                // `root.ocr-pct` (real stage checkpoints reported by
+                // run_pdf_ocr_pipeline/run_image_ocr_pipeline in main.rs,
+                // never a fake/looping animation). `animate width`
+                // (2026-08-25) makes each checkpoint jump glide smoothly
+                // over the gap instead of snapping instantly — the
+                // percentage value itself is unchanged, this only smooths
+                // how the fill visually catches up to it.
                 Rectangle {
                     height: 10px; background: #E3F2FD; border-radius: 5px;
+                    accessible-role: progress-indicator;
+                    accessible-label: "File processing progress";
+                    accessible-value: root.ocr-pct + "%";
+                    accessible-value-minimum: 0;
+                    accessible-value-maximum: 100;
                     Rectangle {
+                        x: 0px;
                         width: parent.width * root.ocr-pct / 100;
                         height: parent.height; background: #1565C0; border-radius: 5px;
+                        animate width { duration: 450ms; easing: ease-out; }
                     }
                 }
                 Text {
@@ -4026,8 +4040,10 @@ export component MainScreen inherits Rectangle {
                     accessible-value-minimum: 0;
                     accessible-value-maximum: 100;
                     Rectangle {
+                        x: 0px;
                         width: parent.width * root.ai-pct / 100;
                         height: parent.height; background: #6B2FB8; border-radius: 5px;
+                        animate width { duration: 450ms; easing: ease-out; }
                     }
                 }
                 Text { text: root.ai-pct + "%"; font-size: 12px; font-weight: 600; color: #6B2FB8; horizontal-alignment: center; }

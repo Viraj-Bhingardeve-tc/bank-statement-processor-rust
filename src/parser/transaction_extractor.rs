@@ -9,6 +9,7 @@
 //! character-position within that line, not by PDF X coordinates.
 
 use crate::parser::{
+    amount_parser::parse_amount_str,
     column_detector::PdfItem,
     date_parser::normalize_transaction_date,
     excel_parser::{compute_prev_balances, prepend_opening_balance_row},
@@ -802,6 +803,258 @@ fn extract_cosmos_ref(text_part: &str) -> (String, String) {
     }
 }
 
+// ── Kotak "narrow" e-statement PDF layout ─────────────────────────────────────
+//
+// Some Kotak Mahindra Bank statement PDFs (a mobile-app/e-statement export
+// template — confirmed 2026-08-25 against the real "Kotak Bank.pdf" fixture,
+// which is the exact file a live Debit/Credit-mixing bug report traced back
+// to this layout) render each transaction as 8 SEPARATE physical text lines
+// rather than columns sharing a line or an X position:
+//
+//   Sl. No. | Date | Time | Value Date | Narration | Chq./Ref. No. |
+//   signed Amount | Balance
+//
+// `text_extractor`'s row-clustering yields one `PdfItem` per physical line
+// here, all at the same X (0.0) — every column boundary this module's other
+// two extractors rely on is gone: `extract_fw_transactions` needs a whole
+// transaction on *one* line, and `column_detector`'s header/boundary
+// detection needs distinct X positions per column. Neither matches, so
+// `parse_pdf_rows` used to fall all the way through to the OCR-text
+// fallback path (`ocr_parser`'s flat full-text extraction), which has no
+// column identity at all — confirmed (via `examples/kotak_debug_probe.rs`)
+// to silently read the real running **Balance** into the Debit/Credit
+// field and the **Sl. No.** row-counter into the Balance field for the
+// large majority of transactions, corrupting every amount in the file.
+//
+// This extractor is a `parse_pdf_rows` **last-resort fallback**, tried only
+// after normal header detection *and* `extract_fw_transactions` have both
+// already failed (see its call site in `pdf_parser.rs`) — it can only ever
+// add coverage for a file nothing else already handles; it is never in a
+// position to change what any currently-working bank/layout produces,
+// including the *other*, traditionally-tabular Kotak layout the main
+// column-based loop already special-cases via its own "Kotak signed
+// combined column" handling (`ColField::DebitCredit`).
+//
+// The signed Amount line is the one unambiguous anchor: it is the only one
+// of the 8 fields carrying an explicit leading sign — `+56,238.00` for a
+// Credit, `-562,389.00` for a Debit, confirmed against every real
+// transaction in the fixture with zero exceptions. Direction always comes
+// from that sign, never from balance movement (which the fallback path's
+// bug shows can't be trusted to even land in the right field, let alone be
+// used to infer direction).
+
+/// `s` is a bare small non-negative integer — the "Sl. No." column's shape.
+/// Capped at 6 digits: a genuine transaction serial number in any real
+/// statement is far shorter, and this cap keeps an ordinary amount or
+/// reference number from ever being mistaken for one.
+fn is_kotak_sl_no(s: &str) -> bool {
+    let s = s.trim();
+    !s.is_empty() && s.len() <= 6 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+/// `s` is a bare "H:MM AM"/"HH:MM PM" time-of-day — the "Time" column's shape.
+fn is_kotak_time_of_day(s: &str) -> bool {
+    let s = s.trim();
+    let rest = s
+        .strip_suffix("AM")
+        .or_else(|| s.strip_suffix("PM"))
+        .or_else(|| s.strip_suffix("am"))
+        .or_else(|| s.strip_suffix("pm"));
+    let Some(rest) = rest else { return false };
+    let parts: Vec<&str> = rest.trim().split(':').collect();
+    parts.len() == 2
+        && !parts[0].is_empty()
+        && parts[0].len() <= 2
+        && parts[0].chars().all(|c| c.is_ascii_digit())
+        && parts[1].len() == 2
+        && parts[1].chars().all(|c| c.is_ascii_digit())
+}
+
+/// `s` is a bare (unsigned) decimal amount, comma grouping optional, 0-2
+/// decimal places — the "Balance" column's shape (never signed).
+fn is_kotak_plain_amount(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let mut dot_seen = false;
+    let mut digits_after_dot = 0usize;
+    let mut any_digit = false;
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            any_digit = true;
+            if dot_seen {
+                digits_after_dot += 1;
+            }
+        } else if c == ',' && !dot_seen {
+            // thousands separator — only valid before the decimal point
+        } else if c == '.' && !dot_seen {
+            dot_seen = true;
+        } else {
+            return false;
+        }
+    }
+    any_digit && (!dot_seen || (1..=2).contains(&digits_after_dot))
+}
+
+/// `s` is a signed decimal amount — `+`/`-` immediately followed by a
+/// `is_kotak_plain_amount`-shaped number. This is the layout's Debit/Credit
+/// direction anchor (see the module doc comment above): every real
+/// transaction amount in this layout carries an explicit sign, so a line
+/// that doesn't is never mistaken for one — it's either the unsigned
+/// Balance that always immediately follows it, or narration/reference text.
+fn is_kotak_signed_amount(s: &str) -> bool {
+    let s = s.trim();
+    let rest = s.strip_prefix('+').or_else(|| s.strip_prefix('-'));
+    rest.is_some_and(is_kotak_plain_amount)
+}
+
+/// Minimum number of transaction blocks this layout must find before it's
+/// trusted — mirrors `extract_cosmos_transactions`'s own `pending.len() < 2`
+/// sanity floor (own doc comment above it) against a false-positive match on
+/// some unrelated document that happens to contain a couple of small-
+/// integer/date-shaped lines by coincidence. Set a little higher here since
+/// this layout's block shape (4-line anchor, then a bounded scan for a
+/// signed-amount line) is looser than Cosmos's single-line-per-transaction
+/// match.
+const MIN_KOTAK_NARROW_TXNS: usize = 3;
+
+/// How many lines past the 4-line Sl.No/Date/Time/ValueDate anchor this will
+/// scan looking for the signed-Amount line before giving up on that block —
+/// generous enough for a multi-line-wrapped narration+reference (never seen
+/// to exceed 2 lines in the real fixture) without letting one failed match
+/// scan arbitrarily far into the rest of the document.
+const MAX_KOTAK_NARRATION_SPAN: usize = 12;
+
+/// Port of the Kotak "narrow" e-statement layout described above.
+/// Returns `(transactions, opening_balance, closing_balance)` in the same
+/// shape `extract_fw_transactions` does, for the same caller-side
+/// post-processing (`compute_prev_balances` derives the opening balance from
+/// the first transaction when this layout has no explicit "Opening Balance"
+/// line of its own, exactly as it already does for `extract_fw_transactions`
+/// callers with the same gap).
+pub fn extract_kotak_narrow_transactions(
+    rows: &[Vec<PdfItem>],
+    file_name: &str,
+) -> Option<(Vec<Transaction>, Option<f64>, Option<f64>)> {
+    let lines: Vec<String> = rows
+        .iter()
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            r.iter()
+                .map(|it| it.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let n = lines.len();
+    let mut txns: Vec<Transaction> = Vec::new();
+    let mut txn_counter = 0usize;
+    let mut i = 0usize;
+
+    while i < n {
+        let is_block_start = i + 3 < n
+            && is_kotak_sl_no(&lines[i])
+            && normalize_transaction_date(&lines[i + 1]).valid
+            && is_kotak_time_of_day(&lines[i + 2])
+            && normalize_transaction_date(&lines[i + 3]).valid;
+        if !is_block_start {
+            i += 1;
+            continue;
+        }
+
+        let nd = normalize_transaction_date(&lines[i + 1]);
+
+        // Scan forward for the signed-amount anchor.
+        let scan_end = n.min(i + 4 + MAX_KOTAK_NARRATION_SPAN);
+        let amt_idx = (i + 4..scan_end).find(|&j| is_kotak_signed_amount(&lines[j]));
+        let Some(amt_idx) = amt_idx else {
+            // No amount found in range — this wasn't really a transaction
+            // block (or the layout assumption broke down here); move past
+            // just the anchor and keep scanning rather than getting stuck.
+            i += 1;
+            continue;
+        };
+
+        let signed = parse_amount_str(&lines[amt_idx]);
+        let Some(signed) = signed else {
+            i = amt_idx + 1;
+            continue;
+        };
+
+        // Narration + reference: everything between the Value Date (i+3)
+        // and the signed Amount. The line immediately before the amount is
+        // the reference; anything earlier (normally exactly one line) is
+        // narration.
+        let between = &lines[i + 4..amt_idx];
+        let (narration, reference) = match between.len() {
+            0 => (String::new(), String::new()),
+            1 => (between[0].clone(), String::new()),
+            _ => (
+                between[..between.len() - 1].join(" "),
+                between[between.len() - 1].clone(),
+            ),
+        };
+
+        if narration.is_empty() || is_noise_row(&narration) {
+            i = amt_idx + 1;
+            continue;
+        }
+
+        // Balance immediately follows the signed Amount.
+        let bal_idx = amt_idx + 1;
+        let (balance, next_i) = if bal_idx < n && is_kotak_plain_amount(&lines[bal_idx]) {
+            (parse_amount_str(&lines[bal_idx]), bal_idx + 1)
+        } else {
+            (None, bal_idx)
+        };
+
+        // Sign determines direction — never balance movement (spec: "the
+        // sign must determine the transaction direction"; see the module
+        // doc comment for why balance movement is exactly what corrupted
+        // this data in the OCR-text fallback path).
+        let (debit, credit) = if signed < 0.0 {
+            (Some(signed.abs()), None)
+        } else {
+            (None, Some(signed))
+        };
+
+        txn_counter += 1;
+        let mut t = Transaction::new(format!("t_kotak_narrow_{}_{}", i, txn_counter));
+        t.date = nd.display;
+        t.date_ts = nd.ts;
+        t.narration = narration;
+        t.reference = reference;
+        t.debit = debit;
+        t.credit = credit;
+        t.balance = balance;
+        t.bank_name = "Kotak Mahindra Bank".to_string();
+        txns.push(t);
+
+        i = next_i;
+    }
+
+    if txns.len() < MIN_KOTAK_NARROW_TXNS {
+        log::debug!(
+            "[BSP Kotak narrow] \"{}\": only {} block(s) matched — not trusting this layout",
+            file_name,
+            txns.len()
+        );
+        return None;
+    }
+
+    log::debug!(
+        "[BSP Kotak narrow] \"{}\": matched {} transactions",
+        file_name,
+        txns.len()
+    );
+    Some((txns, None, None))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1126,5 +1379,142 @@ mod tests {
     fn cosmos_no_header_returns_none() {
         let rows = vec![row_of("01-01-2024 SALARY 50000.00 150000.00Cr")];
         assert!(extract_cosmos_transactions(&rows, "x.pdf").is_none());
+    }
+
+    // ── extract_kotak_narrow_transactions ─────────────────────────────────────
+    // Synthetic reproductions of the real "Kotak Bank.pdf" fixture's exact
+    // 8-line-per-transaction shape (Sl.No/Date/Time/ValueDate/Narration/
+    // Ref/signed Amount/Balance) — the real bug this was written for is
+    // covered end-to-end against the actual fixture PDF in
+    // tests/import_pipeline.rs; these test the block-scanning algorithm
+    // itself in isolation, including the shapes it must specifically not
+    // misparse.
+
+    fn rows_from(lines: &[&str]) -> Vec<Vec<PdfItem>> {
+        lines.iter().map(|l| row_of(l)).collect()
+    }
+
+    // Every call site below passes string literals, so a `&'static str`
+    // signature avoids any lifetime juggling — this only ever needs to
+    // build a fixed test fixture, never a runtime-computed string.
+    fn kotak_block(
+        sl_no: &'static str,
+        date: &'static str,
+        narr: &'static str,
+        refno: &'static str,
+        signed: &'static str,
+        bal: &'static str,
+    ) -> Vec<&'static str> {
+        vec![sl_no, date, "07:58 PM", date, narr, refno, signed, bal]
+    }
+
+    #[test]
+    fn kotak_narrow_negative_amount_is_a_debit_positive_is_a_credit() {
+        let mut lines: Vec<&str> = Vec::new();
+        lines.extend(kotak_block(
+            "1", "10 Apr 2024", "UPI/SOME MERCHANT/410166340136/UPI", "UPI-410108414656",
+            "-805.50", "16,02,264.84",
+        ));
+        lines.extend(kotak_block(
+            "2", "11 Apr 2024", "NEFT SOMECOMPANY HDFC0000001", "NEFTINW-0841873091",
+            "+50,000.00", "16,52,264.84",
+        ));
+        lines.extend(kotak_block(
+            "3", "12 Apr 2024", "UPI/OTHER MERCHANT/410233400260/UPI", "UPI-410248001456",
+            "-18.00", "16,52,246.84",
+        ));
+        let rows = rows_from(&lines);
+        let (txns, op_bal, cl_bal) =
+            extract_kotak_narrow_transactions(&rows, "test.pdf").expect("must match the narrow layout");
+        assert_eq!(op_bal, None);
+        assert_eq!(cl_bal, None);
+        assert_eq!(txns.len(), 3);
+
+        assert_eq!(txns[0].debit, Some(805.50));
+        assert_eq!(txns[0].credit, None);
+        assert_eq!(txns[0].balance, Some(1602264.84));
+
+        assert_eq!(txns[1].debit, None);
+        assert_eq!(txns[1].credit, Some(50000.0));
+        assert_eq!(txns[1].balance, Some(1652264.84));
+
+        assert_eq!(txns[2].debit, Some(18.0));
+        assert_eq!(txns[2].credit, None);
+
+        // Never both, never neither.
+        for t in &txns {
+            assert!(!(t.debit.is_some() && t.credit.is_some()));
+            assert!(t.debit.is_some() || t.credit.is_some());
+        }
+    }
+
+    #[test]
+    fn kotak_narrow_amount_without_comma_or_decimal_parses_correctly() {
+        // Spec's own example shape: "+56238" / "-562389" — no thousands
+        // comma, no decimal point at all.
+        let mut lines: Vec<&str> = Vec::new();
+        lines.extend(kotak_block("1", "10 Apr 2024", "UPI/A/1/UPI", "UPI-1", "+56238", "156238"));
+        lines.extend(kotak_block("2", "11 Apr 2024", "UPI/B/2/UPI", "UPI-2", "-562389", "0"));
+        lines.extend(kotak_block("3", "12 Apr 2024", "UPI/C/3/UPI", "UPI-3", "-1.00", "0.00"));
+        let rows = rows_from(&lines);
+        let (txns, _, _) =
+            extract_kotak_narrow_transactions(&rows, "test.pdf").expect("must match the narrow layout");
+        assert_eq!(txns[0].credit, Some(56238.0));
+        assert_eq!(txns[0].debit, None);
+        assert_eq!(txns[1].debit, Some(562389.0));
+        assert_eq!(txns[1].credit, None);
+    }
+
+    #[test]
+    fn kotak_narrow_survives_a_page_break_interruption_between_blocks() {
+        // Reproduces the real fixture's page-break furniture exactly: a
+        // statement-generated timestamp, a "Page N of" marker, the account
+        // holder's name repeated, the statement period repeated, and a run
+        // of undecodable "Identity-H Unimplemented" header-cell placeholders
+        // — none of which match the 4-line Sl.No/Date/Time/ValueDate anchor,
+        // so the scanner must skip past them one line at a time and resume
+        // matching real blocks right after.
+        let mut lines: Vec<&str> = Vec::new();
+        lines.extend(kotak_block("1", "10 Apr 2024", "UPI/A/1/UPI", "UPI-1", "-100.00", "900.00"));
+        lines.extend([
+            "Statement generated on 03 Sep 2025, 11:09 AM",
+            "Page 2 of",
+            "SOME ACCOUNT HOLDER",
+            "Account Statement 01 Apr 2024 - 31 Mar 2025",
+            "?Identity-H Unimplemented?",
+            "?Identity-H Unimplemented?",
+        ]);
+        lines.extend(kotak_block("2", "11 Apr 2024", "UPI/B/2/UPI", "UPI-2", "+200.00", "1100.00"));
+        lines.extend(kotak_block("3", "12 Apr 2024", "UPI/C/3/UPI", "UPI-3", "-50.00", "1050.00"));
+        let rows = rows_from(&lines);
+        let (txns, _, _) =
+            extract_kotak_narrow_transactions(&rows, "test.pdf").expect("must match the narrow layout");
+        assert_eq!(txns.len(), 3, "must recover all three blocks around the page-break furniture");
+        assert_eq!(txns[0].debit, Some(100.0));
+        assert_eq!(txns[1].credit, Some(200.0));
+        assert_eq!(txns[2].debit, Some(50.0));
+    }
+
+    #[test]
+    fn kotak_narrow_amount_is_never_confused_with_balance() {
+        // The unsigned Balance line must never itself be mistaken for a
+        // transaction amount — only a line with an explicit leading sign
+        // is ever treated as the amount.
+        assert!(!is_kotak_signed_amount("16,02,264.84"));
+        assert!(is_kotak_signed_amount("-805.50"));
+        assert!(is_kotak_signed_amount("+50,000.00"));
+        assert!(!is_kotak_signed_amount("15")); // Sl. No., not an amount at all
+    }
+
+    #[test]
+    fn kotak_narrow_does_not_misfire_on_an_unrelated_document() {
+        // A handful of small integers and dates that happen to appear near
+        // each other, but with no real signed-amount anchor anywhere, must
+        // not be mistaken for this layout (MIN_KOTAK_NARROW_TXNS guard).
+        let rows = rows_from(&[
+            "1", "01 Jan 2024", "Some unrelated document",
+            "2", "02 Jan 2024", "with no transactions in it at all",
+        ]);
+        assert!(extract_kotak_narrow_transactions(&rows, "unrelated.pdf").is_none());
     }
 }

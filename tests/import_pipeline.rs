@@ -46,11 +46,14 @@ const PDF_FIXTURES: &[&str] = &[
 /// Identity-H/CID-encoded in a way `lopdf`'s text extractor cannot decode —
 /// see `pdf_fixtures_with_identity_h_encoding_produce_zero_transactions`'s
 /// doc comment for the full explanation. Note "Kotak Bank.pdf" also
-/// contains some Identity-H-encoded text but is *not* in this list: its
-/// transaction table happens to use a normal font, so multi-line
-/// preprocessing still recovers 538 real transactions from it — proving the
-/// failure mode is about *which* text is affected, not just presence of the
-/// string "Identity-H" anywhere in the document.
+/// contains some Identity-H-encoded text (its table header cells) but is
+/// *not* in this list: its transaction table itself uses a normal font, and
+/// (since 2026-08-25's fix — see `kotak_narrow_layout_debit_credit_and_
+/// balance_reconcile_exactly` below) now parses via Stage 1's dedicated
+/// narrow-layout extractor rather than needing the OCR-text fallback at
+/// all, recovering 622 real transactions with correct Debit/Credit — proving
+/// the Identity-H failure mode is about *which* text is affected, not just
+/// presence of the string "Identity-H" anywhere in the document.
 const PDF_FIXTURES_WITH_IDENTITY_H_BUG: &[&str] = &[
     "BOB.pdf",
     "ICICI Bank.pdf",
@@ -147,6 +150,103 @@ fn every_real_pdf_fixture_parses_into_usable_transactions_with_a_detected_bank()
     }
 }
 
+/// Real Debit/Credit-mixing bug fix (2026-08-25), tested end-to-end against
+/// the actual "Kotak Bank.pdf" fixture — not a synthetic reproduction (see
+/// `transaction_extractor`'s own unit tests for that).
+///
+/// This file renders each transaction as 8 separate physical text lines
+/// (Sl.No/Date/Time/ValueDate/Narration/Ref/signed Amount/Balance) with no
+/// shared X position between fields at all — neither `extract_fw_transactions`
+/// (needs a whole transaction on one physical line) nor the header/column-
+/// boundary detection `parse_pdf_rows` normally relies on can recognize
+/// this, so it used to fall all the way through to the unreliable OCR-text
+/// fallback path (`ocr_parser`'s flat full-text extraction, which has no
+/// column identity). Confirmed via `examples/kotak_debug_probe.rs` that path
+/// silently read the running **Balance** into the Debit/Credit field and a
+/// **Sl. No.** row-counter into the Balance field for the majority of real
+/// transactions in this file — corrupting almost every amount, exactly the
+/// live bug report this test locks in the fix for.
+///
+/// See `transaction_extractor::extract_kotak_narrow_transactions`'s own doc
+/// comment for the full parsing design.
+#[test]
+fn kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly() {
+    let path = fixture("Kotak Bank.pdf");
+    let rows = text_extractor::extract_pages(&path).expect("Kotak Bank.pdf: extract_pages failed");
+    let result = pdf_parser::parse_pdf_rows(rows, "Kotak Bank.pdf").expect(
+        "Kotak Bank.pdf must now parse via Stage 1 (the narrow-layout extractor), \
+         not fall through to the unreliable OCR-text fallback",
+    );
+
+    assert_eq!(result.bank_name, "Kotak Mahindra Bank");
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert!(
+        real.len() > 500,
+        "expected several hundred real transactions, got {}",
+        real.len()
+    );
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set: {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+    }
+
+    // Full balance-continuity reconciliation across the entire real
+    // statement: every transaction's own balance must equal the previous
+    // balance plus its credit minus its debit. This is exactly the
+    // invariant the pre-fix bug violated on almost every row (it read the
+    // *next* row's real balance as this row's amount, and a bogus row
+    // counter as this row's balance).
+    let mut prev_balance = result.opening_balance;
+    let mut mismatches = 0usize;
+    for t in &real {
+        if let (Some(pb), Some(bal)) = (prev_balance, t.balance) {
+            let expected = pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0);
+            if (expected - bal).abs() > 0.01 {
+                mismatches += 1;
+            }
+        }
+        prev_balance = t.balance.or(prev_balance);
+    }
+    assert_eq!(
+        mismatches, 0,
+        "{mismatches} of {} transactions have a balance that doesn't reconcile with \
+         (previous balance + credit - debit)",
+        real.len()
+    );
+
+    // Spot-check a known Credit and a known Debit by narration — catches a
+    // regression that swaps the two globally without necessarily breaking
+    // reconciliation (e.g. if some other post-processing step masked it).
+    let neft_credit = real
+        .iter()
+        .find(|t| t.narration.contains("CONNEXIONS"))
+        .expect("expected at least one NEFT CONNEXIONS inward transfer in the fixture");
+    assert!(
+        neft_credit.credit.is_some() && neft_credit.debit.is_none(),
+        "NEFT CONNEXIONS inward transfer must be a Credit: {neft_credit:?}"
+    );
+    let lic_debit = real
+        .iter()
+        .find(|t| t.narration.contains("LIC OF INDIA"))
+        .expect("expected at least one LIC NACH debit in the fixture");
+    assert!(
+        lic_debit.debit.is_some() && lic_debit.credit.is_none(),
+        "LIC NACH debit must be a Debit: {lic_debit:?}"
+    );
+}
+
 /// **Real bug found by this suite, not fixed here** (out of scope for an
 /// integration-test-only change — see the task rules: one feature at a
 /// time, no unrelated fixes bundled in). Affects 4 of the 11 real fixtures
@@ -172,9 +272,11 @@ fn every_real_pdf_fixture_parses_into_usable_transactions_with_a_detected_bank()
 ///
 /// "Kotak Bank.pdf" is the counter-example proving this isn't a blanket
 /// "any Identity-H text = broken" rule: it also contains Identity-H-encoded
-/// text (probably a logo/header) but its transaction table uses a normal
-/// font, so it still produces 538 real transactions — which is exactly why
-/// it stays in `PDF_FIXTURES` rather than here.
+/// text (its table header cells, probably a logo/header font) but its
+/// transaction table itself uses a normal font — so it produces 622 real
+/// transactions (via Stage 1's narrow-layout extractor since 2026-08-25;
+/// see `kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly`) —
+/// which is exactly why it stays in `PDF_FIXTURES` rather than here.
 ///
 /// Confirmed via `cargo run --example pdf_batch_probe` against all 11
 /// copied fixtures. Flagged prominently as a production blocker in the

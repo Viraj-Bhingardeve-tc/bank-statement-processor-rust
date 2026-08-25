@@ -24,7 +24,9 @@ use crate::parser::{
         prepend_opening_balance_row, validate_balances,
     },
     noise_filter::is_noise_row,
-    transaction_extractor::{extract_cosmos_transactions, extract_fw_transactions},
+    transaction_extractor::{
+        extract_cosmos_transactions, extract_fw_transactions, extract_kotak_narrow_transactions,
+    },
     ParseResult, Transaction,
 };
 
@@ -128,6 +130,34 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
                         rejected_row_count: 0,
                     });
                 }
+            }
+            // Last-resort fallback (2026-08-25) for the Kotak "narrow"
+            // e-statement layout — every field of a transaction on its own
+            // physical line rather than sharing a line or an X position, so
+            // neither `extract_fw_transactions` above (needs a whole
+            // transaction on one line) nor the header/column-boundary
+            // detection this function normally relies on can recognize it.
+            // Only ever reached when both of those have already failed, so
+            // this is purely additive — it cannot change how any
+            // currently-working layout (Kotak or otherwise) is parsed. See
+            // `extract_kotak_narrow_transactions`'s own doc comment for the
+            // full real-bug report this was traced from.
+            if let Some((txns, op_bal, cl_bal)) = extract_kotak_narrow_transactions(&rows, file_name) {
+                let mut txns = txns;
+                let op_balance = compute_prev_balances(&mut txns, op_bal);
+                prepend_opening_balance_row(&mut txns, op_balance, file_name, "");
+                return Some(ParseResult {
+                    transactions: txns,
+                    opening_balance: op_balance,
+                    closing_balance: cl_bal,
+                    bank_name: "Kotak Mahindra Bank".to_string(),
+                    account_no: String::new(),
+                    source_name: file_name.to_string(),
+                    col_map: Default::default(),
+                    header_row_idx: 0,
+                    noise_row_count: 0,
+                    rejected_row_count: 0,
+                });
             }
             log::warn!("[BSP PDF] {}: no column header found", file_name);
             return None;
