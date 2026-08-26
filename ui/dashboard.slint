@@ -667,7 +667,26 @@ export component DashboardScreen inherits Rectangle {
 
             HorizontalBox {
                 padding-left: 14px; padding-right: 14px;
-                padding-top: 0px; padding-bottom: 0px;
+                // Equal 15px top/bottom (UI fix, 2026-08-27): this row is
+                // 56px tall and every field's own input (LineEdit/ComboBox)
+                // is a fixed 26px, so (56 - 26) / 2 = 15px pins the content
+                // area to exactly 26px. That matters because each label+
+                // input pair below is its own unconstrained-height
+                // HorizontalBox, which — like every other Layout child in
+                // this app without an explicit height — auto-stretches to
+                // fill whatever height its *parent* row makes available;
+                // with the previous 0px/0px padding that was the full
+                // 56px, so the label (auto-height, self-centers via
+                // `vertical-alignment: center`) rendered near that 56px
+                // box's true center while its sibling input (fixed 26px,
+                // top-anchored — a Layout doesn't auto-center a fixed-
+                // height child, same issue fixed elsewhere in this app)
+                // stayed pinned to the top — label and input landed on two
+                // different visual lines instead of side by side. Shrinking
+                // the available height to exactly 26px removes the slack
+                // that caused the mismatch: both label and input now
+                // occupy the same 0..26px window, so they align.
+                padding-top: 15px; padding-bottom: 15px;
                 spacing: 10px;
 
                 // ── Inline label-beside-input fields (2026-08-24) ────────────
