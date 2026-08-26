@@ -89,6 +89,11 @@ export struct TxnRow {
 component TBtn inherits Rectangle {
     in property <string> text:    "";
     in property <bool>   enabled: true;
+    // Selected/active state for the main toolbar action group (UI fix,
+    // 2026-08-26) — driven by root.toolbar-active / modal-state, not by
+    // this component itself. Deliberately separate from `enabled`: a
+    // button can be the current page (active) and still be clickable.
+    in property <bool>   active:  false;
     in property <color>  bg:      #FFFFFF;
     in property <color>  fg:      #0A1929;
     in property <int>    fw:      500;   // font-weight override (btn-ai needs 700)
@@ -101,16 +106,27 @@ component TBtn inherits Rectangle {
     // HorizontalBox with equal padding on every side now guarantees the
     // two match, via Slint's layout engine rather than a width guess.
     height: 28px; min-width: 58px;
-    background:    root.enabled ? root.bg : #FFFFFF28;
+    // Active always wins with a dark fill regardless of the button's own
+    // `bg` (so e.g. AI Classify's purple still goes dark when selected);
+    // hover is a subtle light-blue tint, only shown when neither active
+    // nor disabled.
+    background:    !root.enabled ? #FFFFFF28
+                 : root.active   ? #0A1929
+                 : ta.has-hover  ? #E3F2FD
+                 : root.bg;
     border-radius: 4px;
     border-width:  1px;
-    border-color:  root.enabled ? (root.bg == #FFFFFF ? #90CAF9 : root.bg) : #FFFFFF20;
+    border-color:  !root.enabled ? #FFFFFF20
+                 : root.active   ? #64B5F6
+                 : ta.has-hover  ? #1565C0
+                 : (root.bg == #FFFFFF ? #90CAF9 : root.bg);
     opacity:       root.enabled ? 1.0 : 0.4;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
+    accessible-checked: root.active;
 
-    TouchArea {
+    ta := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
@@ -120,8 +136,8 @@ component TBtn inherits Rectangle {
         padding-top: 7px; padding-bottom: 7px;
         alignment: center;
         Text {
-            text: root.text; font-size: 12px; font-weight: root.fw;
-            color: root.enabled ? root.fg : root.fg;
+            text: root.text; font-size: 12px; font-weight: root.active ? 700 : root.fw;
+            color: root.active ? #FFFFFF : root.fg;
             horizontal-alignment: center; vertical-alignment: center;
         }
     }
@@ -478,22 +494,40 @@ component MHdr inherits Rectangle {
         // Close (×) button — a real circular button (hover/press-tinted
         // background + darkening glyph), not plain clickable text, so it
         // reads as a proper UI control and gives clear pointer feedback.
+        //
+        // Sizing wrapper (UI fix, 2026-08-26 — applied app-wide since every
+        // modal/popup's header routes through this one shared component): a
+        // HorizontalBox row doesn't auto-center a fixed-height child on its
+        // cross axis — verified visually via slint-viewer (first caught on
+        // the AI Classify dialog's own red header, same bug here just less
+        // dramatic on this row's shorter 46px height). The title Text above
+        // is fine because it has no explicit height, so it stretches to
+        // fill the row and centers its own content via vertical-alignment.
+        // This outer Rectangle does the same — no explicit height, so it
+        // stretches to the full row height — and the actual 28px circle is
+        // a plain (non-layout) nested Rectangle, so its `y` is respected
+        // and centers it within that stretched height. Width stays fixed
+        // at 28px so horizontal position/spacing is unchanged.
         Rectangle {
-            width: 28px; height: 28px; border-radius: 14px;
-            background: closeTa.pressed ? #E0E0E0 : closeTa.has-hover ? #F0F0F0 : transparent;
-            accessible-role: button;
-            accessible-label: "Close";
-            closeTa := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
-            Text {
-                // U+2715 ("✕ MULTIPLICATION X") renders as a missing-glyph
-                // tofu box on this app's default font (verified visually,
-                // 2026-08-21) — the font has no coverage for it. U+00D7
-                // (the plain "×" multiplication sign) is in Latin-1
-                // Supplement, which every font here covers, and reads
-                // identically as a close icon.
-                text: "\u{00D7}"; font-size: 16px; font-weight: 700;
-                color: closeTa.has-hover ? #37474F : #90A4AE;
-                horizontal-alignment: center; vertical-alignment: center;
+            width: 28px;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 28px; height: 28px; border-radius: 14px;
+                background: closeTa.pressed ? #E0E0E0 : closeTa.has-hover ? #F0F0F0 : transparent;
+                accessible-role: button;
+                accessible-label: "Close";
+                closeTa := TouchArea { mouse-cursor: pointer; clicked => { root.close(); } }
+                Text {
+                    // U+2715 ("✕ MULTIPLICATION X") renders as a missing-glyph
+                    // tofu box on this app's default font (verified visually,
+                    // 2026-08-21) — the font has no coverage for it. U+00D7
+                    // (the plain "×" multiplication sign) is in Latin-1
+                    // Supplement, which every font here covers, and reads
+                    // identically as a close icon.
+                    text: "\u{00D7}"; font-size: 16px; font-weight: 700;
+                    color: closeTa.has-hover ? #37474F : #90A4AE;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
             }
         }
     }
@@ -507,9 +541,18 @@ component MFtr inherits Rectangle {
     Rectangle { y: 0; height: 1px; background: #EEEEEE; }
     HorizontalBox {
         padding-left: 18px; padding-right: 18px;
-        padding-top: 0px; padding-bottom: 0px;
+        // Equal 11px top/bottom (UI fix, 2026-08-26, applied app-wide): row
+        // is 50px, MBtn is a fixed 28px, so (50 - 28) / 2 = 11px centers
+        // every footer button instead of leaving them top-anchored.
+        padding-top: 11px; padding-bottom: 11px;
         spacing: 8px;
-        alignment: start;
+        // `alignment: start` used to sit here — verified visually via
+        // slint-viewer that it silently disables the stretch-spacer below
+        // (it switches the row to packed/natural-size layout, ignoring
+        // every child's horizontal-stretch), so every modal footer in the
+        // app was actually rendering left-bunched instead of the flex-end
+        // layout this component's own comment describes (UI fix,
+        // 2026-08-26). Removed so the spacer below works as intended.
         // Auto stretch-spacer pushes all children right (flex-end equivalent)
         Rectangle { horizontal-stretch: 1; }
         @children
@@ -537,6 +580,36 @@ component MChipBtn inherits Rectangle {
             text: root.text; font-size: 9px; font-weight: 700; color: #C62828;
             horizontal-alignment: center; vertical-alignment: center;
         }
+    }
+}
+
+// ── Active-filter-chip remove (×) icon ──────────────────────────────────────────
+// Extracted (UI fix, 2026-08-26) from ~12 near-identical inline blocks — the
+// Period-filter active-range chip and every status/bank/vendor/ledger filter
+// chip each had their own copy of this 14px circle. Two bugs fixed once here
+// instead of a dozen times over:
+//   1. U+2715 renders as a missing-glyph tofu box on this app's default font
+//      (same issue MHdr's close button already documents/fixes elsewhere) —
+//      U+00D7 is covered and reads identically as a close icon.
+//   2. A HorizontalLayout/HorizontalBox row doesn't auto-center a
+//      fixed-height child on its cross axis — verified visually, the bare
+//      14px circle rendered flush to the top of its chip instead of
+//      centered. This wrapper has no explicit height, so it stretches to
+//      fill the chip's full content height like a Text sibling would, and
+//      the actual circle is a plain (non-layout) nested Rectangle, so its
+//      `y` is respected and centers it within that stretched height.
+component ChipCloseBtn inherits Rectangle {
+    in property <string> label: "";
+    callback clicked();
+    width: 14px;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 14px; height: 14px; border-radius: 7px;
+        background: #FFFFFF30;
+        accessible-role: button;
+        accessible-label: root.label;
+        TouchArea { clicked => { root.clicked(); } }
+        Text { text: "\u{00D7}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
     }
 }
 
@@ -1124,6 +1197,16 @@ export component MainScreen inherits Rectangle {
     in-out property <string> date-to:        "";
     in-out property <string> active-preset:  "";
     in-out property <string> modal-state:    "";
+    // Which main toolbar action/view is currently "on" — drives the dark
+    // selected state on TBtn for the Load Single File / Batch Process
+    // Folder / Auto-Classify All / AI Classify / View Rules / Import
+    // History / Import Ledgers group (UI fix, 2026-08-26). One value at a
+    // time so selecting a new one always clears the last; "view-rules"
+    // and "import-history" are additionally cleared by the `changed
+    // modal-state` handler below once their modal actually closes, since
+    // those two map onto a real modal-state value the whole time they're
+    // open.
+    in-out property <string> toolbar-active: "";
     // Generic confirmation modal — set confirm-title/confirm-message/confirm-action(/confirm-payload)
     // then set modal-state = "confirm"; the Yes button dispatches by confirm-action.
     in-out property <string> confirm-title:   "Please Confirm";
@@ -1342,27 +1425,51 @@ export component MainScreen inherits Rectangle {
                             root.edit-client-ledger = root.dash-client-ledger;
                             root.modal-state = "edit-client";
                         } }
-                        TBtn { text: "Load Single File"; clicked => { root.load-file(); } }
-                        TBtn { text: "Batch Process Folder"; enabled: !root.batch-running; clicked => { root.modal-state = "batch-source"; } }
+                        TBtn {
+                            text: "Load Single File";
+                            active: root.toolbar-active == "load-file";
+                            clicked => { root.toolbar-active = "load-file"; root.load-file(); }
+                        }
+                        TBtn {
+                            text: "Batch Process Folder";
+                            enabled: !root.batch-running;
+                            active: root.toolbar-active == "batch-process";
+                            clicked => { root.toolbar-active = "batch-process"; root.modal-state = "batch-source"; }
+                        }
 
                         Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
                         TBtn {
                             text: "Auto-Classify All";
                             enabled: root.transaction-rows.length > 0;
-                            clicked => { root.auto-classify(); }
+                            active: root.toolbar-active == "auto-classify";
+                            clicked => { root.toolbar-active = "auto-classify"; root.auto-classify(); }
                         }
                         // .btn-ai { background: linear-gradient(#5C35C5,#7B1FA2); color:#fff; font-weight:700; letter-spacing:.04em }
                         TBtn {
                             text: "\u{2605} AI Classify";
                             bg: #6B2FB8; fg: #FFFFFF; fw: 700;
                             enabled: root.transaction-rows.length > 0;
-                            clicked => { root.ai-consent-checked = false; root.modal-state = "ai-consent"; }
+                            active: root.toolbar-active == "ai-classify";
+                            clicked => {
+                                root.toolbar-active = "ai-classify";
+                                root.ai-consent-checked = false;
+                                root.modal-state = "ai-consent";
+                            }
                         }
 
                         Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
-                        TBtn { text: "View Rules"; enabled: true; clicked => { root.view-rules(); root.modal-state = "view-rules"; } }
+                        TBtn {
+                            text: "View Rules";
+                            enabled: true;
+                            active: root.toolbar-active == "view-rules";
+                            clicked => {
+                                root.toolbar-active = "view-rules";
+                                root.view-rules();
+                                root.modal-state = "view-rules";
+                            }
+                        }
 
                         // Sub-group dividers — same 1px bar used at every other
                         // group boundary in this toolbar, so every gap (button-to-
@@ -1374,9 +1481,15 @@ export component MainScreen inherits Rectangle {
                         TBtn {
                             text: "Import History";
                             enabled: root.transaction-rows.length > 0;
-                            clicked => { root.modal-state = "import-history"; }
+                            active: root.toolbar-active == "import-history";
+                            clicked => { root.toolbar-active = "import-history"; root.modal-state = "import-history"; }
                         }
-                        TBtn { text: "Import Ledgers"; enabled: true; clicked => { root.import-ledgers(); } }
+                        TBtn {
+                            text: "Import Ledgers";
+                            enabled: true;
+                            active: root.toolbar-active == "import-ledgers";
+                            clicked => { root.toolbar-active = "import-ledgers"; root.import-ledgers(); }
+                        }
 
                         Rectangle { width: 1px; height: 28px; background: #FFFFFF30; }
 
@@ -1481,26 +1594,44 @@ export component MainScreen inherits Rectangle {
                 QBtn { text: "Prev FY";    active: root.active-preset == "prev_fy";    enabled: root.transaction-rows.length > 0; clicked => { root.active-preset = "prev_fy";    root.date-preset("prev_fy"); } }
 
                 // Active range chip — .dr-active-chip { background:#FF8F00; border-radius:12px }
+                // Sizing wrapper (UI fix, 2026-08-26): this row mixes several
+                // different fixed child heights (26px date inputs, 24px
+                // Apply/Clear/QBtn, this 20px chip), so unlike the Filters
+                // row below — where every chip shares one height and a
+                // single symmetric row padding centers them all — this chip
+                // needs its own wrapper. No explicit height, so it stretches
+                // to fill the row like a Text sibling would; the actual
+                // pill is centered within that via plain `y` math.
+                // `chip`'s width binds to its own inner HorizontalBox's
+                // preferred-width (content-driven, since the preset label
+                // varies) rather than being left implicit — an implicit
+                // width one plain-Rectangle level down from a Layout child
+                // resolves to "fill parent", which made this wrapper's own
+                // `width: chip.width` a binding loop until pinned this way
+                // (verified via slint-viewer). `horizontal-stretch: 0`
+                // keeps the wrapper from claiming extra row space beyond
+                // that resolved width.
                 if root.active-preset != "" : Rectangle {
-                    height: 20px;
-                    background: #FF8F00; border-radius: 10px;
-                    HorizontalBox {
-                        padding-left: 8px; padding-right: 6px;
-                        padding-top: 0px; padding-bottom: 0px; spacing: 4px;
-                        Text {
-                            text: root.active-preset == "today"      ? "Today" :
-                                  root.active-preset == "this_month" ? "This Month" :
-                                  root.active-preset == "last_month" ? "Last Month" :
-                                  root.active-preset == "current_fy" ? "Current FY" :
-                                  root.active-preset == "prev_fy"    ? "Prev FY" : root.active-preset;
-                            font-size: 10px; font-weight: 700; color: white;
-                            vertical-alignment: center;
-                        }
-                        Rectangle {
-                            width: 14px; height: 14px; border-radius: 7px;
-                            background: #FFFFFF30;
-                            TouchArea { clicked => { root.active-preset = ""; root.date-filter-apply("", ""); } }
-                            Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                    width: chip.width;
+                    horizontal-stretch: 0;
+                    chip := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: chipContent.preferred-width;
+                        height: 20px;
+                        background: #FF8F00; border-radius: 10px;
+                        chipContent := HorizontalBox {
+                            padding-left: 8px; padding-right: 6px;
+                            padding-top: 0px; padding-bottom: 0px; spacing: 4px;
+                            Text {
+                                text: root.active-preset == "today"      ? "Today" :
+                                      root.active-preset == "this_month" ? "This Month" :
+                                      root.active-preset == "last_month" ? "Last Month" :
+                                      root.active-preset == "current_fy" ? "Current FY" :
+                                      root.active-preset == "prev_fy"    ? "Prev FY" : root.active-preset;
+                                font-size: 10px; font-weight: 700; color: white;
+                                vertical-alignment: center;
+                            }
+                            ChipCloseBtn { label: "Remove Period filter"; clicked => { root.active-preset = ""; root.date-filter-apply("", ""); } }
                         }
                     }
                 }
@@ -1629,73 +1760,78 @@ export component MainScreen inherits Rectangle {
                 if root.fs-unreviewed || root.fs-suspense || root.fs-high || root.fs-dups || root.fs-gst || root.fs-review || root.fs-credits || root.fs-debits || (root.sel-bank != "All Banks" && root.sel-bank != "") || root.sel-vendor != "" || root.sel-head != "" : Rectangle {
                     height: 32px; background: #F8F9FA; border-width: 0px;
                     Rectangle { y: 0px; height: 1px; background: #E0E0E0; width: parent.width; }
-                    HorizontalLayout { padding-left: 16px; padding-right: 16px; padding-top: 0px; padding-bottom: 0px; spacing: 8px; alignment: start;
+                    // Equal 6px top/bottom (UI fix, 2026-08-26): every real
+                    // child here (each filter chip, plus "Clear All") is a
+                    // fixed 20px tall, so — unlike the Period row above,
+                    // which mixes several different heights — a single
+                    // symmetric padding value centers all of them at once;
+                    // (32 - 20) / 2 = 6px. Previously 0px/0px left every
+                    // chip top-anchored instead of vertically centered.
+                    HorizontalLayout { padding-left: 16px; padding-right: 16px; padding-top: 6px; padding-bottom: 6px; spacing: 8px; alignment: start;
                         Text { text: "Filters:"; font-size: 10px; font-weight: 700; color: #607D8B; vertical-alignment: center; }
                         if root.fs-unreviewed : Rectangle {
                             height: 20px; border-radius: 10px; background: #E65100;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Unreviewed"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Unreviewed filter"; TouchArea { clicked => { root.toggle-status("unreviewed"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove Unreviewed filter"; clicked => { root.toggle-status("unreviewed"); } }
                             }
                         }
                         if root.fs-suspense : Rectangle {
                             height: 20px; border-radius: 10px; background: #7B1FA2;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Suspense"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Suspense filter"; TouchArea { clicked => { root.toggle-status("suspense"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove Suspense filter"; clicked => { root.toggle-status("suspense"); } }
                             }
                         }
                         if root.fs-high : Rectangle {
                             height: 20px; border-radius: 10px; background: #1B5E20;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "High Conf."; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove High Confidence filter"; TouchArea { clicked => { root.toggle-status("high"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove High Confidence filter"; clicked => { root.toggle-status("high"); } }
                             }
                         }
                         if root.fs-dups : Rectangle {
                             height: 20px; border-radius: 10px; background: #880E4F;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Duplicates"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Duplicates filter"; TouchArea { clicked => { root.toggle-status("duplicates"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove Duplicates filter"; clicked => { root.toggle-status("duplicates"); } }
                             }
                         }
                         if root.fs-gst : Rectangle {
                             height: 20px; border-radius: 10px; background: #2E7D32;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "GST/Tax"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove GST/Tax filter"; TouchArea { clicked => { root.toggle-status("gst"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove GST/Tax filter"; clicked => { root.toggle-status("gst"); } }
                             }
                         }
                         if root.fs-review : Rectangle {
                             height: 20px; border-radius: 10px; background: #E65100;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Needs Review"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Needs Review filter"; TouchArea { clicked => { root.toggle-status("needs_review"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove Needs Review filter"; clicked => { root.toggle-status("needs_review"); } }
                             }
                         }
                         if root.fs-credits : Rectangle {
                             height: 20px; border-radius: 10px; background: #2E7D32;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Credits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Credits Only filter"; TouchArea { clicked => { root.toggle-status("credits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove Credits Only filter"; clicked => { root.toggle-status("credits"); } }
                             }
                         }
                         if root.fs-debits : Rectangle {
                             height: 20px; border-radius: 10px; background: #C62828;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: "Debits Only"; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30; accessible-role: button; accessible-label: "Remove Debits Only filter"; TouchArea { clicked => { root.toggle-status("debits"); } } Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; } }
+                                ChipCloseBtn { label: "Remove Debits Only filter"; clicked => { root.toggle-status("debits"); } }
                             }
                         }
                         if root.sel-bank != "All Banks" && root.sel-bank != "" : Rectangle {
                             height: 20px; border-radius: 10px; background: #0D47A1;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: root.sel-bank; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
-                                    accessible-role: button;
-                                    accessible-label: "Remove " + root.sel-bank + " bank filter";
-                                    TouchArea { clicked => { root.sel-bank = "All Banks"; root.bank-filter-changed("All Banks"); } }
-                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                ChipCloseBtn {
+                                    label: "Remove " + root.sel-bank + " bank filter";
+                                    clicked => { root.sel-bank = "All Banks"; root.bank-filter-changed("All Banks"); }
                                 }
                             }
                         }
@@ -1703,11 +1839,9 @@ export component MainScreen inherits Rectangle {
                             height: 20px; border-radius: 10px; background: #6A1B9A;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: root.sel-vendor; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
-                                    accessible-role: button;
-                                    accessible-label: "Remove " + root.sel-vendor + " vendor filter";
-                                    TouchArea { clicked => { root.sel-vendor = ""; root.vendor-filter-changed(""); } }
-                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                ChipCloseBtn {
+                                    label: "Remove " + root.sel-vendor + " vendor filter";
+                                    clicked => { root.sel-vendor = ""; root.vendor-filter-changed(""); }
                                 }
                             }
                         }
@@ -1715,11 +1849,9 @@ export component MainScreen inherits Rectangle {
                             height: 20px; border-radius: 10px; background: #00695C;
                             HorizontalLayout { padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 Text { text: root.sel-head; font-size: 10px; color: white; font-weight: 700; vertical-alignment: center; }
-                                Rectangle { width: 14px; height: 14px; border-radius: 7px; background: #FFFFFF30;
-                                    accessible-role: button;
-                                    accessible-label: "Remove " + root.sel-head + " ledger filter";
-                                    TouchArea { clicked => { root.sel-head = ""; root.head-filter-changed(""); } }
-                                    Text { text: "\u{2715}"; font-size: 9px; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                ChipCloseBtn {
+                                    label: "Remove " + root.sel-head + " ledger filter";
+                                    clicked => { root.sel-head = ""; root.head-filter-changed(""); }
                                 }
                             }
                         }
@@ -2957,7 +3089,14 @@ export component MainScreen inherits Rectangle {
             VerticalBox { padding: 0px; spacing: 0px;
                 Rectangle { height: 4px; background: #1565C0; }
                 MHdr { title: "Import History"; close => { root.modal-state = ""; } }
-                VerticalBox { padding: 18px; spacing: 8px; vertical-stretch: 1;
+                // padding-top bumped from the shared 18px to 30px (UI fix,
+                // 2026-08-26) — the "Up to 20 imports..." line and table
+                // sat right under MHdr's bottom border with barely any
+                // breathing room; left/right/bottom stay at 18px, matching
+                // every other modal body's baseline padding.
+                VerticalBox {
+                    padding-left: 18px; padding-right: 18px; padding-bottom: 18px; padding-top: 30px;
+                    spacing: 8px; vertical-stretch: 1;
                     Text { text: "Up to 20 imports per client are recorded in the database."; font-size: 11px; color: #888888; wrap: word-wrap; }
                     if root.import-records.length == 0 : Rectangle {
                         height: 60px; background: #F5F5F5;
@@ -2975,8 +3114,16 @@ export component MainScreen inherits Rectangle {
                                 Text { text: "Txns"; font-size: 12px; font-weight: 600; color: white; min-width: 50px; vertical-alignment: center; }
                             }
                         }
+                        // 10px gap (UI fix, 2026-08-26) — the row list used to
+                        // start immediately at y:28 (right against the header's
+                        // bottom edge), so the first file row looked attached
+                        // to the header instead of separated from it. Every
+                        // row is generated by the same `for` loop below, so
+                        // this one offset keeps the header-to-first-row gap
+                        // and the header's own height/row height/inter-row
+                        // spacing all consistent — no per-row special-casing.
                         ListView {
-                            y: 28px; height: parent.height - 28px;
+                            y: 28px + 10px; height: parent.height - 28px - 10px;
                             for rec[i] in root.import-records : Rectangle {
                                 height: 26px; background: #FFFFFF;
                                 Rectangle { y: 25px; height: 1px; background: #E3F2FD; }
@@ -3901,19 +4048,39 @@ export component MainScreen inherits Rectangle {
                     }
                 }
 
-                // Wizard footer
-                MFtr {
-                    MBtn { text: "\u{2190} Back"; bg: #F5F5F5; fg: #546E7A; enabled: root.wiz-step > 1;
-                        clicked => { if root.wiz-step > 1 { root.wiz-step -= 1; } }
+                // Wizard footer — not MFtr (UI fix, 2026-08-26): this is the
+                // one footer in the app with its own deliberate two-group
+                // layout (Back/Next/Download progression anchored left,
+                // Cancel detached on the far right), via its own explicit
+                // stretch spacer below. Now that MFtr's leading spacer has
+                // been fixed to actually push its whole button group right
+                // (see MFtr's own comment), reusing MFtr here would stack a
+                // second working stretch spacer in front of "Back" too and
+                // shove the whole left-anchored group away from the edge.
+                // Built inline instead, matching MFtr's chrome exactly
+                // (height/background/divider/padding/spacing) minus its
+                // leading spacer, so Back stays flush-left and Cancel stays
+                // pinned far-right — same vertical centering as everywhere
+                // else, just this one's own intentional horizontal grouping.
+                Rectangle {
+                    height: 50px; background: #FFFFFF;
+                    Rectangle { y: 0; height: 1px; background: #EEEEEE; }
+                    HorizontalBox {
+                        padding-left: 18px; padding-right: 18px;
+                        padding-top: 11px; padding-bottom: 11px;
+                        spacing: 8px;
+                        MBtn { text: "\u{2190} Back"; bg: #F5F5F5; fg: #546E7A; enabled: root.wiz-step > 1;
+                            clicked => { if root.wiz-step > 1 { root.wiz-step -= 1; } }
+                        }
+                        if root.wiz-step < 4 : MBtn { text: "Next \u{2192}"; bg: #1565C0;
+                            clicked => { root.wiz-step += 1; if root.wiz-step == 4 { root.export-preview(); } }
+                        }
+                        if root.wiz-step == 4 : MBtn { text: "\u{2193} Download"; bg: #1A237E; fg: white; enabled: root.wiz-can-export;
+                            clicked => { root.export-accounting(); root.modal-state = ""; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; root.wiz-step = 1; } }
                     }
-                    if root.wiz-step < 4 : MBtn { text: "Next \u{2192}"; bg: #1565C0;
-                        clicked => { root.wiz-step += 1; if root.wiz-step == 4 { root.export-preview(); } }
-                    }
-                    if root.wiz-step == 4 : MBtn { text: "\u{2193} Download"; bg: #1A237E; fg: white; enabled: root.wiz-can-export;
-                        clicked => { root.export-accounting(); root.modal-state = ""; }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; root.wiz-step = 1; } }
                 }
             }
         }
@@ -3943,13 +4110,36 @@ export component MainScreen inherits Rectangle {
                         // button — this modal has its own red-themed header so it
                         // can't use MHdr directly, but the close control should
                         // still behave and look identically.
+                        //
+                        // Sizing wrapper (UI fix, 2026-08-26): a HorizontalBox row
+                        // doesn't auto-center a fixed-height child on its cross
+                        // axis — verified visually via slint-viewer, the bare
+                        // 28px circle rendered flush to the top of this 64px
+                        // header instead of level with the warning icon/title.
+                        // This outer Rectangle has no explicit height, so —
+                        // like its Text siblings above, which stretch to fill
+                        // the row and then center their own content — it
+                        // stretches to the full row height; the actual circle
+                        // is a plain (non-layout) nested Rectangle, so its `y`
+                        // is respected and centers it within that stretched
+                        // height. Width stays fixed at 28px so horizontal
+                        // position/spacing is unchanged.
                         Rectangle {
-                            width: 28px; height: 28px; border-radius: 14px;
-                            background: aiCloseTa.pressed ? #00000055 : aiCloseTa.has-hover ? #00000040 : #00000030;
-                            accessible-role: button;
-                            accessible-label: "Close";
-                            aiCloseTa := TouchArea { mouse-cursor: pointer; clicked => { root.modal-state = ""; } }
-                            Text { text: "\u{2715}"; font-size: 15px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                            width: 28px;
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 28px; height: 28px; border-radius: 14px;
+                                background: aiCloseTa.pressed ? #00000055 : aiCloseTa.has-hover ? #00000040 : #00000030;
+                                accessible-role: button;
+                                accessible-label: "Close";
+                                aiCloseTa := TouchArea { mouse-cursor: pointer; clicked => { root.ai-consent-checked = false; root.modal-state = ""; } }
+                                // U+2715 renders as a missing-glyph tofu box on this
+                                // app's default font (same issue MHdr's close button
+                                // already documents/fixes) — U+00D7 is covered and
+                                // reads identically (UI fix, 2026-08-26; verified
+                                // visually via slint-viewer, the icon was invisible).
+                                Text { text: "\u{00D7}"; font-size: 16px; font-weight: 700; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                            }
                         }
                     }
                 }
@@ -3994,13 +4184,34 @@ export component MainScreen inherits Rectangle {
                         }
                     }
                 }
-                MFtr {
-                    MBtn { text: "\u{25BA} Continue with AI"; bg: #6B2FB8; fg: white;
-                        enabled: root.ai-consent-checked;
-                        clicked => { root.ai-consent-checked = false; root.modal-state = "ai-settings"; }
-                    }
-                    MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true;
-                        clicked => { root.ai-consent-checked = false; root.modal-state = ""; }
+                // Not MFtr here (UI fix, 2026-08-26): MFtr's HorizontalBox sets
+                // `alignment: start`, which — verified visually via
+                // slint-viewer — silently disables its own leading
+                // horizontal-stretch spacer, so both buttons render bunched
+                // at the left instead of pushed right. Built inline so
+                // Continue with AI stays in its current near-left spot and a
+                // stretch spacer between the two buttons pins Cancel to the
+                // far right edge, clearly separating "proceed" from "back out".
+                Rectangle {
+                    height: 50px; background: #FFFFFF;
+                    Rectangle { y: 0; height: 1px; background: #EEEEEE; }
+                    HorizontalBox {
+                        padding-left: 18px; padding-right: 18px;
+                        // Equal 11px top/bottom (UI fix, 2026-08-26) — the row
+                        // is 50px tall and MBtn is a fixed 28px, so 0px/0px
+                        // padding left both buttons top-anchored instead of
+                        // vertically centered; (50 - 28) / 2 = 11px each side
+                        // centers them with balanced spacing above and below.
+                        padding-top: 11px; padding-bottom: 11px;
+                        spacing: 8px;
+                        MBtn { text: "\u{25BA} Continue with AI"; bg: #6B2FB8; fg: white;
+                            enabled: root.ai-consent-checked;
+                            clicked => { root.ai-consent-checked = false; root.modal-state = "ai-settings"; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true;
+                            clicked => { root.ai-consent-checked = false; root.modal-state = ""; }
+                        }
                     }
                 }
             }
@@ -4164,6 +4375,16 @@ export component MainScreen inherits Rectangle {
     changed modal-state => {
         if (root.modal-state != "") {
             modal-esc-scope.focus();
+        }
+        // View Rules / Import History are the two toolbar-active values
+        // that map onto a real modal-state the whole time they're "open";
+        // once that modal is actually gone, drop the dark selected state
+        // too instead of leaving the button stuck active (UI fix,
+        // 2026-08-26). The other five toolbar-active values are momentary
+        // actions with no persistent modal, so they're left as the "last
+        // action taken" indicator until another group button is clicked.
+        if (root.modal-state == "" && (root.toolbar-active == "view-rules" || root.toolbar-active == "import-history")) {
+            root.toolbar-active = "";
         }
     }
 

@@ -1825,30 +1825,43 @@ fn record_batch_success(
         bp.first_ob = r_ob;
     }
 
-    if let Some(client_id) = bp.client_id.filter(|&c| c > 0) {
-        let db = db_ref.lock().unwrap();
-        if let Some(conn) = db.as_ref() {
-            match db::save_import(conn, client_id, file_name, &r_bank, &r_account, r_cnt) {
-                Ok(iid) => {
-                    if let Err(e) = db::upsert_transactions(conn, client_id, Some(iid), &new_txns) {
-                        log::error!(
-                            "[Batch] failed to persist transactions for {:?}: {}",
-                            path,
-                            e
-                        );
-                        if let Some(last) = bp.batch_results.last_mut() {
-                            last.ok = false;
-                            last.err_msg = format!("Parsed but save failed: {}", e);
+    // Import History fix (2026-08-26): this file's own r_cnt is its
+    // pre-dedup transaction count — when every row in it turns out to be a
+    // duplicate of something already loaded earlier in this same batch
+    // (kept_cnt == 0), nothing new actually lands in the transactions
+    // table, so recording a history row here would show a "538
+    // transactions" success entry for an import that persisted zero rows.
+    // Skip it entirely in that case; when it's a *partial* dedup, use
+    // kept_cnt (not r_cnt) so the Txns column reflects what this import
+    // actually added, not the file's raw row count.
+    if kept_cnt > 0 {
+        if let Some(client_id) = bp.client_id.filter(|&c| c > 0) {
+            let db = db_ref.lock().unwrap();
+            if let Some(conn) = db.as_ref() {
+                match db::save_import(conn, client_id, file_name, &r_bank, &r_account, kept_cnt) {
+                    Ok(iid) => {
+                        if let Err(e) =
+                            db::upsert_transactions(conn, client_id, Some(iid), &new_txns)
+                        {
+                            log::error!(
+                                "[Batch] failed to persist transactions for {:?}: {}",
+                                path,
+                                e
+                            );
+                            if let Some(last) = bp.batch_results.last_mut() {
+                                last.ok = false;
+                                last.err_msg = format!("Parsed but save failed: {}", e);
+                            }
+                        } else {
+                            bp.new_import_ids.push(iid);
                         }
-                    } else {
-                        bp.new_import_ids.push(iid);
                     }
+                    Err(e) => log::error!(
+                        "[Batch] failed to record import history for {:?}: {}",
+                        path,
+                        e
+                    ),
                 }
-                Err(e) => log::error!(
-                    "[Batch] failed to record import history for {:?}: {}",
-                    path,
-                    e
-                ),
             }
         }
     }

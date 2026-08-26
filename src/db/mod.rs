@@ -435,8 +435,16 @@ pub fn save_import(
 pub fn get_imports(conn: &Connection, client_id: i64) -> Result<Vec<ImportRecord>> {
     let mut stmt = conn
         .prepare(
+            // Import History fix (2026-08-26): `txn_count > 0` and a
+            // non-empty file_name filter out placeholder/empty rows — the
+            // real fix is at the write side (record_batch_success no
+            // longer records a row for a file that added zero new
+            // transactions), but this is a cheap belt-and-suspenders guard
+            // against any such row already sitting in an existing
+            // database from before that fix, or any other future path
+            // that manages to insert one.
             "SELECT id, client_id, file_name, bank_name, account_no, txn_count, imported_at
-         FROM import_history WHERE client_id = ?1
+         FROM import_history WHERE client_id = ?1 AND txn_count > 0 AND file_name != ''
          ORDER BY imported_at DESC LIMIT 20",
         )
         .context("get_imports prepare")?;
