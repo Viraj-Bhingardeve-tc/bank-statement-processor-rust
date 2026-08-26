@@ -309,6 +309,14 @@ export component AppWindow inherits Window {
     callback do-save-txn(int, string, string, string, bool);   // idx, vendor, head, type, learn
     callback do-delete-txn(int);
     callback do-mark-suspense(int);
+    // Ctrl+R refresh (UI addition, 2026-08-27) — reloads the currently
+    // selected client's data from the database in place. Fired two ways:
+    // directly from the global Ctrl+R FocusScope below when no modal is
+    // open, or via MainScreen's own `request-refresh` (forwarded to this
+    // same callback below) once the user confirms through the shared
+    // confirm modal when one *is* open — see that FocusScope's own doc
+    // comment for why.
+    callback do-refresh();
     callback do-add-txn(string, string, string, string, string, string, string, string); // date,ref,narr,dr,cr,vendor,head,type
     callback do-pdf-pwd-confirm(string);
     callback do-pdf-pwd-cancel();
@@ -390,7 +398,47 @@ export component AppWindow inherits Window {
     }
 
     // ── Main screen ───────────────────────────────────────────────────────────
-    if root.logged-in : MainScreen {
+    // Global Ctrl+R refresh (UI addition, 2026-08-27) — wraps MainScreen so
+    // the shortcut works regardless of what currently has focus inside it
+    // (the main table, a modal's LineEdit, or nothing in particular): an
+    // unhandled key event bubbles up through the focused element's
+    // ancestor FocusScopes, and this is the outermost one, a true parent
+    // of everything else in MainScreen including its own `modal-esc-scope`
+    // (the Escape-to-close handler) — so it's reached last regardless of
+    // where focus actually is, the same bubbling MainScreen's own Escape
+    // handling already relies on. `init` claims focus at startup since
+    // nothing else does by default; MainScreen's own modal-open/close
+    // handling only ever *moves* focus between scopes already inside this
+    // subtree, so it never steals it away entirely.
+    //
+    // `event.text` for a Ctrl+letter combo is the literal letter here
+    // (not a control byte) — verified via slint-viewer with a real
+    // simulated Ctrl+R keypress before relying on it.
+    if root.logged-in : FocusScope {
+        width: root.width; height: root.height;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.modifiers.control && (event.text == "r" || event.text == "R")) {
+                if (root.modal-state != "") {
+                    // A modal being open is this app's existing proxy for
+                    // "there's unsaved, in-progress input" (typed-but-not-
+                    // saved Edit/Add Transaction fields, Settings, etc.) —
+                    // route through the same shared confirm modal every
+                    // other guarded action here already uses, rather than
+                    // silently discarding it.
+                    root.confirm-title = "Refresh Application";
+                    root.confirm-message = "This reloads the current client's data from the database. Any unsaved changes in the open dialog will be lost.\n\nContinue?";
+                    root.confirm-action = "refresh-app";
+                    root.modal-state = "confirm";
+                } else {
+                    root.do-refresh();
+                }
+                accept
+            } else {
+                reject
+            }
+        }
+    MainScreen {
         width: root.width; height: root.height;
         client-names:      root.client-names;
         new-client-name   <=> root.new-client-name;
@@ -619,6 +667,11 @@ export component AppWindow inherits Window {
         save-txn(i,v,h,t,l) => { root.do-save-txn(i,v,h,t,l); }
         delete-txn(i)       => { root.do-delete-txn(i);        }
         mark-suspense(i)    => { root.do-mark-suspense(i);      }
+        // Confirmed-refresh path (modal was open) — see the wrapping
+        // FocusScope's own `key-pressed` above for the direct (no modal
+        // open) path, and main_screen.slint's confirm-dispatch for where
+        // MainScreen fires this after the user clicks "Yes, Continue".
+        request-refresh     => { root.do-refresh();             }
         add-txn(d,r,n,dr,cr,v,h,t) => { root.do-add-txn(d,r,n,dr,cr,v,h,t); }
         pdf-pwd-confirm(p) => { root.do-pdf-pwd-confirm(p); }
         pdf-pwd-cancel     => { root.do-pdf-pwd-cancel();   }
@@ -651,4 +704,5 @@ export component AppWindow inherits Window {
         license-activate-result  <=> root.license-activate-result;
         license-activate-result-kind <=> root.license-activate-result-kind;
     }
+    } // end Ctrl+R FocusScope
 }

@@ -613,6 +613,75 @@ component ChipCloseBtn inherits Rectangle {
     }
 }
 
+// ── Transaction row action text button (View/Edit/Delete) ───────────────────────
+// UI change, 2026-08-27 — replaces an earlier icon-only version per explicit
+// follow-up request: clear text labels instead of glyph icons, no hover
+// tooltip needed since the label itself is now the identifier. Each action
+// still reads as visually distinct via its own color, reusing this app's
+// existing button-color language rather than inventing a new one: blue is
+// already this app's primary/informational color (e.g. "Load Single File"'s
+// accent), slate is its existing neutral/secondary-action color (e.g. "Save
+// (no learn)"), and red is the exact color every other Delete button in this
+// app already uses. Compact pill style (light tint + border), matching
+// MChipBtn's own look for a small in-row action chip — just with per-action
+// colors instead of MChipBtn's fixed red, so a dedicated sibling component
+// rather than retrofitting MChipBtn (which other, unrelated call sites
+// already depend on looking exactly as it does).
+component RowTextActionBtn inherits Rectangle {
+    in property <string> text: "";
+    in property <color>  fg:         #1565C0;
+    in property <color>  border-clr: #90CAF9;
+    in property <color>  bg:         #FFFFFF;
+    in property <color>  hover-bg:   #E3F2FD;
+    callback clicked();
+    height: 20px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.border-clr;
+    background: ta.pressed ? root.border-clr : ta.has-hover ? root.hover-bg : root.bg;
+    accessible-role: button;
+    accessible-label: root.text;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalBox {
+        padding-left: 7px; padding-right: 7px; padding-top: 0px; padding-bottom: 0px;
+        alignment: center;
+        Text {
+            text: root.text; font-size: 10px; font-weight: 700;
+            color: root.fg;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+}
+
+// ── Read-only transaction field (label + disabled-look value box) ───────────────
+// Shared by the View and Edit Transaction modals (UI addition, 2026-08-27)
+// so every non-editable field reads unambiguously as disabled — a flat
+// light-grey filled box, the same visual language this app already uses
+// for a disabled control (see e.g. MBtn's own disabled state), distinct
+// from the white, bordered, actually-editable LineEdit/ComboBox fields
+// beside them.
+component ROField inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    VerticalBox {
+        padding: 0px; spacing: 3px;
+        Text { text: root.label; font-size: 11px; font-weight: 600; color: #0D47A1; }
+        Rectangle {
+            height: 30px; background: #F5F5F5; border-radius: 4px;
+            border-width: 1px; border-color: #E0E0E0;
+            Text {
+                x: 8px; width: parent.width - 16px; height: parent.height;
+                text: root.value == "" ? "\u{2014}" : root.value;
+                font-size: 12px; color: #78909C;
+                vertical-alignment: center; overflow: elide;
+            }
+        }
+    }
+}
+
 // ── Transaction table header ───────────────────────────────────────────────────
 // Original: thead { background:#1565C0; } th { padding:7px 9px; font-weight:600; white-space:nowrap; border-right:1px solid #1976D2; }
 // Generated columns have font-style:italic. Debit header color:#FFCDD2, Credit:#C8E6C9
@@ -739,9 +808,14 @@ component TxnHeader inherits Rectangle {
             Rectangle { x: 79px; y: 10px; width: 1px; height: 16px; background: #1976D2; }
             Text { x: 9px; width: 62px; height: parent.height; text: "Tags"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
         }
-        // Review 60px (generated — italic)
-        Rectangle { width: 60px; clip: true;
-            Text { x: 9px; width: 42px; height: parent.height; text: "Review"; font-size: 12px; font-weight: 600; font-italic: true; color: #FFFFFF; letter-spacing: 0.2px; vertical-alignment: center; }
+        // Action 148px (UI change, 2026-08-27: replaces the old "Review"
+        // validation-checkmark/reason column with View/Edit/Delete text
+        // buttons — see TxnTableRow's matching cell below, width matches
+        // that cell exactly). Not italic (unlike its generated-data
+        // neighbors): this is a fixed UI control column, not classified/
+        // generated content.
+        Rectangle { width: 148px; clip: true;
+            Text { x: 0px; width: parent.width; height: parent.height; text: "Action"; font-size: 12px; font-weight: 600; color: #FFFFFF; letter-spacing: 0.2px; horizontal-alignment: center; vertical-alignment: center; }
         }
     }
 }
@@ -752,6 +826,12 @@ component TxnTableRow inherits Rectangle {
     in property <int>    row-idx;
     in property <bool>   compact: false;
     callback clicked(int);
+    // Action column icon callbacks (UI addition, 2026-08-27) — bubble the
+    // row's own index up, same shape as `clicked` above, so the
+    // instantiation site can look up the right row for each action.
+    callback view-clicked(int);
+    callback edit-clicked(int);
+    callback delete-clicked(int);
     // Direct horizontal scroll (2026-08-22) — lets the user pan the table by
     // scrolling/swiping over a row directly, instead of only via the
     // scrollbar thumb. Added to this row's own existing `ta` TouchArea
@@ -954,15 +1034,32 @@ component TxnTableRow inherits Rectangle {
                 }
             }
         }
-        // Review 60px (original: .review-ok #2e7d32 checkmark, .review-reason
-        // #bf360c failure text — two colors, not one flat grey)
-        Rectangle { width: 60px; clip: true;
-            Text { x: 8px; width: parent.width - 16px; height: parent.height;
-                   text: root.data.review; font-size: 11px;
-                   color: root.data.review == "\u{2713}" ? #2E7D32
-                        : root.data.review == "" ? #546E7A
-                        : #BF360C;
-                   vertical-alignment: center; overflow: elide; }
+        // Action 148px (UI change, 2026-08-27) — View/Edit/Delete text
+        // buttons, replacing the old Review validation-checkmark/reason
+        // column (see TxnHeader's matching cell above). That dropped
+        // per-row validation text isn't lost — it's now shown, along with
+        // every other field, in the View/Edit popups these buttons open.
+        // Widened from the icon version's 76px to fit three text labels
+        // (the icon version needed no tooltip-overflow room, this one
+        // doesn't need it in the first place, so `clip: true` is back).
+        Rectangle { width: 148px; clip: true;
+            HorizontalBox {
+                padding: 0px; spacing: 4px; alignment: center;
+                RowTextActionBtn {
+                    text: "View";
+                    clicked => { root.view-clicked(root.row-idx); }
+                }
+                RowTextActionBtn {
+                    text: "Edit";
+                    fg: #455A64; border-clr: #B0BEC5; bg: #FFFFFF; hover-bg: #ECEFF1;
+                    clicked => { root.edit-clicked(root.row-idx); }
+                }
+                RowTextActionBtn {
+                    text: "Delete";
+                    fg: #C62828; border-clr: #EF9A9A; bg: #FFEBEE; hover-bg: #FDE0E7;
+                    clicked => { root.delete-clicked(root.row-idx); }
+                }
+            }
         }
     }
 }
@@ -1021,6 +1118,12 @@ export component MainScreen inherits Rectangle {
     callback save-txn(int, string, string, string, bool);
     callback delete-txn(int);
     callback mark-suspense(int);
+    // Ctrl+R refresh (UI addition, 2026-08-27) — fired from the shared
+    // confirm modal's "Yes, Continue" handler below once the user
+    // confirms refreshing while a modal was open (app.slint's own global
+    // FocusScope calls straight through to Rust instead, bypassing this,
+    // when no modal is open — see that FocusScope's doc comment).
+    callback request-refresh();
     callback add-txn(string, string, string, string, string, string, string, string);
     // Client management
     callback select-client(string);
@@ -2028,6 +2131,27 @@ export component MainScreen inherits Rectangle {
                                                 horizontal-scroll(dx) => {
                                                     body.hscroll = max(0px, min(body.max-hscroll, body.hscroll + dx));
                                                 }
+                                                // Action column icon handlers (UI addition, 2026-08-27).
+                                                view-clicked(i) => {
+                                                    root.row-click(i);
+                                                    root.modal-state = "view-txn";
+                                                }
+                                                edit-clicked(i) => {
+                                                    root.row-click(i);
+                                                    root.etxn-vendor = "";
+                                                    root.etxn-head   = "";
+                                                    root.etxn-type-idx = 0;
+                                                    root.modal-state = "edit-txn";
+                                                }
+                                                // Reuses the exact same confirm flow the old
+                                                // in-modal Delete button already used —
+                                                // Rust-side (`request-delete-txn-confirm`)
+                                                // sets a differentiated message (manual vs.
+                                                // auto-imported row) and opens the shared
+                                                // confirm modal itself; nothing new needed here.
+                                                delete-clicked(i) => {
+                                                    root.request-delete-txn-confirm(i);
+                                                }
                                             }
                                         }
                                     }
@@ -2828,6 +2952,7 @@ export component MainScreen inherits Rectangle {
                                 else if (root.confirm-action == "delete-rule") { root.delete-rule(root.confirm-payload); }
                                 else if (root.confirm-action == "delete-import") { root.delete-import(root.confirm-payload); }
                                 else if (root.confirm-action == "reload-import") { root.reload-import(root.confirm-payload); }
+                                else if (root.confirm-action == "refresh-app") { root.request-refresh(); }
                                 root.confirm-action = "";
                                 root.modal-state = "";
                             }
@@ -3536,15 +3661,21 @@ export component MainScreen inherits Rectangle {
             // width is content-driven by its balanced 7px padding rather than a
             // flat min-width, "Mark as Suspense" / "Save (no learn)" no longer
             // fit five-across in 470px without clipping past the card edge.
-            x: (parent.width - 560px) / 2; y: (parent.height - 440px) / 2;
-            width: 560px; height: 440px; background: white; border-radius: 8px;
+            // Height bumped 440px -> 600px (UI change, 2026-08-27): the body
+            // now shows every transaction field, not just Date/Debit/Credit/
+            // Narration — see the ROField rows below. Body wrapped in a
+            // ScrollView too, so it degrades gracefully on a short screen
+            // instead of clipping the footer.
+            x: (parent.width - 560px) / 2; y: (parent.height - 600px) / 2;
+            width: 560px; height: 600px; background: white; border-radius: 8px;
             border-width: 0px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             TouchArea { width: 100%; height: 100%; }
             VerticalBox { padding: 0px; spacing: 0px;
                 Rectangle { height: 4px; background: #1565C0; }
                 MHdr { title: "Edit Transaction"; close => { root.modal-state = ""; } }
-                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
+                ScrollView { vertical-stretch: 1;
+                VerticalBox { padding: 18px; spacing: 10px;
                     // .txn-info { background:#F0F7FF; border-radius:5px; border:1px solid #BBDEFB; padding:10px 13px; font-size:12px; line-height:1.9; color:#444 }
                     Rectangle {
                         height: 80px; background: #F0F7FF; border-radius: 5px;
@@ -3562,6 +3693,44 @@ export component MainScreen inherits Rectangle {
                                 Text { text: root.edit-txn-cr; font-size: 12px; color: #1B5E20; }
                             }
                             Text { text: root.edit-txn-narr; font-size: 12px; color: #444444; wrap: word-wrap; }
+                        }
+                    }
+                    // ── Every other field, read-only (UI addition, 2026-08-27) ──
+                    // Show all fields → enable only the three actually-editable
+                    // ones below → keep everything else disabled-looking. The
+                    // "Current Vendor/Customer" / "Ledger for Posting" pair here
+                    // is deliberately not the same thing as the editable Vendor
+                    // and Account Head fields further down: these show the
+                    // row's existing stored value for context, the fields below
+                    // are blank inputs for the *new* value (existing behavior,
+                    // unchanged).
+                    HorizontalBox { padding: 0px; spacing: 10px;
+                        ROField { horizontal-stretch: 1; label: "Bank Name"; value: root.edit-txn-bank; }
+                        ROField { horizontal-stretch: 1; label: "Account Number"; value: root.transaction-rows[root.edit-txn-idx].account-no; }
+                    }
+                    HorizontalBox { padding: 0px; spacing: 10px;
+                        ROField { horizontal-stretch: 1; label: "Reference"; value: root.transaction-rows[root.edit-txn-idx].ref-no; }
+                        ROField { horizontal-stretch: 1; label: "Balance"; value: root.transaction-rows[root.edit-txn-idx].balance; }
+                    }
+                    HorizontalBox { padding: 0px; spacing: 10px;
+                        ROField { horizontal-stretch: 1; label: "Current Vendor/Customer"; value: root.transaction-rows[root.edit-txn-idx].vendor; }
+                        ROField { horizontal-stretch: 1; label: "Ledger for Posting"; value: root.transaction-rows[root.edit-txn-idx].ledger; }
+                    }
+                    HorizontalBox { padding: 0px; spacing: 10px;
+                        ROField { horizontal-stretch: 1; label: "Expense Head"; value: root.transaction-rows[root.edit-txn-idx].expense-head; }
+                        ROField { horizontal-stretch: 1; label: "Classification/Status"; value: root.transaction-rows[root.edit-txn-idx].status-text; }
+                    }
+                    HorizontalBox { padding: 0px; spacing: 10px;
+                        ROField { horizontal-stretch: 1; label: "Tags"; value: root.transaction-rows[root.edit-txn-idx].tags; }
+                        // U+2713 ("✓") is what Rust sends for a row that passed
+                        // validation — same missing-glyph tofu box on this app's
+                        // font as every other such symbol found this session, so
+                        // it's swapped for a plain word here rather than left
+                        // rendering as a blank box in a brand-new field.
+                        ROField {
+                            horizontal-stretch: 1; label: "Validation";
+                            value: root.transaction-rows[root.edit-txn-idx].review == "\u{2713}"
+                                ? "OK" : root.transaction-rows[root.edit-txn-idx].review;
                         }
                     }
                     Rectangle { height: 1px; background: #EEEEEE; }
@@ -3584,6 +3753,7 @@ export component MainScreen inherits Rectangle {
                         height: 34px;
                         selected(v) => { root.etxn-type-idx = self.current-index; }
                     }
+                }
                 }
                 MFtr {
                     MBtn {
@@ -3612,6 +3782,74 @@ export component MainScreen inherits Rectangle {
                         clicked => { root.request-delete-txn-confirm(root.edit-txn-idx); }
                     }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
+                }
+            }
+        }
+    }
+
+    // ── View Transaction modal (read-only) ───────────────────────────────────────
+    // UI addition, 2026-08-27 — companion to the Action column's View icon.
+    // Every field, all read-only (ROField, same component the Edit modal
+    // uses for its own disabled fields) and a single Close button on the
+    // right — no editing possible here at all, unlike "edit-txn" above.
+    // Populated the same way that modal's own read-only info box already
+    // was: `edit-txn-bank/date/narr/dr/cr` from the `row-click` Rust
+    // round-trip both View and Edit trigger, plus the rest straight from
+    // `transaction-rows[edit-txn-idx]` — the same data already on screen
+    // in the table itself.
+    if root.modal-state == "view-txn" : Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
+        TouchArea { clicked => { root.modal-state = ""; } }
+        Rectangle {
+            x: (parent.width - 560px) / 2; y: (parent.height - 560px) / 2;
+            width: 560px; height: 560px; background: white; border-radius: 8px;
+            border-width: 0px;
+            drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
+            TouchArea { width: 100%; height: 100%; }
+            VerticalBox { padding: 0px; spacing: 0px;
+                Rectangle { height: 4px; background: #1565C0; }
+                MHdr { title: "View Transaction"; close => { root.modal-state = ""; } }
+                ScrollView { vertical-stretch: 1;
+                    VerticalBox { padding: 18px; spacing: 10px;
+                        HorizontalBox { padding: 0px; spacing: 10px;
+                            ROField { horizontal-stretch: 1; label: "Bank Name"; value: root.edit-txn-bank; }
+                            ROField { horizontal-stretch: 1; label: "Account Number"; value: root.transaction-rows[root.edit-txn-idx].account-no; }
+                        }
+                        HorizontalBox { padding: 0px; spacing: 10px;
+                            ROField { horizontal-stretch: 1; label: "Date"; value: root.edit-txn-date; }
+                            ROField { horizontal-stretch: 1; label: "Reference"; value: root.transaction-rows[root.edit-txn-idx].ref-no; }
+                        }
+                        ROField { label: "Narration"; value: root.edit-txn-narr; }
+                        HorizontalBox { padding: 0px; spacing: 10px;
+                            ROField { horizontal-stretch: 1; label: "Debit"; value: root.edit-txn-dr; }
+                            ROField { horizontal-stretch: 1; label: "Credit"; value: root.edit-txn-cr; }
+                            ROField { horizontal-stretch: 1; label: "Balance"; value: root.transaction-rows[root.edit-txn-idx].balance; }
+                        }
+                        HorizontalBox { padding: 0px; spacing: 10px;
+                            ROField { horizontal-stretch: 1; label: "Vendor/Customer"; value: root.transaction-rows[root.edit-txn-idx].vendor; }
+                            ROField { horizontal-stretch: 1; label: "Ledger for Posting"; value: root.transaction-rows[root.edit-txn-idx].ledger; }
+                        }
+                        HorizontalBox { padding: 0px; spacing: 10px;
+                            ROField { horizontal-stretch: 1; label: "Expense Head"; value: root.transaction-rows[root.edit-txn-idx].expense-head; }
+                            ROField { horizontal-stretch: 1; label: "Classification/Status"; value: root.transaction-rows[root.edit-txn-idx].status-text; }
+                        }
+                        HorizontalBox { padding: 0px; spacing: 10px;
+                            ROField { horizontal-stretch: 1; label: "Tags"; value: root.transaction-rows[root.edit-txn-idx].tags; }
+                            // U+2713 ("✓") is what Rust sends for a row that passed
+                        // validation — same missing-glyph tofu box on this app's
+                        // font as every other such symbol found this session, so
+                        // it's swapped for a plain word here rather than left
+                        // rendering as a blank box in a brand-new field.
+                        ROField {
+                            horizontal-stretch: 1; label: "Validation";
+                            value: root.transaction-rows[root.edit-txn-idx].review == "\u{2713}"
+                                ? "OK" : root.transaction-rows[root.edit-txn-idx].review;
+                        }
+                        }
+                    }
+                }
+                MFtr {
+                    MBtn { text: "Close"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
         }

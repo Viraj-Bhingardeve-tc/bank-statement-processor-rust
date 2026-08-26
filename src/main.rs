@@ -6192,6 +6192,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        // ── Ctrl+R refresh ────────────────────────────────────────────────────
+        // Reloads the currently selected client's data from the database in
+        // place — same underlying load as a manual client (re)selection
+        // (`invoke_do_select_client`, already used this same way for the
+        // startup auto-select below), which is also what keeps this handler
+        // itself simple: no separate "re-fetch transactions" logic to
+        // duplicate and risk drifting out of sync with select-client's own
+        // (self-healing classification, audit-event reload, dashboard
+        // push, etc.). The one thing that flow does that a *refresh*
+        // shouldn't is reset the user's active filters/date-range/bank
+        // selection back to defaults — it's written for "switching to a
+        // possibly-different client", not "reloading this same one" — so
+        // that view state is snapshotted first and restored after, then
+        // the table/dashboard rebuilt once more against the fresh data
+        // under the restored filters.
+        {
+            let handle = app.as_weak();
+            let state_ref = app_state.clone();
+
+            app.on_do_refresh(move || {
+                let h = match handle.upgrade() {
+                    Some(h) => h,
+                    None => return,
+                };
+                let client_name = state_ref.lock().unwrap().client_name.clone();
+                if client_name.is_empty() {
+                    log::info!("[Refresh] no client selected — nothing to refresh");
+                    return;
+                }
+
+                let saved = {
+                    let st = state_ref.lock().unwrap();
+                    (
+                        st.active_filter.clone(),
+                        st.filter_statuses.clone(),
+                        st.date_from.clone(),
+                        st.date_to.clone(),
+                        st.bank_filter.clone(),
+                        st.vendor_filter.clone(),
+                        st.head_filter.clone(),
+                    )
+                };
+
+                h.invoke_do_select_client(SharedString::from(client_name.as_str()));
+
+                {
+                    let mut st = state_ref.lock().unwrap();
+                    st.active_filter = saved.0;
+                    st.filter_statuses = saved.1;
+                    st.date_from = saved.2;
+                    st.date_to = saved.3;
+                    st.bank_filter = saved.4;
+                    st.vendor_filter = saved.5;
+                    st.head_filter = saved.6;
+                }
+                let st = state_ref.lock().unwrap();
+                rebuild_rows(&h, &st);
+                if !st.transactions.is_empty() {
+                    push_dashboard(&h, &st.transactions, st.opening_balance);
+                    push_summary_extras(&h, &st.transactions);
+                }
+                drop(st);
+
+                h.set_toast_msg(SharedString::from("Refreshed"));
+                h.set_toast_kind(1);
+                log::info!("[Refresh] reloaded client '{}'", client_name);
+            });
+        }
+
         // ── Delete Client ─────────────────────────────────────────────────────
         {
             let handle = app.as_weak();
