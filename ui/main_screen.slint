@@ -2038,13 +2038,27 @@ export component MainScreen inherits Rectangle {
                                     // (not `txnList`'s, which is wider) and directly reading/
                                     // writing `txnList.viewport-y`, so native wheel-scroll and
                                     // thumb-drag both move the same, single source of truth.
+                                    //
+                                    // Restyled to match the Summary panel's scrollbar (UI fix,
+                                    // 2026-08-27) — that panel uses ScrollView's own default
+                                    // chrome untouched, measured via slint-viewer pixel sampling:
+                                    // no visible track at all, just a thin (~4px) floating gray
+                                    // line. This one can't switch back to that default chrome
+                                    // (see the note on `vertical-scrollbar-policy` above — the
+                                    // native scrollbar renders off in the unclipped, far-right
+                                    // edge of the table's full column width), so it's redrawn
+                                    // here instead: track background now transparent (was a
+                                    // filled #E3E3E3 bar), thumb narrowed from 6px to 4px and
+                                    // re-centered in the same 8px hit-region — the hit-region
+                                    // itself stays 8px so dragging is exactly as easy as before,
+                                    // only the *visible* bar got thinner.
                                     if txnList.viewport-height > hScrollWrap.height : vTrack := Rectangle {
                                         x: parent.width - 8px; y: 0px;
                                         width: 8px; height: parent.height;
-                                        background: #E3E3E3;
+                                        background: transparent;
 
                                         vThumb := Rectangle {
-                                            width: 6px; x: 1px; border-radius: 3px;
+                                            width: 4px; x: 2px; border-radius: 2px;
                                             background: vDrag.pressed ? #607D8B : #B0BEC5;
                                             height: max(24px, vTrack.height * (hScrollWrap.height / txnList.viewport-height));
                                             y: (vTrack.height - self.height)
@@ -2086,12 +2100,17 @@ export component MainScreen inherits Rectangle {
                                 // `TouchArea` out to cover the whole (stationary) track instead —
                                 // same delta-from-`pressed-x` math, but now measured against a
                                 // frame that never moves during the drag, so it tracks correctly.
+                                // Restyled to match the Summary panel's scrollbar (UI fix,
+                                // 2026-08-27) — same treatment as vTrack/vThumb above:
+                                // transparent track (was a filled #E3E3E3 bar), thumb
+                                // narrowed from 8px to 4px and re-centered in the same 10px
+                                // hit-region so dragging stays just as easy.
                                 if body.max-hscroll > 0px : hTrack := Rectangle {
                                     height: 10px;
-                                    background: #E3E3E3;
+                                    background: transparent;
 
                                     hThumb := Rectangle {
-                                        height: 8px; y: 1px; border-radius: 4px;
+                                        height: 4px; y: 3px; border-radius: 2px;
                                         background: hDrag.pressed ? #607D8B : #B0BEC5;
                                         width: max(24px, hTrack.width * (txnTableArea.width / body.content-width));
                                         x: (hTrack.width - self.width) * (body.hscroll / body.max-hscroll);
