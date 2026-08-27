@@ -6938,7 +6938,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 };
 
-                let pwd_bytes: Vec<u8> = pwd.as_str().as_bytes().to_vec();
+                // Zeroizing<Vec<u8>> wipes its buffer on drop — covers every
+                // return path below (wrong password, hard error, success)
+                // without needing matching cleanup at each one. `pwd` itself
+                // (the Slint SharedString callback arg) isn't wiped — Slint
+                // strings are ref-counted/immutable, not something we can
+                // zero in place — but it goes out of scope here regardless;
+                // the UI-side `pdf-pwd-input` field is cleared explicitly
+                // below once this attempt is done with it.
+                let pwd_bytes: zeroize::Zeroizing<Vec<u8>> =
+                    zeroize::Zeroizing::new(pwd.as_str().as_bytes().to_vec());
                 let file_name = if pending_name.is_empty() {
                     path.file_name().map_or_else(
                         || "unknown".to_string(),
@@ -6975,6 +6984,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 return;
                             }
                             h.set_pdf_pwd_visible(false);
+                            h.set_pdf_pwd_input(SharedString::from(""));
                             {
                                 let mut st = state_ref.lock().unwrap();
                                 st.pending_pdf_path = None;
@@ -6996,9 +7006,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                // From here on the password was accepted — close the modal and
-                // clear the pending-path state before proceeding.
+                // From here on the password was accepted — close the modal,
+                // wipe the typed password back out of the UI field (never
+                // leave it sitting in Slint state once this attempt is
+                // done), and clear the pending-path state before proceeding.
                 h.set_pdf_pwd_visible(false);
+                h.set_pdf_pwd_input(SharedString::from(""));
                 {
                     let mut st = state_ref.lock().unwrap();
                     st.pending_pdf_path = None;
@@ -7079,6 +7092,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => return,
                 };
                 h.set_pdf_pwd_visible(false);
+                // Wipe whatever was typed so far — Cancel must not leave a
+                // partially/fully-typed password sitting in UI state.
+                h.set_pdf_pwd_input(SharedString::from(""));
 
                 let (pending_name, is_batch) = {
                     let mut st = state_ref.lock().unwrap();

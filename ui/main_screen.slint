@@ -1265,6 +1265,10 @@ export component MainScreen inherits Rectangle {
     in property <bool>   pdf-pwd-visible:     false;
     in property <string> pdf-pwd-prompt:      "";
     in-out property <string> pdf-pwd-input:   "";
+    // Local UI-only state (never forwarded to Rust): whether the password
+    // field currently shows plaintext. Reset each time the modal opens so a
+    // password never stays visible into the next file/attempt.
+    property <bool> pdf-pwd-show: false;
     callback pdf-pwd-confirm(string);
     callback pdf-pwd-cancel();
     callback ai-cancel();
@@ -4479,24 +4483,54 @@ export component MainScreen inherits Rectangle {
     if root.pdf-pwd-visible : Rectangle {
         x: 0; y: 0; width: root.width; height: root.height; background: #00000072;
         Rectangle {
-            x: (parent.width - 380px) / 2; y: (parent.height - 200px) / 2;
-            width: 380px; height: 200px; background: white; border-radius: 8px;
+            x: (parent.width - 380px) / 2; y: (parent.height - 244px) / 2;
+            width: 380px; height: 244px; background: white; border-radius: 8px;
             drop-shadow-blur: 36px; drop-shadow-color: #00000048; drop-shadow-offset-y: 10px;
             VerticalBox { padding: 0px; spacing: 0px;
                 Rectangle { height: 4px; background: #1565C0; }
                 MHdr { title: "Password Protected PDF"; close => { root.pdf-pwd-cancel(); } }
-                VerticalBox { padding: 18px; spacing: 10px; vertical-stretch: 1;
-                    Text { text: root.pdf-pwd-prompt; font-size: 13px; color: #444444; wrap: word-wrap; }
+                VerticalBox { padding: 18px; spacing: 8px; vertical-stretch: 1;
+                    // Fixed lead sentence (always shown, every attempt) — the
+                    // dynamic root.pdf-pwd-prompt line below it adds the
+                    // filename and, on a wrong attempt, the retry error, but
+                    // never replaces this baseline explanation of why the
+                    // modal appeared at all.
+                    Text {
+                        text: "This PDF is password-protected. Please enter the PDF password to continue.";
+                        font-size: 13px; font-weight: 600; color: #0A1929; wrap: word-wrap;
+                    }
+                    Text { text: root.pdf-pwd-prompt; font-size: 12px; color: #78909C; wrap: word-wrap; }
                     LineEdit {
                         placeholder-text: "Enter PDF password"; height: 34px;
-                        input-type: password;
+                        input-type: root.pdf-pwd-show ? text : password;
                         text: root.pdf-pwd-input;
                         edited(v) => { root.pdf-pwd-input = v; }
                         accepted => { root.pdf-pwd-confirm(root.pdf-pwd-input); }
                     }
+                    // Show/Hide toggle — right-aligned under the field, matching
+                    // this app's link-style (no border, brand-blue text) toggle
+                    // convention used elsewhere for secondary in-place actions.
+                    HorizontalLayout {
+                        alignment: end;
+                        Rectangle {
+                            width: 40px; height: 18px;
+                            accessible-role: button;
+                            accessible-label: root.pdf-pwd-show ? "Hide password" : "Show password";
+                            showPwdTa := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.pdf-pwd-show = !root.pdf-pwd-show; }
+                            }
+                            Text {
+                                text: root.pdf-pwd-show ? "Hide" : "Show";
+                                font-size: 11px; font-weight: 600;
+                                color: showPwdTa.has-hover ? #0D47A1 : #1565C0;
+                                horizontal-alignment: right; vertical-alignment: center;
+                            }
+                        }
+                    }
                 }
                 MFtr {
-                    MBtn { text: "Unlock"; bg: #1565C0; clicked => { root.pdf-pwd-confirm(root.pdf-pwd-input); } }
+                    MBtn { text: "Unlock & Import"; bg: #1565C0; clicked => { root.pdf-pwd-confirm(root.pdf-pwd-input); } }
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.pdf-pwd-cancel(); } }
                 }
             }
@@ -4629,6 +4663,13 @@ export component MainScreen inherits Rectangle {
         }
     }
     } // end modal-esc-scope
+    // Reset the show/hide toggle to hidden every time the PDF-password
+    // modal's visibility flips — both when it opens for a fresh file and
+    // when it closes — so a password is never left visible into the next
+    // attempt or the next file.
+    changed pdf-pwd-visible => {
+        root.pdf-pwd-show = false;
+    }
     changed modal-state => {
         if (root.modal-state != "") {
             modal-esc-scope.focus();
