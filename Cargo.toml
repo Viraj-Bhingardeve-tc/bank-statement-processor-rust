@@ -89,7 +89,7 @@ rust_xlsxwriter   = "0.95"
 # ── PDF text extraction (Phase 3+) ───────────────────────────────────────────
 # Note: lopdf gives raw text content. X/Y layout positions require pdfium-render
 # (added in Phase 3 when PDF column detection is implemented).
-lopdf = "0.33"
+lopdf = "=0.35.0"
 
 # ── Parallel processing (batch — Phase 9+) ───────────────────────────────────
 rayon = "1"

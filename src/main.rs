@@ -2480,7 +2480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // enforcement gate, which must run *after* the monthly-password check
     // succeeds (there's no user identity to gate on before that).
     let license_client = build_license_client();
-    let license_status_display = {
+    let (license_status_display, license_is_licensed_at_startup) = {
         let db = db_conn.lock().unwrap();
         match db.as_ref() {
             Some(conn) => {
@@ -2491,9 +2491,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     license::should_enforce()
                 );
                 let record = license::storage::load_local_license(conn).ok().flatten();
-                license::describe(status, record.as_ref())
+                (
+                    license::describe(status, record.as_ref()),
+                    status.is_licensed(),
+                )
             }
-            None => "License status unavailable — database is not open.".to_string(),
+            None => (
+                "License status unavailable — database is not open.".to_string(),
+                false,
+            ),
         }
     };
 
@@ -2502,6 +2508,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let app = AppWindow::new()?;
         // Login screen shown by default (logged-in = false, set by Slint default)
+
+        // ── First-run / startup license gate ────────────────────────────────
+        // A license that's already validly activated on this device
+        // (including offline grace) skips straight into the application —
+        // no re-login needed — exactly mirroring what `on_do_license_activate`
+        // already does on a *fresh* successful activation (`set_logged_in(true)`
+        // right alongside `set_license_blocked(false)`); this just applies
+        // that same rule to a license that was activated in a *previous*
+        // run, using the `license_is_licensed_at_startup` check already
+        // computed above. Otherwise, the license-activation form
+        // (`LoginScreen`'s `license-blocked` branch — LICENSE KEY input +
+        // Activate button + error/success message) is shown immediately,
+        // *before* the normal email/password form: a fresh, unlicensed
+        // install's very first screen should be "enter your license key,"
+        // not a login prompt for a product it isn't licensed to use yet.
+        if license_is_licensed_at_startup {
+            app.set_logged_in(true);
+        } else {
+            app.set_license_blocked(true);
+            app.set_license_status_text(SharedString::from(license_status_display.as_str()));
+        }
 
         if let Some(err) = &db_open_error {
             app.set_toast_msg(SharedString::from(

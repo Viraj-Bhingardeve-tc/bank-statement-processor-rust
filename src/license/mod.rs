@@ -236,17 +236,72 @@ pub fn check_status(conn: &Connection, api: &dyn LicenseApiClient) -> LicenseSta
     }
 }
 
+/// **Debug-build-only** developer/test license key — lets a fresh debug
+/// build be fully activated and manually tested (all features unlocked)
+/// with no reachable license server, e.g. before `HttpLicenseClient` /
+/// Docker infra is available on a given machine. `activate()` below
+/// recognizes this exact key and short-circuits straight to a signed,
+/// locally-persisted "active, effectively-unlimited offline grace" record
+/// — no network round trip, works with `OfflineClient` or any other
+/// configured client.
+///
+/// Same "intentionally embedded, not a real secret, not a security
+/// boundary" framing as `auth::monthly_password`'s `SK_FRAGMENTS` and
+/// `license::storage::INTEGRITY_KEY` — anyone with the binary can read this
+/// constant. What actually keeps it from being a distribution problem is
+/// `cfg!(debug_assertions)`: this branch is dead code in a `--release`
+/// build (the compiler can even see the whole `if` is unreachable there and
+/// drop it), so a real distributed build always requires the genuine
+/// `HttpLicenseClient` server round trip — this key simply does not exist
+/// outside a debug build.
+pub const DEV_TEST_LICENSE_KEY: &str = "DEV-BSP-TEST-0001";
+
 /// Activates a license key on this device (`POST /activate-license`,
 /// API_SPECIFICATION.md). On success, persists the returned license terms
 /// locally so subsequent launches can use `check_status`'s offline path.
 /// Returns the `ApiError` unmodified on failure — nothing is persisted, so
 /// a failed activation attempt leaves any prior local state untouched.
+///
+/// Checks `DEV_TEST_LICENSE_KEY` first (debug builds only — see its doc
+/// comment); any other key always takes the real network path below,
+/// unchanged.
 pub fn activate(
     conn: &Connection,
     api: &dyn LicenseApiClient,
     license_key: &str,
 ) -> Result<LicenseStatus, ApiError> {
     let now = Utc::now();
+
+    if cfg!(debug_assertions) && license_key.trim() == DEV_TEST_LICENSE_KEY {
+        let record = storage::LocalLicenseRecord {
+            customer_id: Some("dev_test_customer".to_string()),
+            license_id: Some("dev_test_license".to_string()),
+            license_key: Some(DEV_TEST_LICENSE_KEY.to_string()),
+            subscription_type: Some("lifetime (dev/test)".to_string()),
+            status: "active".to_string(),
+            // No real expiry, and a 10-year offline grace period — this key
+            // exists purely so a debug build with no reachable license
+            // server can still be fully exercised for as long as manual
+            // testing needs, without ever calling out to a server.
+            expires_at: None,
+            last_validated_at: Some(now),
+            grace_period_days: 3650,
+            highest_seen_clock: Some(now),
+        };
+        storage::save_local_license(conn, &record).map_err(|e| {
+            ApiError::ServerError(format!(
+                "dev/test activation succeeded but failed to persist locally: {e}"
+            ))
+        })?;
+        let _ = storage::log_validation(
+            conn,
+            "Active",
+            false,
+            "dev/test license key activated locally (debug build only, no server contacted)",
+        );
+        return Ok(LicenseStatus::Active);
+    }
+
     let device = storage::get_or_create_device_info(conn)
         .map_err(|e| ApiError::ServerError(format!("failed to read device identity: {e}")))?;
     let device_label = fingerprint::FingerprintInputs::collect().computer_name;
@@ -474,6 +529,47 @@ mod tests {
         assert_eq!(record.subscription_type.as_deref(), Some("monthly"));
         assert_eq!(record.grace_period_days, 5);
         assert!(record.last_validated_at.is_some());
+    }
+
+    #[test]
+    fn dev_test_license_key_activates_offline_with_no_server_contact() {
+        let conn = open_migrated();
+        // OfflineClient's activate_license always returns
+        // NoServerConfigured — proves the dev key path never reaches it at
+        // all (a real key, by contrast, does and fails — see the next test).
+        let status =
+            activate(&conn, &OfflineClient, DEV_TEST_LICENSE_KEY).expect("dev key must activate");
+        assert_eq!(status, LicenseStatus::Active);
+
+        let record = storage::load_local_license(&conn)
+            .unwrap()
+            .expect("must be persisted");
+        assert_eq!(record.status, "active");
+        assert_eq!(record.grace_period_days, 3650);
+        assert!(record.last_validated_at.is_some());
+
+        // And it must actually unlock enforcement end-to-end, offline,
+        // exactly like a real activation would.
+        assert_eq!(enforce(&conn, &OfflineClient), EnforcementOutcome::Allowed);
+    }
+
+    #[test]
+    fn dev_test_license_key_is_an_exact_match_not_a_prefix_or_substring() {
+        let conn = open_migrated();
+        let almost = format!("{DEV_TEST_LICENSE_KEY}X");
+        let err = activate(&conn, &OfflineClient, &almost)
+            .expect_err("a near-miss key must not silently match the dev key");
+        assert!(matches!(err, ApiError::NoServerConfigured));
+        assert_eq!(storage::load_local_license(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn a_real_key_still_requires_the_configured_client_regardless_of_the_dev_key_existing() {
+        let conn = open_migrated();
+        let err = activate(&conn, &OfflineClient, "SOME-REAL-KEY-0000")
+            .expect_err("a non-dev key must go through the real client and can fail");
+        assert!(matches!(err, ApiError::NoServerConfigured));
+        assert_eq!(storage::load_local_license(&conn).unwrap(), None);
     }
 
     #[test]

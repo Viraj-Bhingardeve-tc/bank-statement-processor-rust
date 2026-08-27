@@ -25,39 +25,51 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// 5 of the 11 real PDF fixtures actually parse successfully through the
-/// real app pipeline today. The other 6 are deliberately excluded here and
-/// covered by their own `#[ignore]`d tests below, documenting three distinct,
-/// independently-confirmed extraction bugs this suite discovered (not test
-/// artifacts) — see `PDF_FIXTURES_WITH_IDENTITY_H_BUG` (4 files),
+/// 7 of the 11 real PDF fixtures parse successfully through the real app
+/// pipeline today. The other 4 are deliberately excluded here and covered by
+/// their own `#[ignore]`d tests below — see
+/// `pdf_fixtures_with_a_squashed_single_line_table_extract_far_fewer_
+/// transactions_than_the_real_statement_contains` (2 files: "ICICI Bank.pdf",
+/// "IDBI Bank.pdf" — see that test's doc comment; IDBI recovers a handful of
+/// real transactions so isn't a hard zero, but is still excluded from the
+/// per-fixture assertions below since most of its data is unrecovered),
 /// `cosmos_pdf_exposes_a_missing_ocr_fallback_for_near_empty_text` (1 file),
 /// and `icici_wealth_management_pdf_extracts_zero_pages` (1 file). All 11
 /// were probed via `cargo run --example pdf_batch_probe` before finalizing
 /// this split — this is not a guess.
+///
+/// "BOB.pdf", "IDFCFIRSTBankstatement.pdf", and "Union Bank.pdf" moved into
+/// this list after two fixes: (1) bumping `lopdf` to a pinned `=0.35.0`
+/// resolved the Identity-H/CID-font decoding failure that used to make
+/// `extract_full_text` return the literal placeholder string
+/// `"?Identity-H Unimplemented?"` for these 4 files (this bug and its
+/// symptom are why `PDF_FIXTURES_WITH_IDENTITY_H_BUG` used to exist — see
+/// git history for that now-removed const; "Kotak Bank.pdf" was always the
+/// counter-example proving Identity-H text elsewhere in a document doesn't
+/// block its transaction table, which uses a normal font); (2)
+/// `ocr_parser.rs` needed three further fixes before the now-readable text
+/// actually produced *correct* transactions rather than a single reversed
+/// or garbled amount, all found and locked in by
+/// `bob_and_union_bank_pdfs_reconcile_almost_perfectly_after_the_ordering_
+/// and_amount_extraction_fixes` below: reverse-chronological (newest-first)
+/// statements broke the balance-movement debit/credit heuristic (BOB lists
+/// newest-first; see `AmtInfo`'s doc comment in `ocr_parser.rs`), a
+/// merchant/UTR id glued directly onto a narration word with no separating
+/// space could be misread as a transaction amount by `extract_amounts`'s
+/// bare-digit branch (Union Bank: "cfmer.33421130"), and a two-amount line
+/// picked the wrong one by blind position instead of by which one actually
+/// explains the observed balance movement (Union Bank: an SMS short-code in
+/// page-footer marketing boilerplate outweighing the real amount). "ICICI
+/// Bank.pdf" did NOT move: its Identity-H text is now readable too, but it
+/// turned out to have the same squashed-single-line-table problem as "IDBI
+/// Bank.pdf" — see that test below.
 const PDF_FIXTURES: &[&str] = &[
     "Bank of Maharashtra.pdf",
-    "IDBI Bank.pdf",
+    "BOB.pdf",
+    "IDFCFIRSTBankstatement.pdf",
     "Kotak Bank.pdf",
     "Mahanager Co-operative bank.pdf",
     "SBI.pdf",
-];
-
-/// 4 of the 11 fixtures whose embedded text is (partly or entirely)
-/// Identity-H/CID-encoded in a way `lopdf`'s text extractor cannot decode —
-/// see `pdf_fixtures_with_identity_h_encoding_produce_zero_transactions`'s
-/// doc comment for the full explanation. Note "Kotak Bank.pdf" also
-/// contains some Identity-H-encoded text (its table header cells) but is
-/// *not* in this list: its transaction table itself uses a normal font, and
-/// (since 2026-08-25's fix — see `kotak_narrow_layout_debit_credit_and_
-/// balance_reconcile_exactly` below) now parses via Stage 1's dedicated
-/// narrow-layout extractor rather than needing the OCR-text fallback at
-/// all, recovering 622 real transactions with correct Debit/Credit — proving
-/// the Identity-H failure mode is about *which* text is affected, not just
-/// presence of the string "Identity-H" anywhere in the document.
-const PDF_FIXTURES_WITH_IDENTITY_H_BUG: &[&str] = &[
-    "BOB.pdf",
-    "ICICI Bank.pdf",
-    "IDFCFIRSTBankstatement.pdf",
     "Union Bank.pdf",
 ];
 
@@ -99,7 +111,7 @@ fn parse_pdf_via_real_pipeline(path: &Path, name: &str) -> parser::ParseResult {
     ml
 }
 
-/// Every real PDF fixture (except BOB.pdf, see above) must parse into at
+/// Every real PDF fixture in `PDF_FIXTURES` must parse into at
 /// least one usable transaction, with a bank name detected and every real
 /// row passing the app's own `is_usable()` gate (valid date, at least one
 /// amount) — via the real two-stage pipeline, not Stage 1 in isolation
@@ -247,49 +259,146 @@ fn kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly() {
     );
 }
 
-/// **Real bug found by this suite, not fixed here** (out of scope for an
-/// integration-test-only change — see the task rules: one feature at a
-/// time, no unrelated fixes bundled in). Affects 4 of the 11 real fixtures
-/// (`PDF_FIXTURES_WITH_IDENTITY_H_BUG`), not just one.
+/// **Real bug found by this suite, not fixed here** (out of scope: splitting
+/// this reliably risks reintroducing the exact "random amount extraction"
+/// class of bug the OCR-path fixes elsewhere in this suite exist to
+/// prevent — see the doc comment below for why).
 ///
-/// Each of these PDFs embeds its transaction-table text using an
-/// Identity-H/CID-keyed font that the `lopdf`-based text extractor cannot
-/// decode to Unicode glyphs — instead of real characters, `extract_full_text`
-/// returns the literal placeholder string `"?Identity-H Unimplemented?"`
-/// repeated hundreds to thousands of times (a condition `src/bin/pdf_diag.rs:25`
-/// already had a dedicated check for, confirming this was previously
-/// discovered — but never fixed, and not mentioned anywhere in
-/// `PROJECT_AUDIT_2026-07-06.md`).
+/// "ICICI Bank.pdf" and "IDBI Bank.pdf" both extract fine at the text layer
+/// (no Identity-H garbage — that separate bug, which used to affect these
+/// two plus "BOB.pdf"/"IDFCFIRSTBankstatement.pdf"/"Union Bank.pdf", was
+/// fixed by pinning `lopdf` to `=0.35.0`; see `PDF_FIXTURES`'s doc comment)
+/// but both PDFs render their entire transaction table as one (ICICI) or a
+/// few (IDBI) massively long single text lines with every row's fields —
+/// serial no., two dates, a timestamp, free-text narration, and TWO
+/// currency amounts — concatenated with **no consistent delimiter**:
+/// sometimes a real space, sometimes nothing at all (verified verbatim in
+/// the ICICI fixture: `"...409524494660//BALAJI C/KARB/balajiod9@kb"` next
+/// to `"...58598.29378368.15"` — two 2-decimal amounts glued directly
+/// together with zero separator, "58598.29" + "378368.15"). Splitting a
+/// glued `"58598.29378368.15"` back into its two real numbers is
+/// fundamentally ambiguous without a second signal (there's no delimiter to
+/// anchor on), and getting it wrong produces exactly the "random amount
+/// extraction" / "balance treated as transaction amount" failure modes this
+/// suite's other fixes (see `PDF_FIXTURES`'s doc comment) were written to
+/// eliminate — a rushed regex splitter here would trade one data-loss bug
+/// for a data-corruption bug, worse for a user who can no longer tell the
+/// output is wrong. This needs a dedicated positional/column-aware
+/// extractor (the same class of fix `extract_kotak_narrow_transactions`
+/// already provides for Kotak Bank.pdf's own distinct narrow-layout
+/// problem), not a best-effort regex — genuinely out of scope for this
+/// session's time-box.
 ///
-/// This is worse than a missing-Tesseract limitation: `run_pdf_ocr_pipeline`
-/// in `main.rs` only falls back to Tesseract when `full_text.trim().is_empty()`
-/// — but this garbage text is *not* empty, so the real app today would
-/// silently hand this garbage to `parse_ocr_text`, get zero transactions, and
-/// tell the user "No transactions found — PDF may use embedded fonts"
-/// without ever attempting real OCR, even on a machine with Tesseract
-/// properly installed. A real user with any of these 4 exact PDFs cannot
-/// load them today, with no actionable error.
-///
-/// "Kotak Bank.pdf" is the counter-example proving this isn't a blanket
-/// "any Identity-H text = broken" rule: it also contains Identity-H-encoded
-/// text (its table header cells, probably a logo/header font) but its
-/// transaction table itself uses a normal font — so it produces 622 real
-/// transactions (via Stage 1's narrow-layout extractor since 2026-08-25;
-/// see `kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly`) —
-/// which is exactly why it stays in `PDF_FIXTURES` rather than here.
-///
-/// Confirmed via `cargo run --example pdf_batch_probe` against all 11
-/// copied fixtures. Flagged prominently as a production blocker in the
-/// final report rather than fixed in this commit.
+/// "IDBI Bank.pdf" is a partial case, not a hard zero: its statement
+/// happens to *also* render its most recent 4 transactions in a normal
+/// one-field-per-line layout (a distinct "recent transactions" section)
+/// which parses correctly and reconciles — but the other ~20 (of a
+/// bank-reported 24 total: "Dr Count 7" + "Cr Count 17") live only in the
+/// unparseable squashed line and are silently missing from the result.
 #[test]
-#[ignore = "KNOWN BUG (not fixed here, out of scope for this feature): 4 fixtures use an Identity-H CID font that defeats lopdf's text extraction, producing placeholder garbage that main.rs's OCR fallback doesn't detect as \"needs Tesseract\" — see doc comment"]
-fn pdf_fixtures_with_identity_h_encoding_produce_zero_transactions() {
-    for name in PDF_FIXTURES_WITH_IDENTITY_H_BUG {
+#[ignore = "KNOWN BUG (not fixed here, out of scope for this feature): ICICI Bank.pdf and IDBI Bank.pdf render their transaction table as one/a few single text lines with fields glued together with no consistent delimiter (including two currency amounts directly concatenated with zero separator) — splitting this reliably needs a dedicated column-aware extractor, not a regex; see doc comment"]
+fn pdf_fixtures_with_a_squashed_single_line_table_extract_far_fewer_transactions_than_the_real_statement_contains(
+) {
+    // ICICI Bank.pdf: the whole table is one line → Stage 2 (raw OCR-text
+    // parsing, no preprocessing) can't find a single date-anchored row in
+    // it, so it produces literally zero real transactions.
+    let icici_path = fixture("ICICI Bank.pdf");
+    let icici_text = text_extractor::extract_full_text(&icici_path);
+    let icici_result = parser::ocr_parser::parse_ocr_text(&icici_text, "ICICI Bank.pdf");
+    let icici_real = icici_result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .count();
+    assert_eq!(
+        icici_real, 0,
+        "ICICI Bank.pdf: if this now fails (real transactions found), the squashed-line \
+         extraction has improved — remove the #[ignore] and fold this fixture back into PDF_FIXTURES"
+    );
+
+    // IDBI Bank.pdf: recovers only its 4 "recent transactions" (a separately
+    // and normally laid-out section), missing the ~20 that live only in the
+    // file's squashed dense table.
+    let idbi_path = fixture("IDBI Bank.pdf");
+    let idbi_result = parse_pdf_via_real_pipeline(&idbi_path, "IDBI Bank.pdf");
+    let idbi_real = idbi_result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .count();
+    assert!(
+        idbi_real < 10,
+        "IDBI Bank.pdf: if this now fails (10+ real transactions found, closer to the \
+         bank-reported 24), the squashed-line extraction has improved — remove the #[ignore] \
+         and fold this fixture back into PDF_FIXTURES; got {idbi_real}"
+    );
+}
+
+/// Locks in the BOB.pdf / Union Bank.pdf fixes described in `PDF_FIXTURES`'s
+/// doc comment end-to-end against the real fixtures, the same way
+/// `kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly` does for
+/// Kotak Bank.pdf — not a synthetic reproduction (`ocr_parser`'s own unit
+/// tests already cover the mechanics in isolation: reverse-chronological
+/// ordering, the glued-narration-digit-run amount guard, and the
+/// magnitude-aware two-amount direction pick).
+///
+/// A handful of real mismatches are tolerated (not asserted to zero) because
+/// a couple of true edge cases remain unexplained in each file (2/181 for
+/// BOB, 0/1447 for Union Bank at the time of writing) rather than pinning
+/// the test to an exact count that would break on unrelated future changes.
+#[test]
+fn bob_and_union_bank_pdfs_reconcile_almost_perfectly_after_the_ordering_and_amount_extraction_fixes(
+) {
+    for (name, min_real_txns, max_mismatch_pct) in
+        [("BOB.pdf", 150, 0.05), ("Union Bank.pdf", 1000, 0.05)]
+    {
         let path = fixture(name);
-        let full_text = text_extractor::extract_full_text(&path);
+        let result = parse_pdf_via_real_pipeline(&path, name);
+        let real: Vec<&parser::Transaction> = result
+            .transactions
+            .iter()
+            .filter(|t| !t.is_opening_balance)
+            .collect();
         assert!(
-            full_text.contains("Identity-H Unimplemented"),
-            "{name}: if this now fails, the Identity-H bug may have been fixed for this file — move it back into PDF_FIXTURES if so"
+            real.len() > min_real_txns,
+            "{name}: expected > {min_real_txns} real transactions, got {}",
+            real.len()
+        );
+
+        for t in &real {
+            assert!(
+                !(t.debit.is_some() && t.credit.is_some()),
+                "{name}: transaction has BOTH debit and credit set: {t:?}"
+            );
+            assert!(
+                t.debit.is_some() || t.credit.is_some(),
+                "{name}: transaction has NEITHER debit nor credit set: {t:?}"
+            );
+        }
+
+        let mut checked = 0usize;
+        let mut mismatches = 0usize;
+        for t in &real {
+            if let (Some(pb), Some(bal)) = (t.prev_balance, t.balance) {
+                checked += 1;
+                let expected = pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0);
+                if (expected - bal).abs() > 0.01 {
+                    mismatches += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "{name}: no transaction had both prev_balance and balance set — reconciliation \
+             wasn't actually exercised"
+        );
+        let pct = mismatches as f64 / checked as f64;
+        assert!(
+            pct <= max_mismatch_pct,
+            "{name}: {mismatches}/{checked} ({:.1}%) transactions don't reconcile with \
+             (previous balance + credit - debit), exceeding the {:.0}% tolerance",
+            pct * 100.0,
+            max_mismatch_pct * 100.0
         );
     }
 }
