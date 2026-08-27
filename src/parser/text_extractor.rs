@@ -12,15 +12,145 @@
 //! **Bug fixed**: the original code passed `page_id.0` (a lopdf *object ID*, e.g. 5, 12, 38)
 //! to `extract_text(&[page_id.0])` as if it were a *page number* (1, 2, 3…).
 //! `doc.get_pages()` returns `BTreeMap<u32, ObjectId>` where keys ARE page numbers.
+//!
+//! **Bug fixed (Cosmos Co-operative Bank, 2026-08-27)**: `lopdf::Document::extract_text`
+//! (see `lopdf::parser_aux::extract_text_chunks_from_page`) only recognizes the `Tj`/`TJ`
+//! text-showing operators — it silently ignores `'` (quote: move to next line and show
+//! text) and `"` (double-quote: set spacing, move to next line, and show text). Both are
+//! ordinary, spec-legal PDF content-stream operators (PDF 1.7 §9.4.3), and the Cosmos
+//! statement's PDF generator uses `'` for essentially every line of the transaction
+//! table's text — verified directly against this file's decoded content stream via
+//! `doc.get_page_content()`: the real text (`"THE COSMOS CO-OPERATIVE BANK LTD"`, every
+//! transaction row, …) is right there as `(...)'` operations, but `extract_text()` only
+//! ever emits the text from the page's lone `Tj` call — one placeholder glyph — because
+//! that's the only operator it looks for. Silent, not an error: `extract_full_text`
+//! returns a short-but-non-empty string (a few real `Tj` fragments elsewhere on the page,
+//! e.g. a footer note), which is enough to skip `main.rs`'s "is the text empty? fall back
+//! to Tesseract OCR" check, so the app used to hand this near-empty text straight to
+//! `ocr_parser::parse_ocr_text` and get zero transactions — this is not a missing-OCR
+//! problem, it's a text-extraction one; real embedded text is present and extractable.
+//!
+//! `extract_page_text` below re-implements lopdf's own per-page walk (same Tf-driven
+//! encoding tracking, same `Document::decode_text`/`get_page_fonts`/`get_page_content`
+//! calls lopdf's internal version uses) but also handles `'`, `"`, and `T*`, so it is a
+//! strict superset of what `doc.extract_text()` produces: any PDF that only used
+//! `Tj`/`TJ` (every other bank fixture this codebase has been tested against) gets
+//! byte-for-byte the same output, and a PDF that also uses `'`/`"` (Cosmos) now gets its
+//! text too, instead of it being silently dropped.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
+use lopdf::{content::Content, Document, Encoding, Object, ObjectId};
 
 use crate::parser::{
     column_detector::PdfItem,
     row_builder::{cluster_into_rows, RawPdfItem},
 };
+
+/// Append the text carried by `Tj`/`TJ`/`'`/`"` operands to `text`, decoded via `encoding`.
+/// Mirrors lopdf's own private `collect_text` helper (`parser_aux.rs`) exactly for
+/// `Object::String`/`Object::Array`/`Object::Integer` handling, so `Tj`/`TJ` output here
+/// is identical to `doc.extract_text()`'s.
+fn collect_text(text: &mut String, encoding: &Encoding, operands: &[Object]) {
+    for operand in operands {
+        match operand {
+            Object::String(bytes, _) => {
+                if let Ok(s) = Document::decode_text(encoding, bytes) {
+                    text.push_str(&s);
+                }
+            }
+            Object::Array(arr) => collect_text(text, encoding, arr),
+            Object::Integer(i) if *i < -100 => text.push(' '),
+            _ => {}
+        }
+    }
+}
+
+/// Extract one page's text, walking its decoded content-stream operations directly
+/// instead of relying on `lopdf::Document::extract_text` (see module doc comment for
+/// why: that function silently drops `'`/`"`-drawn text). Returns `""` on any error
+/// (missing content stream, undecodable fonts, …) — same "best effort, never panic"
+/// contract `doc.extract_text(...).unwrap_or_default()` had at every existing call site.
+fn extract_page_text(doc: &Document, page_id: ObjectId) -> String {
+    let fonts = match doc.get_page_fonts(page_id) {
+        Ok(f) => f,
+        Err(e) => {
+            log::debug!("[TextExtractor] get_page_fonts failed: {}", e);
+            BTreeMap::new()
+        }
+    };
+    let encodings: BTreeMap<Vec<u8>, Encoding> = fonts
+        .into_iter()
+        .filter_map(|(name, font)| font.get_font_encoding(doc).ok().map(|enc| (name, enc)))
+        .collect();
+
+    let content_data = match doc.get_page_content(page_id) {
+        Ok(d) => d,
+        Err(e) => {
+            log::debug!("[TextExtractor] get_page_content failed: {}", e);
+            return String::new();
+        }
+    };
+    let content = match Content::decode(&content_data) {
+        Ok(c) => c,
+        Err(e) => {
+            log::debug!("[TextExtractor] Content::decode failed: {}", e);
+            return String::new();
+        }
+    };
+
+    let mut out = String::new();
+    let mut current_encoding: Option<&Encoding> = None;
+    for operation in &content.operations {
+        match operation.operator.as_str() {
+            "Tf" => {
+                if let Some(Ok(font_name)) = operation.operands.first().map(Object::as_name) {
+                    current_encoding = encodings.get(font_name);
+                }
+            }
+            "Tj" | "TJ" => {
+                if let Some(encoding) = current_encoding {
+                    collect_text(&mut out, encoding, &operation.operands);
+                }
+            }
+            // `'` — "move to the next line and show a text string" (PDF 1.7 §9.4.3,
+            // Table 209): equivalent to `T*` followed by `Tj`. lopdf's own
+            // `extract_text` does not implement this operator at all.
+            "'" => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if let Some(encoding) = current_encoding {
+                    collect_text(&mut out, encoding, &operation.operands);
+                }
+            }
+            // `"` — "set word/char spacing, move to next line, show text": operands
+            // are `[aw ac string]`; only the trailing string operand is text.
+            "\"" => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                if let (Some(encoding), Some(s)) = (current_encoding, operation.operands.get(2)) {
+                    collect_text(&mut out, encoding, std::slice::from_ref(s));
+                }
+            }
+            "T*" => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            "ET" => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
 
 // ── extract_pages ─────────────────────────────────────────────────────────────
 
@@ -46,9 +176,8 @@ pub fn extract_pages(path: &Path) -> Result<Vec<Vec<PdfItem>>> {
 
     let mut all_raw: Vec<RawPdfItem> = Vec::new();
 
-    for page_num in pages.keys() {
-        // extract_text expects 1-based page numbers — use the BTreeMap key directly.
-        let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
+    for (page_num, page_id) in pages.iter() {
+        let page_text = extract_page_text(&doc, *page_id);
 
         // Y offset separates pages so their lines don't cluster together.
         let y_offset = (*page_num as f64 - 1.0) * 10_000.0;
@@ -93,11 +222,8 @@ pub fn extract_full_text(path: &Path) -> String {
     let pages = doc.get_pages();
     let mut parts = Vec::with_capacity(pages.len());
 
-    for page_num in pages.keys() {
-        match doc.extract_text(&[*page_num]) {
-            Ok(t) => parts.push(t),
-            Err(e) => log::debug!("[TextExtractor] page {} extract error: {}", page_num, e),
-        }
+    for page_id in pages.values() {
+        parts.push(extract_page_text(&doc, *page_id));
     }
 
     let full = parts.join("\n");
@@ -124,8 +250,8 @@ pub fn extract_pages_with_password(path: &Path, password: &[u8]) -> Result<Vec<V
 
     let mut all_raw: Vec<RawPdfItem> = Vec::new();
 
-    for page_num in pages.keys() {
-        let page_text = doc.extract_text(&[*page_num]).unwrap_or_default();
+    for (page_num, page_id) in pages.iter() {
+        let page_text = extract_page_text(&doc, *page_id);
         let y_offset = (*page_num as f64 - 1.0) * 10_000.0;
         for (line_idx, line) in page_text.lines().enumerate() {
             let line = line.trim();
@@ -164,11 +290,8 @@ pub fn extract_full_text_with_password(path: &Path, password: &[u8]) -> String {
     let pages = doc.get_pages();
     let mut parts = Vec::with_capacity(pages.len());
 
-    for page_num in pages.keys() {
-        match doc.extract_text(&[*page_num]) {
-            Ok(t) => parts.push(t),
-            Err(e) => log::debug!("[TextExtractor] (pwd) page {} error: {}", page_num, e),
-        }
+    for page_id in pages.values() {
+        parts.push(extract_page_text(&doc, *page_id));
     }
 
     parts.join("\n")

@@ -25,18 +25,17 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// 7 of the 11 real PDF fixtures parse successfully through the real app
-/// pipeline today. The other 4 are deliberately excluded here and covered by
+/// 8 of the 11 real PDF fixtures parse successfully through the real app
+/// pipeline today. The other 3 are deliberately excluded here and covered by
 /// their own `#[ignore]`d tests below — see
 /// `pdf_fixtures_with_a_squashed_single_line_table_extract_far_fewer_
 /// transactions_than_the_real_statement_contains` (2 files: "ICICI Bank.pdf",
 /// "IDBI Bank.pdf" — see that test's doc comment; IDBI recovers a handful of
 /// real transactions so isn't a hard zero, but is still excluded from the
-/// per-fixture assertions below since most of its data is unrecovered),
-/// `cosmos_pdf_exposes_a_missing_ocr_fallback_for_near_empty_text` (1 file),
-/// and `icici_wealth_management_pdf_extracts_zero_pages` (1 file). All 11
-/// were probed via `cargo run --example pdf_batch_probe` before finalizing
-/// this split — this is not a guess.
+/// per-fixture assertions below since most of its data is unrecovered), and
+/// `icici_wealth_management_pdf_extracts_zero_pages` (1 file). All 11 were
+/// probed via `cargo run --example pdf_batch_probe` before finalizing this
+/// split — this is not a guess.
 ///
 /// "BOB.pdf", "IDFCFIRSTBankstatement.pdf", and "Union Bank.pdf" moved into
 /// this list after two fixes: (1) bumping `lopdf` to a pinned `=0.35.0`
@@ -63,9 +62,27 @@ fn fixture(name: &str) -> PathBuf {
 /// Bank.pdf" did NOT move: its Identity-H text is now readable too, but it
 /// turned out to have the same squashed-single-line-table problem as "IDBI
 /// Bank.pdf" — see that test below.
+///
+/// "Cosmos Co-operative.pdf" moved into this list after fixing the *actual*
+/// root cause of the bug `cosmos_pdf_exposes_a_missing_ocr_fallback_for_
+/// near_empty_text` used to document (that test name and its old rationale
+/// are now WRONG — see
+/// `cosmos_co_operative_bank_pdf_reconciles_exactly_after_the_quote_
+/// operator_extraction_fix` below for what was actually happening and how
+/// it was fixed): `lopdf::Document::extract_text` only understands the
+/// `Tj`/`TJ` text-showing operators, not the equally spec-legal `'`
+/// (quote) / `"` (double-quote) operators — and Cosmos's PDF generator
+/// draws essentially every line of the transaction table with `'`. This
+/// was never a missing-OCR-fallback problem: real, complete embedded text
+/// was present in the PDF the whole time (confirmed directly against the
+/// decoded content stream), `extract_text` was just silently dropping
+/// nearly all of it. Fixed in `text_extractor::extract_page_text`, which
+/// walks decoded content-stream operations itself instead of delegating to
+/// `lopdf::Document::extract_text` — see that function's doc comment.
 const PDF_FIXTURES: &[&str] = &[
     "Bank of Maharashtra.pdf",
     "BOB.pdf",
+    "Cosmos Co-operative.pdf",
     "IDFCFIRSTBankstatement.pdf",
     "Kotak Bank.pdf",
     "Mahanager Co-operative bank.pdf",
@@ -403,35 +420,191 @@ fn bob_and_union_bank_pdfs_reconcile_almost_perfectly_after_the_ordering_and_amo
     }
 }
 
-/// **Second real bug found by this suite, not fixed here** (same
-/// out-of-scope rationale as the BOB.pdf case above).
+/// **Real bug found and fixed (2026-08-27): Cosmos Co-operative Bank PDF
+/// import.** Locks in the fix end-to-end against the real fixture, the same
+/// way `bob_and_union_bank_pdfs_reconcile_almost_perfectly_after_the_
+/// ordering_and_amount_extraction_fixes` does for BOB/Union Bank.
 ///
-/// `Cosmos Co-operative.pdf`'s embedded text layer contains almost nothing:
-/// `extract_full_text` returns only 144 characters — page furniture like
-/// "You can get account statement through e-mail" and "Date Stamp Manager"
-/// — with the actual transaction table entirely absent from the text layer
-/// (very likely rendered as an image or a graphics structure `lopdf`'s
-/// content-stream text extraction doesn't capture).
+/// This test used to be `cosmos_pdf_exposes_a_missing_ocr_fallback_for_
+/// near_empty_text`, `#[ignore]`d, asserting `extract_full_text` returned
+/// under 500 chars of unusable letterhead text and blaming a missing OCR
+/// fallback. That diagnosis was wrong. The actual root cause, found by
+/// dumping this fixture's *decoded page content stream* directly (not just
+/// re-reading `extract_full_text`'s output): Cosmos's PDF generator draws
+/// essentially every line of the transaction table using the `'` (quote)
+/// content-stream operator — "move to the next line and show a text
+/// string", PDF 1.7 §9.4.3 Table 209, exactly as spec-legal as `Tj`/`TJ` —
+/// but `lopdf::Document::extract_text` (`lopdf::parser_aux::
+/// extract_text_chunks_from_page`) only matches `"Tj" | "TJ"` in its
+/// operator loop. It silently drops every `'`-drawn line, which for this
+/// file is nearly the whole page: the real, complete transaction-table text
+/// was sitting right there in the PDF the entire time, extractable, just
+/// never looked at. `main.rs`'s Tesseract fallback check
+/// (`full_text.trim().is_empty()`) correctly did NOT fire, because the text
+/// genuinely wasn't empty (a few real `Tj`-drawn fragments — the letterhead
+/// — survived) — this was never a missing-OCR problem.
 ///
-/// This is the *same root cause class* as the BOB.pdf bug, with a different
-/// symptom: `run_pdf_ocr_pipeline`'s decision to attempt real Tesseract OCR
-/// is a bare `full_text.trim().is_empty()` check. 144 characters of
-/// letterhead text is not empty, so Tesseract is never attempted here
-/// either, even though the extracted text is transparently useless for
-/// finding transactions. A real fix would need a stronger "is this text
-/// actually usable" heuristic (e.g. a minimum line/token count, or checking
-/// whether `parse_ocr_text`/`preprocess_multiline` found anything at all
-/// before giving up) rather than a bare emptiness check — deliberately not
-/// implemented here, flagged as a production blocker in the final report.
+/// Fixed in `text_extractor::extract_page_text`, which walks the page's
+/// decoded content-stream operations directly (same `Tf`/font-encoding
+/// tracking, same `Document::decode_text` calls lopdf's own version uses —
+/// verified to produce byte-identical output to `doc.extract_text()` for
+/// every other fixture in `PDF_FIXTURES`, all of which use only `Tj`/`TJ`)
+/// and additionally handles `'`, `"`, and `T*`. See that function's doc
+/// comment for the full explanation.
+///
+/// Cross-checked independently against `pdftotext -layout` (poppler, not
+/// lopdf) on the same fixture: 77 date-prefixed transaction rows, matching
+/// this test's own count exactly.
 #[test]
-#[ignore = "KNOWN BUG (not fixed here, out of scope for this feature): Cosmos Co-operative.pdf's embedded text layer is 144 characters of letterhead furniture with no transaction data, and main.rs's is_empty()-only OCR-fallback check doesn't detect this as \"needs Tesseract\" — see doc comment"]
-fn cosmos_pdf_exposes_a_missing_ocr_fallback_for_near_empty_text() {
+fn cosmos_co_operative_bank_pdf_reconciles_exactly_after_the_quote_operator_extraction_fix() {
     let path = fixture("Cosmos Co-operative.pdf");
-    let full_text = text_extractor::extract_full_text(&path);
-    assert!(
-        full_text.trim().len() < 500,
-        "if this now fails (much more text than before), the extraction has improved — remove the #[ignore] and fold Cosmos Co-operative.pdf back into PDF_FIXTURES"
+    let result = parse_pdf_via_real_pipeline(&path, "Cosmos Co-operative.pdf");
+
+    assert_eq!(result.bank_name, "Cosmos Co-operative Bank");
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert_eq!(
+        real.len(),
+        77,
+        "expected exactly 77 real transactions (independently cross-checked via `pdftotext \
+         -layout`), got {}",
+        real.len()
     );
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set: {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+        // Reference must never leak into narration for the rows Cosmos's
+        // own statement gives an explicit Chq.No. for.
+        assert!(
+            !t.narration.contains("7311") && !t.narration.contains("7312"),
+            "cheque number leaked into narration instead of reference: {t:?}"
+        );
+    }
+
+    // Full balance-continuity reconciliation across the entire real
+    // statement: every transaction's own balance must equal the previous
+    // balance plus its credit minus its debit, exactly (this file's own
+    // "Withdrawals"/"Deposits"/"Balance" columns are internally exact — no
+    // tolerance needed, unlike the OCR-text-path BOB/Union Bank fixtures).
+    let mut prev_balance = result.opening_balance;
+    let mut mismatches = 0usize;
+    let mut checked = 0usize;
+    for t in &real {
+        if let (Some(pb), Some(bal)) = (prev_balance, t.balance) {
+            checked += 1;
+            let expected = pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0);
+            if (expected - bal).abs() > 0.01 {
+                mismatches += 1;
+            }
+        }
+        prev_balance = t.balance;
+    }
+    assert!(checked > 0, "no transaction had a usable prior balance to reconcile against");
+    assert_eq!(
+        mismatches, 0,
+        "{mismatches}/{checked} transactions don't reconcile with (previous balance + credit - debit)"
+    );
+
+    // Cheque-number reference extraction (`extract_cosmos_ref`): Cosmos's
+    // own "Chq.No." column is this format's real reference field — confirm
+    // at least the known cheque-numbered rows in this fixture got it.
+    let refs: Vec<&str> = real.iter().map(|t| t.reference.as_str()).collect();
+    for expected_ref in ["7311", "7312", "7313", "7314"] {
+        assert!(
+            refs.contains(&expected_ref),
+            "expected a transaction with reference {expected_ref:?}, refs found: {refs:?}"
+        );
+    }
+}
+
+/// **Fourth real bug found by this suite (2026-08-27): the fixture's first
+/// transaction — a payment/debit of 316.00 narrated "PRCR/303213675227/S R
+/// TRADER 13:16" — was imported as a *credit*.
+///
+/// This fixture has no "Opening Bal"/"Op Bal" line anywhere in its extracted
+/// text (its transaction table starts mid-statement, on page 2 per the
+/// statement's own "Page :- 2" header field), so `extract_cosmos_
+/// transactions` had no known previous balance to diff the first row's
+/// balance movement against, and fell back to guessing direction from a
+/// narration-keyword list. That list hard-codes `nl.contains("prcr/")` as a
+/// credit indicator, but this statement's real "Withdrawals" column (verified
+/// directly against the fixture's extracted text: `316.00` sits at the same
+/// character offset as the "Withdrawals" heading, not "Deposits" — a
+/// fixed-width table where column position is unambiguous) shows PRCR/ rows
+/// can just as well be debits. Root cause fixed by classifying the seed row's
+/// direction from **which header column its amount's text actually starts
+/// under** (computed once from the header row, since both "Withdrawals" and
+/// "Deposits" are required substrings for Cosmos-header detection to even
+/// fire) instead of guessing from narration keywords — keywords are now only
+/// a fallback for the (here unreachable) case where those column offsets
+/// can't be found at all.
+///
+/// Note this bug survived `cosmos_co_operative_bank_pdf_reconciles_exactly_
+/// after_the_quote_operator_extraction_fix` above untouched: that test's
+/// reconciliation check compares each transaction's balance against
+/// `result.opening_balance`, but `prepend_opening_balance_row` *derives*
+/// `opening_balance` from the first real transaction's own (buggy)
+/// credit/debit assignment (`ob = balance - (credit - debit)`) whenever no
+/// opening-balance line was found in the text — exactly this fixture's case.
+/// That derivation is circular: it reconciles by construction no matter which
+/// direction the first row was assigned, so it can never catch a first-row
+/// direction bug. This test checks the first row's direction and amount
+/// directly against the source PDF instead.
+#[test]
+fn cosmos_first_transaction_is_a_debit_not_a_credit() {
+    let path = fixture("Cosmos Co-operative.pdf");
+    let result = parse_pdf_via_real_pipeline(&path, "Cosmos Co-operative.pdf");
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert!(!real.is_empty(), "expected at least one real transaction");
+
+    let first = real[0];
+    assert_eq!(
+        first.narration, "PRCR/303213675227/S R TRADER 13:16",
+        "unexpected first transaction, fixture may have changed: {first:?}"
+    );
+    assert_eq!(
+        first.debit,
+        Some(316.0),
+        "first transaction (a payment) must be a Debit of 316.00, got {first:?}"
+    );
+    assert_eq!(
+        first.credit, None,
+        "first transaction's Credit must be empty, got {first:?}"
+    );
+
+    // The very next few transactions are all real UPI-DR debits — confirm the
+    // fix didn't overcorrect and flip everything to debit regardless of
+    // actual direction.
+    assert_eq!(real[4].narration, "UPI-DR/303433640023/gpay-112140716");
+    assert_eq!(real[4].debit, Some(260.0));
+    assert_eq!(real[4].credit, None);
+
+    // The first UPI-CR (receipt) in the statement must still land as a
+    // Credit — confirms receipts weren't swapped to Debit as collateral
+    // damage of this fix.
+    let first_credit = real
+        .iter()
+        .find(|t| t.narration.starts_with("UPI-CR/"))
+        .expect("expected at least one UPI-CR transaction");
+    assert_eq!(first_credit.narration, "UPI-CR/303536153436/laad.shashikan");
+    assert_eq!(first_credit.credit, Some(200.0));
+    assert_eq!(first_credit.debit, None);
 }
 
 /// **Third real bug found by this suite, not fixed here** (same

@@ -539,6 +539,15 @@ fn extract_ref_from_narration(narr: &str) -> Option<String> {
 pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Option<ParseResult> {
     // ── Step 1: locate Cosmos header ─────────────────────────────────────────
     let mut hdr_idx = usize::MAX;
+    // Character offsets of the "Withdrawals" / "Deposits" column headings within
+    // the header line — this is a fixed-width text table (every row lines up on
+    // the same character columns), so these offsets double as the true column
+    // boundaries for every transaction row below. Used in Step 3 to resolve
+    // debit/credit for a row **by which column its amount actually sits under**,
+    // instead of guessing from narration keywords (see that step's comment for
+    // why the keyword guess alone is unreliable).
+    let mut wd_col: Option<usize> = None;
+    let mut dep_col: Option<usize> = None;
     for (i, row) in rows.iter().enumerate().take(50) {
         let line = row
             .iter()
@@ -554,6 +563,10 @@ pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Op
             && ll.contains("balance")
         {
             hdr_idx = i;
+            // Both substrings are ASCII, so byte offsets in the lowercased copy
+            // are identical to offsets in `line` itself.
+            wd_col = ll.find("withdrawal");
+            dep_col = ll.find("deposit");
             break;
         }
     }
@@ -565,11 +578,31 @@ pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Op
         return None;
     }
 
+    // Classify a transaction amount by which header column its text actually
+    // starts under (nearest of the two column headings wins). This is the
+    // authoritative signal — it reads the same column position a human would
+    // look at — used when there is no previous balance to diff against (the
+    // opening-balance seed row, or a row with a completely unparseable prior
+    // balance).
+    let classify_by_column = |amt_col: usize| -> Option<bool> {
+        match (wd_col, dep_col) {
+            (Some(w), Some(d)) => {
+                let dw = (amt_col as isize - w as isize).unsigned_abs();
+                let dd = (amt_col as isize - d as isize).unsigned_abs();
+                Some(dd < dw) // true = credit (Deposits column), false = debit (Withdrawals)
+            }
+            _ => None,
+        }
+    };
+
     // ── Step 2: parse transaction rows ────────────────────────────────────────
     // Structure holds txnVal temporarily until direction is resolved in Step 3.
     struct Pending {
         t: Transaction,
         txn_val: f64,
+        /// Character offset of the amount's first byte within its row's `line`
+        /// — compared against `wd_col`/`dep_col` in Step 3.
+        amt_col: usize,
     }
 
     let mut pending: Vec<Pending> = Vec::new();
@@ -611,10 +644,12 @@ pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Op
         // undershoot on a typographic-dash date and leak trailing date
         // bytes into `middle`, not just risk an unsafe slice.
         let date_part_len = floor_char_boundary(&line, date_orig_len + 1);
-        let middle = if bal_raw_start > date_part_len {
-            line[date_part_len..bal_raw_start].trim().to_string()
+        let (middle, middle_start) = if bal_raw_start > date_part_len {
+            let raw = &line[date_part_len..bal_raw_start];
+            let leading_ws = raw.len() - raw.trim_start().len();
+            (raw.trim().to_string(), date_part_len + leading_ws)
         } else {
-            String::new()
+            (String::new(), date_part_len)
         };
         let ml = middle.to_lowercase();
 
@@ -657,7 +692,11 @@ pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Op
         t.balance = Some(balance);
         t.bank_name = "Cosmos Co-operative Bank".to_string();
         // debit/credit resolved in Step 3
-        pending.push(Pending { t, txn_val });
+        pending.push(Pending {
+            t,
+            txn_val,
+            amt_col: middle_start + txn_idx,
+        });
     }
 
     if pending.len() < 2 {
@@ -681,28 +720,26 @@ pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Op
             || nl.contains("reversal")
             || nl.contains("deposit")
     };
-    let is_cosmos_debit = |nl: &str| -> bool {
-        nl.contains("upi-dr")
-            || nl.contains("upi dr")
-            || (nl.contains("neft") && nl.contains("dr"))
-            || nl.contains("atm")
-            || nl.contains("cwdr")
-            || nl.contains("cash w/d")
-            || nl.contains("cash w-d")
-            || nl.contains("withdrawal")
-            || nl.contains("payment to")
-    };
-
     let mut prev_bal = op_balance;
 
-    // Seed prevBal when opening balance unknown
+    // Seed prevBal when opening balance unknown. Column position (which of
+    // Withdrawals/Deposits the amount actually sits under) is the authoritative
+    // signal here — narration keywords are a guess and this codebase's own
+    // "PRCR/" keyword is a confirmed false positive: real Cosmos statements
+    // print ordinary Withdrawals-column transactions under a "PRCR/<UTR>/..."
+    // narration (verified against "Cosmos Co-operative.pdf"'s first
+    // transaction, a payment/debit that `is_cosmos_credit`'s "prcr/" branch
+    // was misreading as a receipt/credit), so keyword matching alone cannot be
+    // trusted to seed the very first row, which has no prior balance to
+    // cross-check against. Fall back to the keyword guess only when the header
+    // didn't yield usable column offsets.
     if prev_bal.is_none() {
         let seed = &pending[0];
-        let nl = seed.t.narration.to_lowercase();
-        if is_cosmos_credit(&nl) {
-            prev_bal = Some((seed.t.balance.unwrap() - seed.txn_val) * 100.0 / 100.0);
-            prev_bal = prev_bal.map(|v| (v * 100.0).round() / 100.0);
-        } else if is_cosmos_debit(&nl) {
+        let is_credit = classify_by_column(seed.amt_col)
+            .unwrap_or_else(|| is_cosmos_credit(&seed.t.narration.to_lowercase()));
+        if is_credit {
+            prev_bal = Some(((seed.t.balance.unwrap() - seed.txn_val) * 100.0).round() / 100.0);
+        } else {
             prev_bal = Some(((seed.t.balance.unwrap() + seed.txn_val) * 100.0).round() / 100.0);
         }
     }
@@ -714,8 +751,9 @@ pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Op
         let tv = p.txn_val;
 
         if prev_bal.is_none() {
-            let nl = p.t.narration.to_lowercase();
-            if is_cosmos_credit(&nl) {
+            let is_credit = classify_by_column(p.amt_col)
+                .unwrap_or_else(|| is_cosmos_credit(&p.t.narration.to_lowercase()));
+            if is_credit {
                 p.t.credit = Some(tv);
             } else {
                 p.t.debit = Some(tv);
