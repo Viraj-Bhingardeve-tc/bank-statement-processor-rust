@@ -37,10 +37,19 @@ const EXCEL_MAX: f64 = 54_789.0;
 
 // ── Compiled regex patterns (lazily initialised) ──────────────────────────────
 
-/// Strip trailing `"HH:MM"` or `"HH:MM:SS"` time component and everything after.
-/// Handles: `"20/01/2026 18:36:14"` → `"20/01/2026"`.
+/// Strip trailing `"HH:MM"` or `"HH:MM:SS"` time component and everything
+/// after. Handles both a space-separated time — `"20/01/2026 18:36:14"` →
+/// `"20/01/2026"` — and a time glued directly onto the date with no
+/// separator at all — `"04-04-202410:02:30"` → `"04-04-2024"` (seen in
+/// real lopdf-extracted PDF text for Union Bank, whose original PDF layout
+/// places the date and time in adjacent table cells with no space between
+/// them once flattened to a single-line text stream). The leading `\s*`
+/// (not `\s+`) is safe for a genuine date-only string: no valid date
+/// contains a `:`, so the `\d{1,2}:\d{2}` requirement never matches
+/// anywhere inside one regardless of whether whitespace is required before
+/// it — this only ever fires when a real time component follows.
 static RE_TIME_SUFFIX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\s+\d{1,2}:\d{2}(?::\d{2})?.*$").unwrap());
+    Lazy::new(|| Regex::new(r"\s*\d{1,2}:\d{2}(?::\d{2})?.*$").unwrap());
 
 /// DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY (numeric month, any common separator).
 static RE_DDMMYYYY: Lazy<Regex> =

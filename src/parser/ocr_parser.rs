@@ -99,6 +99,30 @@ fn extract_amounts(s: &str) -> Vec<AmountMatch> {
         if (1900.0..=2100.0).contains(&v) && raw.len() == 4 {
             continue;
         }
+        // The bare-digit (no decimal point) branch of AMT_RE only requires a
+        // regex `\b` before the run — which fires on ANY non-word character,
+        // not just whitespace, so a merchant/UTR ID glued directly onto a
+        // word with a bare '.' (e.g. a payment gateway's own txn id
+        // "cfmer.33421130" inside "UPIAR/.../Cashfree/ICIC/cfmer.33421130",
+        // seen verbatim in a real Union Bank fixture) gets matched as an
+        // 8-digit "amount" — passing the caller's `int_digit_count <= 8`
+        // filter and getting treated as a real transaction amount even
+        // though the line's actual amount ("40.00") is a separate token.
+        // Every genuine amount in this codebase's own flattened single-line
+        // text (see `preprocess_multiline`'s doc comment) is its own
+        // whitespace/line-start-delimited token, so require that here too —
+        // for this branch only; the decimal branch already can't start mid-
+        // word because \b never fires between two adjacent word characters
+        // (a letter directly followed by a digit).
+        if !raw.contains('.') {
+            let preceded_by_word_char = s[..m.start()]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace());
+            if preceded_by_word_char {
+                continue;
+            }
+        }
         out.push(AmountMatch {
             val: v,
             raw,
@@ -251,8 +275,27 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
     };
 
     // 4. Main extraction loop.
+    //
+    // Debit/credit direction is decided from balance *movement*, which only
+    // works if rows are visited in true chronological order. Many real PDFs
+    // (e.g. BOB) list transactions newest-first — so this loop is split into
+    // two passes: pass 1 builds every row (date/narration/reference/balance)
+    // in the PDF's own display order and stashes each row's raw amount
+    // candidates + Dr/Cr markers in `amt_infos` (same index as `txns`)
+    // without yet deciding debit vs. credit; pass 2 (below, after the loop)
+    // walks the rows in *chronological* order — reversed from display order
+    // when the file turns out to be newest-first — so `prev_balance` is
+    // always the balance that actually preceded this row in time, then
+    // writes the decided debit/credit back into `txns` at its original
+    // (display-order) index. This keeps output ordering identical to before
+    // while fixing the direction inference for reverse-chronological PDFs.
+    struct AmtInfo {
+        txn_amts: Vec<f64>,
+        dr_marker: bool,
+        cr_marker: bool,
+    }
     let mut txns: Vec<Transaction> = Vec::new();
-    let mut prev_balance: Option<f64> = None;
+    let mut amt_infos: Vec<AmtInfo> = Vec::new();
     let mut txn_counter = 0usize;
 
     for line in &lines {
@@ -380,51 +423,12 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
                     .any(|w| w.trim_end_matches('.') == "CR")
             };
 
-            let (debit, credit) = if txn_amts.len() == 1 {
-                let amt = txn_amts[0].val;
-                if dr_marker {
-                    (Some(amt), None)
-                } else if cr_marker {
-                    (None, Some(amt))
-                } else if let Some(prev) = prev_balance {
-                    let diff = balance - prev;
-                    if (diff - amt).abs() < amt * 0.02 {
-                        (None, Some(amt)) // balance went UP → credit
-                    } else if (diff + amt).abs() < amt * 0.02 {
-                        (Some(amt), None) // balance went DOWN → debit
-                    } else {
-                        (None, Some(amt)) // best guess: credit
-                    }
-                } else {
-                    (None, Some(amt)) // first txn → credit
-                }
-            } else if txn_amts.len() >= 2 {
-                let a = txn_amts[0].val;
-                let b = txn_amts.last().unwrap().val;
-                if let Some(prev) = prev_balance {
-                    let diff = balance - prev;
-                    let debit = if diff < 0.0 {
-                        Some(if a > 0.0 { a } else { b })
-                    } else {
-                        None
-                    };
-                    let credit = if diff > 0.0 {
-                        Some(if b > 0.0 { b } else { a })
-                    } else {
-                        None
-                    };
-                    (debit, credit)
-                } else {
-                    (
-                        if a > 0.0 { Some(a) } else { None },
-                        if b > 0.0 { Some(b) } else { None },
-                    )
-                }
-            } else {
-                (None, None)
-            };
+            amt_infos.push(AmtInfo {
+                txn_amts: txn_amts.iter().map(|a| a.val).collect(),
+                dr_marker,
+                cr_marker,
+            });
 
-            prev_balance = Some(balance);
             let nd = normalize_transaction_date(&date_str);
 
             txn_counter += 1;
@@ -433,12 +437,7 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
             t.date_ts = nd.ts;
             t.narration = narration;
             t.reference = reference;
-            t.debit = debit
-                .filter(|&v| v > 0.0)
-                .map(|v| (v * 100.0).round() / 100.0);
-            t.credit = credit
-                .filter(|&v| v > 0.0)
-                .map(|v| (v * 100.0).round() / 100.0);
+            // debit/credit decided in the chronological-order second pass below
             t.balance = Some(balance);
             txns.push(t);
         } else {
@@ -454,8 +453,112 @@ pub fn parse_ocr_text(raw_text: &str, file_name: &str) -> ParseResult {
         }
     }
 
+    // 4b. Second pass: decide debit/credit in true chronological order (see
+    // the doc comment above `AmtInfo`). Detect direction by comparing the
+    // first and last row's own date_ts (ignoring rows with an unparsed/zero
+    // date, which normalize_transaction_date already excludes from
+    // ordering); a strictly-decreasing overall trend means the source PDF
+    // lists newest-first, so chronological order is the *reverse* of
+    // display order.
+    let descending = {
+        let dated: Vec<i64> = txns.iter().map(|t| t.date_ts).filter(|&ts| ts != 0).collect();
+        match (dated.first(), dated.last()) {
+            (Some(&first), Some(&last)) => first > last,
+            _ => false,
+        }
+    };
+    let chrono_order: Vec<usize> = if descending {
+        (0..txns.len()).rev().collect()
+    } else {
+        (0..txns.len()).collect()
+    };
+    let mut prev_balance: Option<f64> = None;
+    for idx in chrono_order {
+        let balance = txns[idx].balance.unwrap_or(0.0);
+        let info = &amt_infos[idx];
+        let (debit, credit) = if info.txn_amts.len() == 1 {
+            let amt = info.txn_amts[0];
+            if info.dr_marker {
+                (Some(amt), None)
+            } else if info.cr_marker {
+                (None, Some(amt))
+            } else if let Some(prev) = prev_balance {
+                let diff = balance - prev;
+                if (diff - amt).abs() < amt * 0.02 {
+                    (None, Some(amt)) // balance went UP → credit
+                } else if (diff + amt).abs() < amt * 0.02 {
+                    (Some(amt), None) // balance went DOWN → debit
+                } else {
+                    (None, Some(amt)) // best guess: credit
+                }
+            } else {
+                (None, Some(amt)) // first txn → credit
+            }
+        } else if info.txn_amts.len() >= 2 {
+            let a = info.txn_amts[0];
+            let b = *info.txn_amts.last().unwrap();
+            if let Some(prev) = prev_balance {
+                let diff = balance - prev;
+                // Narration text can smuggle extra numeric-looking tokens
+                // into `txn_amts` alongside the real transaction amount —
+                // e.g. an SMS short-code from marketing boilerplate glued
+                // onto the last transaction of a page (seen verbatim in a
+                // real Union Bank fixture: "...SMS <ULOAN> TO 56161", where
+                // 56161 is a shortcode, not a rupee figure). Blindly
+                // trusting position (first vs. last) can then pick the
+                // spurious one. Prefer whichever candidate's magnitude
+                // actually explains the observed balance movement; fall
+                // back to the original position convention only when no
+                // candidate does (preserves prior behavior for genuine
+                // two-column debit/credit layouts).
+                let best = info.txn_amts.iter().copied().min_by(|&x, &y| {
+                    (diff.abs() - x)
+                        .abs()
+                        .partial_cmp(&(diff.abs() - y).abs())
+                        .unwrap()
+                });
+                let matched = best.filter(|&v| (diff.abs() - v).abs() < v.max(1.0) * 0.02);
+                let chosen = matched.unwrap_or(if diff < 0.0 { a } else { b });
+                let debit = if diff < 0.0 { Some(chosen) } else { None };
+                let credit = if diff > 0.0 { Some(chosen) } else { None };
+                (debit, credit)
+            } else {
+                // No prior balance to disambiguate direction from (first
+                // transaction in the file). Never report both debit AND
+                // credit for one row (an invariant real callers rely on —
+                // see e.g. `kotak_narrow_layout_...`'s "NEITHER/BOTH set"
+                // assertions) — take the first candidate and apply the same
+                // "unknown direction on the very first row → assume credit"
+                // default the single-amount branch above uses.
+                (None, Some(a))
+            }
+        } else {
+            (None, None)
+        };
+
+        txns[idx].debit = debit
+            .filter(|&v| v > 0.0)
+            .map(|v| (v * 100.0).round() / 100.0);
+        txns[idx].credit = credit
+            .filter(|&v| v > 0.0)
+            .map(|v| (v * 100.0).round() / 100.0);
+        prev_balance = Some(balance);
+    }
+
     // 5. Post-processing.
-    let op_balance = compute_prev_balances(&mut txns, None);
+    // `compute_prev_balances` walks `txns` in index order assuming it's
+    // chronological — true for display order unless this file turned out to
+    // be newest-first, in which case feed it the reverse so its own
+    // prev_balance stamping (and mismatch logging) lines up the same way
+    // the debit/credit pass above did.
+    let op_balance = if descending {
+        txns.reverse();
+        let ob = compute_prev_balances(&mut txns, None);
+        txns.reverse();
+        ob
+    } else {
+        compute_prev_balances(&mut txns, None)
+    };
 
     // Bank detection from full text + header text.
     let narrations: Vec<&str> = txns.iter().map(|t| t.narration.as_str()).collect();
@@ -606,13 +709,57 @@ pub fn preprocess_multiline(text: &str) -> String {
     let mut cur_date: Option<String> = None;
     let mut cur_narr: Vec<String> = Vec::new();
     let mut cur_amts: Vec<f64> = Vec::new();
+    let mut cur_balance: Option<f64> = None;
     let mut cur_ref: Option<String> = None;
+
+    // True when the line is a running-balance figure explicitly marked with
+    // a trailing "Cr"/"Dr" suffix glued directly onto the number with no
+    // space (e.g. BOB: "22,95,856.02Cr"). BOB and similarly-generated bank
+    // PDFs never mark the transaction's own debit/credit amount this way —
+    // only the balance column — so this is a reliable, position-independent
+    // signal for "this specific line is the balance," letting `flush` below
+    // always place it last regardless of which order the source PDF's flat
+    // text stream actually emitted narration/amount/balance lines in.
+    // Verified against real fixture text: BOB emits Balance *before*
+    // Narration+Amount for a credit-only row, but Amount *before* Balance
+    // for a debit-only row — there is no fixed order to rely on without
+    // this marker, and without stripping the suffix first, `parse_amt_line`
+    // fails to parse the trailing letters and the whole line — the balance
+    // itself — was silently dropped, which is what made every BOB
+    // transaction fail `flush`'s "amts.len() < 2" minimum and produce zero
+    // transactions even after real (non-garbage) text extraction.
+    let balance_with_suffix = |line: &str| -> Option<f64> {
+        let l = line.trim();
+        if l.len() < 3 {
+            return None;
+        }
+        let lower = l.to_lowercase();
+        if !(lower.ends_with("cr") || lower.ends_with("dr")) {
+            return None;
+        }
+        let body = l[..l.len() - 2].trim();
+        if body.is_empty() || !body.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.') {
+            return None;
+        }
+        body.replace(',', "")
+            .parse::<f64>()
+            .ok()
+            .filter(|&v| v > 0.0 && v < 2e9)
+    };
 
     let flush = |date: &str,
                  narrs: &[String],
                  amts: &[f64],
+                 balance: Option<f64>,
                  refnum: &Option<String>,
                  out: &mut Vec<String>| {
+        // Balance (if separately detected via its Cr/Dr suffix) always goes
+        // last, regardless of the order its source line appeared in —
+        // `parse_ocr_text`'s "last amount = balance" convention requires it.
+        let mut amts: Vec<f64> = amts.to_vec();
+        if let Some(b) = balance {
+            amts.push(b);
+        }
         if amts.len() < 2 {
             return;
         } // need txn amount + balance minimum
@@ -644,15 +791,84 @@ pub fn preprocess_multiline(text: &str) -> String {
         }
     };
 
+    // Marketing/legal/disclaimer boilerplate that real bank PDFs repeat on
+    // every page footer — confirmed verbatim in real fixtures (Union Bank's
+    // "SMS <ULOAN> TO 56161" footer, IDFC First's fraud-warning block, SBI's
+    // "Please do not share..." block, IDBI's "Contents of this statement...").
+    // Without this, `preprocess_multiline`'s narration-continuation logic
+    // (any non-date, non-amount, non-reference line gets appended to the
+    // still-open transaction's narration) glues this text onto whichever
+    // transaction happens to be open when the footer appears — corrupting
+    // narration, and previously even corrupting amounts (a footer phone
+    // number or SMS short-code could be misread as an extra transaction
+    // amount by `extract_amounts`'s bare-digit branch downstream in
+    // `parse_ocr_text`, see that function's `AmtInfo` handling). Keyed on
+    // substrings that appear in this genre of boilerplate but never in a
+    // real transaction narration (which is compact and abbreviation-heavy,
+    // not prose sentences), so this generalizes across banks rather than
+    // hard-coding one bank's exact wording.
+    const FOOTER_BOILERPLATE_MARKERS: &[&str] = &[
+        "for any queries",
+        "customer service",
+        "customers outside india",
+        "system generated output",
+        "requires no signature",
+        "requested to immediately notify",
+        "avail our loan",
+        "missed call",
+        "important information",
+        "important safety tips",
+        "grievance",
+        "nodal officer",
+        "commonly used abbreviation",
+        "deposit insurance",
+        "dicgc",
+        "phishing",
+        "fraudulent",
+        "never ask",
+        "never share your card",
+        "never sign blank cheque",
+        "end of the statement",
+        "end of statement",
+        "legends for transactions",
+        "legends used in",
+        "unless the constituent notifies",
+        "value date is the effective",
+        "closing balance displayed",
+        "contact the branch",
+        "toll-free",
+        "toll free",
+        "welcome letter",
+        "www.dicgc.org",
+        "important message",
+        "found the account correct",
+        "suspicious device",
+        "blank cheque",
+        "call us at",
+        "contact us",
+        "escalate your concern",
+        "nodaldesk@",
+        "banker@",
+        "does not send requests",
+        "sensitive financial information",
+        "brought forward",
+    ];
+    let is_footer_boilerplate = |line: &str| -> bool {
+        let l = line.to_lowercase();
+        FOOTER_BOILERPLATE_MARKERS.iter().any(|m| l.contains(m))
+    };
+
     // Noise patterns that never belong in a narration
     let is_noise_line = |line: &str| -> bool {
         let l = line.to_lowercase();
         (l.contains("page") && l.contains("of"))
+            || l.starts_with("page no")   // "Page No2", "Page No80", …
             || l.starts_with("11111")     // BOM channel code
             || l.contains("?identity")    // lopdf font error
             || l.starts_with("statement for account")
             || l.starts_with("idbi bank")
             || l.starts_with("our toll")
+            || is_footer_boilerplate(line)
             || l.len() <= 2
     };
 
@@ -667,16 +883,32 @@ pub fn preprocess_multiline(text: &str) -> String {
         // Try to parse line as a date
         let nd = normalize_transaction_date(line);
         if nd.valid {
+            let group_has_content =
+                !cur_narr.is_empty() || !cur_amts.is_empty() || cur_balance.is_some();
+            if cur_date.is_some() && !group_has_content {
+                // A second date line appeared before any narration/amount/
+                // balance content was collected — this is a second date
+                // *column* for the same still-open transaction (e.g. BOB's
+                // Txn Date + Value Date, each on its own line), not a new
+                // transaction starting. Keep the first date already
+                // captured (Txn Date — the conventional "transaction date"
+                // for statement purposes) and ignore this one, rather than
+                // flushing an empty group and silently losing the first date.
+                continue;
+            }
             // Flush previous transaction group
             if let Some(ref date) = cur_date {
-                flush(date, &cur_narr, &cur_amts, &cur_ref, &mut out);
+                flush(date, &cur_narr, &cur_amts, cur_balance, &cur_ref, &mut out);
             }
             cur_date = Some(nd.display.clone());
             cur_narr.clear();
             cur_amts.clear();
+            cur_balance = None;
             cur_ref = None;
         } else if cur_date.is_some() {
-            if is_pure_integer(line) {
+            if let Some(bal) = balance_with_suffix(line) {
+                cur_balance = Some(bal);
+            } else if is_pure_integer(line) {
                 // Reference number line — keep the first one seen for this
                 // transaction (matches this codebase's other "first
                 // non-empty wins" reference conventions, e.g.
@@ -697,7 +929,7 @@ pub fn preprocess_multiline(text: &str) -> String {
 
     // Flush the last group
     if let Some(ref date) = cur_date {
-        flush(date, &cur_narr, &cur_amts, &cur_ref, &mut out);
+        flush(date, &cur_narr, &cur_amts, cur_balance, &cur_ref, &mut out);
     }
 
     out.join("\n")
