@@ -492,6 +492,18 @@ fn cosmos_co_operative_bank_pdf_reconciles_exactly_after_the_quote_operator_extr
         );
     }
 
+    // At least the great majority of real rows are UPI/IMPS/PRCR (all
+    // slash-delimited with a real UTR) — confirm Reference is now actually
+    // populated for them instead of uniformly empty.
+    let with_reference = real.iter().filter(|t| !t.reference.is_empty()).count();
+    assert!(
+        with_reference >= 60,
+        "expected at least 60/{} real transactions to have a non-empty Reference \
+         (UPI/IMPS/PRCR UTR or Chq.No.), got {}",
+        real.len(),
+        with_reference
+    );
+
     // Full balance-continuity reconciliation across the entire real
     // statement: every transaction's own balance must equal the previous
     // balance plus its credit minus its debit, exactly (this file's own
@@ -529,8 +541,14 @@ fn cosmos_co_operative_bank_pdf_reconciles_exactly_after_the_quote_operator_extr
 }
 
 /// **Fourth real bug found by this suite (2026-08-27): the fixture's first
-/// transaction — a payment/debit of 316.00 narrated "PRCR/303213675227/S R
-/// TRADER 13:16" — was imported as a *credit*.
+/// transaction — a payment/debit of 316.00 originally narrated
+/// "PRCR/303213675227/S R TRADER 13:16" — was imported as a *credit*.
+///
+/// (Narration/Reference split note, 2026-08-28: this doc comment and the
+/// assertions below predate the `extract_cosmos_ref` fix that pulls the
+/// UTR segment out into `reference` — narration is now "PRCR/S R TRADER
+/// 13:16" with reference "303213675227"; the debit/credit direction bug
+/// this test targets is unrelated and unaffected by that fix.)
 ///
 /// This fixture has no "Opening Bal"/"Op Bal" line anywhere in its extracted
 /// text (its transaction table starts mid-statement, on page 2 per the
@@ -575,8 +593,12 @@ fn cosmos_first_transaction_is_a_debit_not_a_credit() {
 
     let first = real[0];
     assert_eq!(
-        first.narration, "PRCR/303213675227/S R TRADER 13:16",
+        first.narration, "PRCR/S R TRADER 13:16",
         "unexpected first transaction, fixture may have changed: {first:?}"
+    );
+    assert_eq!(
+        first.reference, "303213675227",
+        "first transaction's UTR must land in Reference, not stay glued into narration: {first:?}"
     );
     assert_eq!(
         first.debit,
@@ -591,7 +613,8 @@ fn cosmos_first_transaction_is_a_debit_not_a_credit() {
     // The very next few transactions are all real UPI-DR debits — confirm the
     // fix didn't overcorrect and flip everything to debit regardless of
     // actual direction.
-    assert_eq!(real[4].narration, "UPI-DR/303433640023/gpay-112140716");
+    assert_eq!(real[4].narration, "UPI-DR/gpay-112140716");
+    assert_eq!(real[4].reference, "303433640023");
     assert_eq!(real[4].debit, Some(260.0));
     assert_eq!(real[4].credit, None);
 
@@ -602,7 +625,8 @@ fn cosmos_first_transaction_is_a_debit_not_a_credit() {
         .iter()
         .find(|t| t.narration.starts_with("UPI-CR/"))
         .expect("expected at least one UPI-CR transaction");
-    assert_eq!(first_credit.narration, "UPI-CR/303536153436/laad.shashikan");
+    assert_eq!(first_credit.narration, "UPI-CR/laad.shashikan");
+    assert_eq!(first_credit.reference, "303536153436");
     assert_eq!(first_credit.credit, Some(200.0));
     assert_eq!(first_credit.debit, None);
 }

@@ -183,6 +183,27 @@ impl AppState {
     }
 }
 
+/// Mask an account number for display: `XXXX` + the last 4 alphanumeric
+/// characters (e.g. "1234567890123456" -> "XXXX3456"), or bare `XXXX` when
+/// no account number could be extracted at all. Never returns an empty
+/// string — every UI surface that shows an account number should route
+/// through this instead of displaying the raw (or missing) value, so the
+/// full number stays available internally (state/export/DB) while only the
+/// masked form reaches the screen.
+pub fn mask_account_no(acct: &str) -> String {
+    let digits: String = acct.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if digits.is_empty() {
+        "XXXX".to_string()
+    } else {
+        let last4: String = {
+            let mut rev: Vec<char> = digits.chars().rev().take(4).collect();
+            rev.reverse();
+            rev.into_iter().collect()
+        };
+        format!("XXXX{}", last4)
+    }
+}
+
 /// Format a float in Indian numbering system with 2 decimal places.
 pub fn fmt_inr(amount: f64) -> String {
     let abs = amount.abs();
@@ -266,5 +287,31 @@ mod tests {
         // than a batch folder run — the summary must still say something
         // rather than silently looking like nothing happened.
         assert_ne!(batch_session_summary(0, 5, 0, 5), "");
+    }
+
+    // ── mask_account_no ───────────────────────────────────────────────────────
+
+    #[test]
+    fn mask_account_no_shows_last_4_digits() {
+        assert_eq!(mask_account_no("1234567890123456"), "XXXX3456");
+        assert_eq!(mask_account_no("9876543210"), "XXXX3210");
+    }
+
+    #[test]
+    fn mask_account_no_never_blank_when_unavailable() {
+        assert_eq!(mask_account_no(""), "XXXX");
+        assert_eq!(mask_account_no("   "), "XXXX");
+    }
+
+    #[test]
+    fn mask_account_no_short_number_uses_whatever_digits_exist() {
+        // Fewer than 4 characters: show them all rather than padding or failing.
+        assert_eq!(mask_account_no("12"), "XXXX12");
+    }
+
+    #[test]
+    fn mask_account_no_ignores_stray_whitespace_and_punctuation() {
+        assert_eq!(mask_account_no("1234 5678 9012"), "XXXX9012");
+        assert_eq!(mask_account_no(" 3210 "), "XXXX3210");
     }
 }

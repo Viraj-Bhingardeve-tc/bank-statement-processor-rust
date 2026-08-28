@@ -374,7 +374,7 @@ fn build_txn_rows(txns: &[&parser::Transaction]) -> Vec<TxnRow> {
             let ledger = export::excel::posting_ledger(t);
             TxnRow {
                 bank_name: SharedString::from(t.bank_name.as_str()),
-                account_no: SharedString::from(t.account_no.as_str()),
+                account_no: SharedString::from(ui::mask_account_no(&t.account_no).as_str()),
                 date: SharedString::from(t.date.as_str()),
                 narration: SharedString::from(narr.as_str()),
                 ref_no: SharedString::from(t.reference.as_str()),
@@ -993,7 +993,8 @@ fn push_summary_extras(h: &AppWindow, txns: &[parser::Transaction]) {
                 acc_txns.iter().filter(|t| !t.is_opening_balance).collect();
             non_ob.sort_by_key(|t| t.date_ts);
             let closing = non_ob.iter().rev().find_map(|t| t.balance);
-            let label = [bank.as_str(), acct.as_str()]
+            let masked_acct = ui::mask_account_no(acct);
+            let label = [bank.as_str(), masked_acct.as_str()]
                 .iter()
                 .filter(|s| !s.is_empty())
                 .cloned()
@@ -1470,7 +1471,7 @@ fn apply_parse_result(
             };
             TxnRow {
                 bank_name: SharedString::from(t.bank_name.as_str()),
-                account_no: SharedString::from(t.account_no.as_str()),
+                account_no: SharedString::from(ui::mask_account_no(&t.account_no).as_str()),
                 date: SharedString::from(t.date.as_str()),
                 narration: SharedString::from(narr.as_str()),
                 ref_no: SharedString::from(t.reference.as_str()),
@@ -1532,7 +1533,9 @@ fn apply_parse_result(
     h.set_dash_debits_plain(SharedString::from(ui::fmt_inr(total_dr).as_str()));
     h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
     h.set_dash_vendors(SharedString::from("\u{2014}"));
-    h.set_dash_account_no(SharedString::from(result.account_no.as_str()));
+    h.set_dash_account_no(SharedString::from(
+        ui::mask_account_no(&result.account_no).as_str(),
+    ));
     h.set_dash_period(SharedString::from(period.as_str()));
     h.set_dash_credit_count(SharedString::from(credit_cnt.to_string().as_str()));
     h.set_dash_debit_count(SharedString::from(debit_cnt.to_string().as_str()));
@@ -1799,7 +1802,7 @@ fn record_batch_success(
     bp.batch_results.push(ui::BatchFileResult {
         file: file_name.chars().take(35).collect::<String>(),
         bank: r_bank.clone(),
-        account: r_account.clone(),
+        account: ui::mask_account_no(&r_account),
         period,
         txns: r_cnt,
         ok: true,
@@ -1874,7 +1877,7 @@ fn record_batch_failure(bp: &mut ui::BatchProgress, file_name: &str, err_msg: &s
     bp.batch_results.push(ui::BatchFileResult {
         file: file_name.chars().take(35).collect::<String>(),
         bank: String::new(),
-        account: String::new(),
+        account: ui::mask_account_no(""),
         period: String::new(),
         txns: 0,
         ok: false,

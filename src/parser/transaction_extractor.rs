@@ -811,34 +811,87 @@ pub fn extract_cosmos_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Op
 }
 
 /// Extract Cosmos narration and reference from the text portion before the txn amount.
-/// Chq.No. = trailing 4–7 digit integer (longer runs stay as narration text).
+///
+/// Two reference shapes, tried in order:
+///
+/// 1. **UPI/NEFT/IMPS/PRCR/ATM-style UTR**: these narrations are
+///    slash-delimited (`PRCR/303213675227/S R TRADER 13:16`,
+///    `UPI-DR/303433640023/gpay-112140716`,
+///    `0191/ATM/XXXXXX1775CWDR/3037184018`) with the actual UTR/transaction
+///    ID sitting in its own segment as a bare 6–16 digit run. Previously
+///    this whole string was kept as narration verbatim and Reference was
+///    left empty — a real bug (2026-08-28): every UPI/IMPS/PRCR row in a
+///    real "Cosmos Co-operative.pdf" statement showed no Reference at all.
+///    Fixed by pulling that digit-only segment out into `reference` and
+///    rejoining the remaining segments (transaction-type prefix + party/
+///    description) with `/` as the narration — e.g. `PRCR/S R TRADER
+///    13:16`, `UPI-DR/gpay-112140716`. Narration stays meaningful (keeps
+///    the prefix identifying UPI-DR/UPI-CR/PRCR/etc. and the party/handle);
+///    Reference gets the actual, non-redundant transaction ID.
+/// 2. **Cheque/bank-collection reference**: no slash, but a standalone
+///    4–7 digit token appears somewhere in the text — Cosmos's own
+///    "Chq.No." column (`JAYANTILAL AND COMPANY   7311` → ref `7311`) and
+///    unlabeled bank-collection rows (`BY   3256 HDFC AND` → ref `3256`)
+///    both take this shape. The token is pulled out of narration wherever
+///    it sits, not just at the end.
+///
+/// If neither shape matches (e.g. Cosmos's own NEFT rows, which this
+/// statement's layout truncates to `NEFT:ASPEN FOODS PVT LTD:ICIC` with no
+/// reference number surviving in the source text at all), narration is
+/// left as-is and reference stays empty — there is genuinely nothing to
+/// extract.
 fn extract_cosmos_ref(text_part: &str) -> (String, String) {
-    // Find trailing 4-7 digit integer separated by whitespace
-    let re_end: Option<(usize, &str)> = {
-        let words: Vec<&str> = text_part.split_whitespace().collect();
-        if let Some(last) = words.last() {
-            if last.len() >= 4 && last.len() <= 7 && last.chars().all(|c| c.is_ascii_digit()) {
-                let trailing_start = text_part.rfind(last).unwrap();
-                Some((trailing_start, last))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
+    let is_ref_digits =
+        |s: &str| (6..=16).contains(&s.len()) && s.chars().all(|c| c.is_ascii_digit());
 
-    if let Some((pos, chq)) = re_end {
-        let narr = text_part[..pos].trim().to_string();
-        let narr = if narr.is_empty() {
+    // 1) Slash-delimited UTR/transaction-ID segment.
+    if text_part.contains('/') {
+        let segments: Vec<&str> = text_part.split('/').collect();
+        if segments.len() > 1 {
+            if let Some(idx) = segments.iter().position(|s| is_ref_digits(s)) {
+                let reference = segments[idx].to_string();
+                let rest: Vec<&str> = segments
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .map(|(_, s)| *s)
+                    .collect();
+                let narr = rest.join("/").trim().to_string();
+                let narr = if narr.is_empty() {
+                    text_part.to_string()
+                } else {
+                    narr
+                };
+                return (narr, reference);
+            }
+        }
+    }
+
+    // 2) Standalone 4–7 digit cheque/collection reference token, wherever
+    //    it sits in the text (Cosmos's own "Chq.No." column, or an
+    //    unlabeled bank-collection reference).
+    let words: Vec<&str> = text_part.split_whitespace().collect();
+    if let Some((wi, chq)) = words
+        .iter()
+        .enumerate()
+        .find(|(_, w)| w.len() >= 4 && w.len() <= 7 && w.chars().all(|c| c.is_ascii_digit()))
+    {
+        let narr = words
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != wi)
+            .map(|(_, s)| *s)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let narr = if narr.trim().is_empty() {
             text_part.to_string()
         } else {
             narr
         };
-        (narr, chq.to_string())
-    } else {
-        (text_part.trim().to_string(), String::new())
+        return (narr, chq.to_string());
     }
+
+    (text_part.trim().to_string(), String::new())
 }
 
 // ── Kotak "narrow" e-statement PDF layout ─────────────────────────────────────
@@ -1192,14 +1245,16 @@ mod tests {
     }
 
     #[test]
-    fn cosmos_long_digits_stay_in_narration() {
-        // 12+ digit UTR stays in narration — not extracted as reference
-        let (narr, chq) = extract_cosmos_ref("UPI-DR/305561534108/AMAZON");
-        assert!(
-            chq.is_empty() || chq.len() <= 7,
-            "long digit run should not be chq ref"
-        );
-        let _ = narr; // consumed to suppress warning
+    fn cosmos_slash_delimited_utr_extracted_as_reference() {
+        // Real bug (2026-08-28): this used to keep the 12-digit UTR glued
+        // into narration and leave Reference empty for every UPI/NEFT/IMPS/
+        // PRCR row in a real Cosmos statement. The UTR segment must now be
+        // pulled into `reference`, and narration must keep the meaningful
+        // prefix + party text without the raw digit run mixed in.
+        let (narr, reference) = extract_cosmos_ref("UPI-DR/305561534108/AMAZON");
+        assert_eq!(reference, "305561534108");
+        assert_eq!(narr, "UPI-DR/AMAZON");
+        assert!(!narr.contains("305561534108"));
     }
 
     // ── extract_fw_transactions (Format A — two-column) ───────────────────────
