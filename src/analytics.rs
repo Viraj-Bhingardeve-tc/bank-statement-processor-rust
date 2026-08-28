@@ -681,6 +681,86 @@ pub fn unique_heads(txns: &[Transaction]) -> Vec<String> {
     set.into_iter().cloned().collect()
 }
 
+pub fn unique_account_numbers(txns: &[Transaction]) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for t in txns {
+        if !t.is_opening_balance && !t.account_no.is_empty() {
+            set.insert(&t.account_no);
+        }
+    }
+    set.into_iter().cloned().collect()
+}
+
+// ── Summary Panel metadata (Bank / Account / Period) ──────────────────────────
+//
+// Real bug (2026-08-28): the Summary Panel's Bank/Account/Period fields were
+// only ever populated once, inside `apply_parse_result` right after a fresh
+// PDF/CSV import. Every other path that puts a transaction set on screen —
+// selecting a client (loads persisted transactions from the DB), Ctrl+R
+// refresh, a batch-folder import, a bank/date filter change — calls
+// `push_dashboard` but never touched those three properties, so they stayed
+// at their empty/placeholder defaults even though `bank_name`/`account_no`
+// are stored on every `Transaction` row (and round-trip through the DB
+// exactly as imported — see `db::upsert_transactions`/`db::get_transactions`).
+// Client Name kept working because it's set separately, straight from the
+// selected `Client` record, on every one of those paths.
+//
+// Fixed by deriving these three fields fresh from whatever transaction set
+// is actually on screen, and calling this from `push_dashboard` itself —
+// the one function every one of those paths already calls — instead of
+// leaving each caller to remember to set them individually.
+
+/// Summary Panel metadata derived from the currently-displayed transaction
+/// set. `bank_name`/`account_no` are the single shared value when every real
+/// (non-opening-balance) row agrees, `"Multiple Banks"` / empty-with-
+/// `multiple_accounts: true` when more than one distinct non-empty value is
+/// present (e.g. several statements loaded for one client), or empty when
+/// none is known at all — never a stale value carried over from a different
+/// dataset. `period` is the earliest–latest transaction date span, computed
+/// by `date_ts` (not by list order, which is not guaranteed chronological
+/// once transactions from more than one import are combined).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DashboardMeta {
+    pub bank_name: String,
+    /// Empty whenever `multiple_accounts` is true — caller decides how to
+    /// display that case (e.g. "Multiple Accounts"); otherwise the single
+    /// raw (unmasked) account number, or "" if none is known.
+    pub account_no: String,
+    pub multiple_accounts: bool,
+    /// "" (no dated real transactions), "DD/MM/YYYY" (single date), or
+    /// "DD/MM/YYYY \u{2013} DD/MM/YYYY" (earliest \u{2013} latest).
+    pub period: String,
+}
+
+pub fn dashboard_meta(txns: &[Transaction]) -> DashboardMeta {
+    let banks = unique_banks(txns);
+    let bank_name = match banks.len() {
+        0 => String::new(),
+        1 => banks.into_iter().next().unwrap(),
+        _ => "Multiple Banks".to_string(),
+    };
+
+    let accounts = unique_account_numbers(txns);
+    let (account_no, multiple_accounts) = match accounts.len() {
+        0 => (String::new(), false),
+        1 => (accounts.into_iter().next().unwrap(), false),
+        _ => (String::new(), true),
+    };
+
+    let mut dated: Vec<&Transaction> = txns
+        .iter()
+        .filter(|t| !t.is_opening_balance && !t.date.is_empty())
+        .collect();
+    dated.sort_by_key(|t| t.date_ts);
+    let period = match dated.len() {
+        0 => String::new(),
+        1 => dated[0].date.clone(),
+        n => format!("{} \u{2013} {}", dated[0].date, dated[n - 1].date),
+    };
+
+    DashboardMeta { bank_name, account_no, multiple_accounts, period }
+}
+
 // ── Convert to Slint model types ──────────────────────────────────────────────
 // (called in main.rs with the generated Slint structs)
 
@@ -798,5 +878,91 @@ mod tests {
     #[test]
     fn always_five_labels() {
         assert_eq!(axis_tick_labels(0.0, 100.0).len(), 5);
+    }
+
+    // ── dashboard_meta (Summary Panel Bank/Account/Period) ────────────────────
+
+    fn meta_txn(date: &str, date_ts: i64, bank: &str, account: &str) -> Transaction {
+        Transaction {
+            date: date.to_string(),
+            date_ts,
+            bank_name: bank.to_string(),
+            account_no: account.to_string(),
+            ..Transaction::new("t")
+        }
+    }
+
+    #[test]
+    fn single_bank_and_account_are_shown_as_is() {
+        let txns = vec![
+            meta_txn(
+                "01/04/2026",
+                1,
+                "Cosmos Co-operative Bank",
+                "1234567890123456",
+            ),
+            meta_txn(
+                "15/04/2026",
+                2,
+                "Cosmos Co-operative Bank",
+                "1234567890123456",
+            ),
+        ];
+        let meta = dashboard_meta(&txns);
+        assert_eq!(meta.bank_name, "Cosmos Co-operative Bank");
+        assert_eq!(meta.account_no, "1234567890123456");
+        assert!(!meta.multiple_accounts);
+    }
+
+    #[test]
+    fn period_spans_earliest_to_latest_by_date_ts_not_list_order() {
+        // Deliberately out of chronological order — as combined transactions
+        // from more than one import into the same client can be — to prove
+        // the span comes from `date_ts`, not from list position.
+        let txns = vec![
+            meta_txn("15/04/2026", 15, "Bank A", "111"),
+            meta_txn("01/04/2026", 1, "Bank A", "111"),
+            meta_txn("30/04/2026", 30, "Bank A", "111"),
+        ];
+        let meta = dashboard_meta(&txns);
+        assert_eq!(meta.period, "01/04/2026 \u{2013} 30/04/2026");
+    }
+
+    #[test]
+    fn single_transaction_period_is_a_bare_date_no_dash() {
+        let txns = vec![meta_txn("01/04/2026", 1, "Bank A", "111")];
+        assert_eq!(dashboard_meta(&txns).period, "01/04/2026");
+    }
+
+    #[test]
+    fn multiple_banks_and_accounts_report_a_combined_value_not_empty() {
+        let txns = vec![
+            meta_txn("01/04/2026", 1, "Bank A", "111"),
+            meta_txn("02/04/2026", 2, "Bank B", "222"),
+        ];
+        let meta = dashboard_meta(&txns);
+        assert_eq!(meta.bank_name, "Multiple Banks");
+        assert!(meta.multiple_accounts);
+        assert_eq!(meta.account_no, "");
+    }
+
+    #[test]
+    fn opening_balance_row_is_excluded_from_every_field() {
+        let mut ob = meta_txn("01/04/2026", 1, "", "");
+        ob.is_opening_balance = true;
+        let real = meta_txn("02/04/2026", 2, "Bank A", "111");
+        let meta = dashboard_meta(&[ob, real]);
+        assert_eq!(meta.bank_name, "Bank A");
+        assert_eq!(meta.account_no, "111");
+        assert_eq!(meta.period, "02/04/2026");
+    }
+
+    #[test]
+    fn no_data_reports_empty_fields_not_a_panic() {
+        let meta = dashboard_meta(&[]);
+        assert_eq!(meta.bank_name, "");
+        assert_eq!(meta.account_no, "");
+        assert_eq!(meta.period, "");
+        assert!(!meta.multiple_accounts);
     }
 }

@@ -585,6 +585,28 @@ fn push_dashboard(h: &AppWindow, txns: &[parser::Transaction], opening_bal: Opti
     let data = compute(txns, opening_bal);
     let s = &data.summary;
 
+    // Summary Panel metadata (Bank/Account/Period) — recomputed from
+    // whatever `txns` is currently on screen on every dashboard refresh,
+    // not just at initial import. See `analytics::dashboard_meta`'s doc
+    // comment for the bug this fixes (2026-08-28): client selection,
+    // Ctrl+R refresh, batch imports, and bank/date filters all reach
+    // `push_dashboard` but never used to set these three properties at
+    // all, leaving them stuck at their empty/placeholder defaults even
+    // though the data was sitting right there on every transaction.
+    let meta = analytics::dashboard_meta(txns);
+    h.set_dash_bank_name(SharedString::from(meta.bank_name.as_str()));
+    let account_display = if meta.multiple_accounts {
+        "Multiple Accounts".to_string()
+    } else {
+        ui::mask_account_no(&meta.account_no)
+    };
+    h.set_dash_account_no(SharedString::from(account_display.as_str()));
+    h.set_dash_period(SharedString::from(if meta.period.is_empty() {
+        "\u{2014}"
+    } else {
+        meta.period.as_str()
+    }));
+
     // Summary cards
     h.set_dash_credits(SharedString::from(fmt_amt(Some(s.total_credit)).as_str()));
     h.set_dash_debits(SharedString::from(fmt_amt(Some(s.total_debit)).as_str()));
@@ -1302,18 +1324,12 @@ fn apply_parse_result(
     let total_dr: f64 = real.iter().filter_map(|t| t.debit).sum();
     let total_cr: f64 = real.iter().filter_map(|t| t.credit).sum();
 
-    let dates: Vec<&str> = real
-        .iter()
-        .filter(|t| !t.date.is_empty())
-        .map(|t| t.date.as_str())
-        .collect();
-    let period = if dates.len() >= 2 {
-        format!("{} \u{2013} {}", dates[0], dates[dates.len() - 1])
-    } else if dates.len() == 1 {
-        dates[0].to_string()
-    } else {
-        "\u{2014}".to_string()
-    };
+    // Bank/Account/Period for the Summary Panel are no longer set here —
+    // `push_dashboard` (called below via `push_dashboard(h, &txns_all, ...)`)
+    // derives them fresh from `analytics::dashboard_meta`, which is also
+    // what every other path that loads a transaction set onto screen
+    // (client selection, Ctrl+R refresh, batch import, filters) goes
+    // through — see that function's doc comment.
 
     let unreviewed_cnt = real
         .iter()
@@ -1506,7 +1522,6 @@ fn apply_parse_result(
     h.set_status_file(SharedString::from(file_name));
     h.set_status_bank(SharedString::from(result.bank_name.as_str()));
 
-    h.set_dash_bank_name(SharedString::from(result.bank_name.as_str()));
     h.set_dash_opening(SharedString::from(
         ui::AppState::fmt_amount(result.opening_balance).as_str(),
     ));
@@ -1533,15 +1548,13 @@ fn apply_parse_result(
     h.set_dash_debits_plain(SharedString::from(ui::fmt_inr(total_dr).as_str()));
     h.set_dash_txn_count(SharedString::from(real.len().to_string().as_str()));
     h.set_dash_vendors(SharedString::from("\u{2014}"));
-    h.set_dash_account_no(SharedString::from(
-        ui::mask_account_no(&result.account_no).as_str(),
-    ));
-    h.set_dash_period(SharedString::from(period.as_str()));
     h.set_dash_credit_count(SharedString::from(credit_cnt.to_string().as_str()));
     h.set_dash_debit_count(SharedString::from(debit_cnt.to_string().as_str()));
     h.set_dash_unreviewed(SharedString::from(unreviewed_cnt.to_string().as_str()));
-    // suspense/needs_review/duplicates/gst counts are set by push_dashboard() below,
-    // which recomputes them live from analytics::compute() on every dashboard refresh.
+    // suspense/needs_review/duplicates/gst counts, and Summary Panel
+    // Bank/Account/Period, are set by push_dashboard() below, which
+    // recomputes them live from analytics::compute()/dashboard_meta() on
+    // every dashboard refresh.
     h.set_dash_calc_closing(SharedString::from(fmt_inr_dash(calc_closing).as_str()));
     h.set_dash_has_mismatch(has_mismatch);
     h.set_dash_mismatch(SharedString::from(mismatch_str.as_str()));
