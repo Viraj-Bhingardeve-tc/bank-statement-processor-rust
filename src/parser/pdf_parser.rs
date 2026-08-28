@@ -25,7 +25,8 @@ use crate::parser::{
     },
     noise_filter::is_noise_row,
     transaction_extractor::{
-        extract_cosmos_transactions, extract_fw_transactions, extract_kotak_narrow_transactions,
+        extract_cosmos_transactions, extract_fw_transactions, extract_icici_wealth_transactions,
+        extract_kotak_narrow_transactions,
     },
     ParseResult, Transaction,
 };
@@ -103,6 +104,27 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
             return Some(result);
         }
         log::debug!("[BSP PDF] extract_cosmos_transactions returned None — falling through");
+    }
+
+    // ── Early ICICI Bank Wealth Management detection ──────────────────────────
+    // A genuinely different layout from a normal ICICI Bank statement (see
+    // `extract_icici_wealth_transactions`'s doc comment). Two independent
+    // signals, either sufficient: the literal phrase (present in ordinary
+    // page text, not just the stylized logo image OCR sometimes mangles),
+    // or this format's distinctive "MODE**" column header alongside its
+    // Deposits+Withdrawals column pair — a normal ICICI Bank statement has
+    // neither, so this never misfires onto one.
+    let el = early_text.to_lowercase();
+    if el.contains("wealth management")
+        || (el.contains("mode**") && el.contains("deposits") && el.contains("withdrawals"))
+    {
+        log::debug!(
+            "[BSP PDF] ICICI Bank Wealth Management detected — running extract_icici_wealth_transactions"
+        );
+        if let Some(result) = extract_icici_wealth_transactions(&rows, file_name) {
+            return Some(result);
+        }
+        log::debug!("[BSP PDF] extract_icici_wealth_transactions returned None — falling through");
     }
 
     // ── Header detection ──────────────────────────────────────────────────────

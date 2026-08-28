@@ -631,28 +631,138 @@ fn cosmos_first_transaction_is_a_debit_not_a_credit() {
     assert_eq!(first_credit.debit, None);
 }
 
-/// **Third real bug found by this suite, not fixed here** (same
-/// out-of-scope rationale as the two cases above; time-boxed per
-/// instruction rather than root-caused further).
+/// **Real bug found and fixed (2026-08-28): ICICI Bank Wealth Management
+/// PDF import.** This used to be `icici_wealth_management_pdf_extracts_
+/// zero_pages`, asserting `extract_pages` returns zero rows and blaming
+/// "PDF structural complexity" as an unconfirmed guess. That diagnosis was
+/// incomplete: the *actual* root cause, confirmed by decoding this file's
+/// page content streams directly, is that every one of its 36 pages has
+/// **zero** `Tj`/`TJ`/`'`/`"` text-showing operators anywhere — every
+/// character is drawn as vector line-art (`m`/`l`/`c`/`h`/`f` path
+/// operators) and `doc.get_page_fonts()` finds zero fonts on every page.
+/// There is no embedded text to extract by any means; `extract_pages`
+/// returning empty is *correct* behavior given that input, not a bug in
+/// `lopdf` usage.
 ///
-/// `ICICI Bank Wealth management.pdf` (the largest fixture, 6.2MB) fails at
-/// the very first extraction step: `extract_pages` returns `Ok(vec![])` —
-/// zero pages/rows, no error — and `extract_full_text` likewise returns
-/// effectively nothing. Unlike the BOB.pdf and Cosmos cases, this fails
-/// before even reaching the text layer, so this is a distinct symptom
-/// (most likely explanation, not confirmed: this file's size/page count or
-/// PDF structural complexity exceeds something `lopdf`'s positional
-/// extraction handles for the other 10 fixtures — genuinely root-causing
-/// this would mean stepping through `lopdf`'s object parsing on a 6.2MB
-/// file, out of scope for an integration-test-only change).
+/// Fixed by adding a real render+OCR fallback
+/// (`ocr_extractor::extract_pages_via_ocr`, rasterizing each page via the
+/// `mutool` CLI and reading Tesseract's positional TSV word-boxes back into
+/// the same `Vec<Vec<PdfItem>>` shape embedded-text extraction produces)
+/// feeding a dedicated column-aware extractor
+/// (`transaction_extractor::extract_icici_wealth_transactions`) for this
+/// statement's block-structured Date/Mode/Particulars/Deposits/
+/// Withdrawals/Balance layout — see both functions' doc comments for the
+/// full detail. Wired into `main.rs`'s `run_pdf_ocr_pipeline` ahead of the
+/// existing flat-text OCR tiers.
+///
+/// Requires `mutool` (MuPDF) and `tesseract` on PATH — real external OCR
+/// tools, not bundled — and takes ~2 minutes (36 pages, render + OCR each).
+/// `#[ignore]`d for normal `cargo test` runs for exactly that reason; run
+/// explicitly with `cargo test --ignored icici_wealth_management` on a
+/// machine that has both installed (e.g. `winget install
+/// ArtifexSoftware.mutool` / `winget install UB-Mannheim.TesseractOCR` on
+/// Windows). Skips (not fails) if either tool isn't found, so it can't
+/// spuriously break CI.
 #[test]
-#[ignore = "KNOWN BUG (not fixed here, out of scope for this feature, not further root-caused per time-box): ICICI Bank Wealth management.pdf extracts zero pages/rows and zero text — fails before even reaching the text layer, unlike the other two known-bad fixtures"]
-fn icici_wealth_management_pdf_extracts_zero_pages() {
+#[ignore = "requires mutool + tesseract on PATH and takes ~2 minutes (36-page render+OCR) — run explicitly: cargo test --ignored icici_wealth_management"]
+fn icici_wealth_management_pdf_imports_successfully_via_ocr() {
+    let tools_available = std::process::Command::new("mutool")
+        .arg("-v")
+        .output()
+        .is_ok()
+        && std::process::Command::new("tesseract")
+            .arg("--version")
+            .output()
+            .is_ok();
+    if !tools_available {
+        eprintln!(
+            "SKIPPED: mutool and/or tesseract not found on PATH — install both to run this test \
+             (see doc comment)"
+        );
+        return;
+    }
+
     let path = fixture("ICICI Bank Wealth management.pdf");
-    let rows = text_extractor::extract_pages(&path).unwrap_or_default();
+    let rows = parser::ocr_extractor::extract_pages_via_ocr(&path);
     assert!(
-        rows.is_empty(),
-        "if this now fails (rows found), extraction has improved — remove the #[ignore] and fold this fixture back into PDF_FIXTURES"
+        !rows.is_empty(),
+        "extract_pages_via_ocr returned zero rows — mutool/tesseract ran but produced nothing"
+    );
+
+    let result = pdf_parser::parse_pdf_rows(rows, "ICICI Bank Wealth management.pdf")
+        .expect("parse_pdf_rows returned None for OCR'd ICICI Wealth Management rows");
+
+    assert_eq!(result.bank_name, "ICICI Bank Wealth Management");
+    assert_eq!(
+        result.account_no, "059501505351",
+        "account number must be extracted from \"Savings A/c 059501505351\", not left empty"
+    );
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    // Cross-checked directly against the rendered PDF pages: 36 pages of a
+    // real UPI/NEFT/RTGS/IMPS-heavy statement land in the 700–900 range: an
+    // exact count is too brittle against OCR run-to-run word-recognition
+    // variance (whether a stray character misreads as a spurious extra
+    // digit run, etc.) to assert precisely.
+    assert!(
+        real.len() > 700,
+        "expected at least 700 real transactions from a 36-page statement, got {}",
+        real.len()
+    );
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set (Debit/Credit must never mix): {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+    }
+
+    // Full balance-continuity reconciliation. Not required to be perfect —
+    // this account's "Rev Sweep" auto fund-transfer rows (linked-FD
+    // overdraft coverage) have a structure this extractor doesn't fully
+    // model — but the overwhelming majority of rows must reconcile exactly
+    // against the statement's own printed running balance, or the
+    // Debit/Credit/Balance extraction has regressed.
+    let mut prev_balance = result.opening_balance;
+    let mut mismatches = 0usize;
+    let mut checked = 0usize;
+    for t in &real {
+        if let (Some(pb), Some(bal)) = (prev_balance, t.balance) {
+            checked += 1;
+            let expected = pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0);
+            if (expected - bal).abs() > 0.01 {
+                mismatches += 1;
+            }
+        }
+        prev_balance = t.balance;
+    }
+    assert!(checked > 0, "no transaction had a usable prior balance to reconcile against");
+    let mismatch_rate = mismatches as f64 / checked as f64;
+    assert!(
+        mismatch_rate < 0.05,
+        "{mismatches}/{checked} ({:.1}%) transactions don't reconcile with (previous balance + \
+         credit - debit) — expected under 5%",
+        mismatch_rate * 100.0
+    );
+
+    // Reference (UPI RRN / UTR) extraction: most rows are UPI/IMPS, whose
+    // slash-delimited reference segment this format's extractor is built
+    // to pull out — confirm it's actually populated for the majority,
+    // not uniformly empty.
+    let with_reference = real.iter().filter(|t| !t.reference.is_empty()).count();
+    assert!(
+        with_reference as f64 / real.len() as f64 > 0.6,
+        "expected over 60% of real transactions to have a non-empty Reference, got {}/{}",
+        with_reference,
+        real.len()
     );
 }
 

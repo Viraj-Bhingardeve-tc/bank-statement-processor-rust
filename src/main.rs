@@ -1106,6 +1106,36 @@ fn run_pdf_ocr_pipeline<F: Fn(i32, &str)>(
     file_name: &str,
     progress: F,
 ) -> Result<parser::ParseResult, String> {
+    // Tier 0: positional OCR (rasterize each page + Tesseract word-box TSV)
+    // fed through the same column-aware `pdf_parser::parse_pdf_rows`
+    // extractor Stage 1 uses for embedded text, instead of the flat-text
+    // heuristics below — correctly separates Debit/Credit/Balance columns
+    // rather than guessing them from narration keywords. Real bug fixed
+    // here (ICICI Bank Wealth Management, 2026-08-28): that statement's
+    // page content is 100% vector line-art with zero embedded text
+    // whatsoever (confirmed against the decoded content stream — see
+    // `ocr_extractor::extract_pages_via_ocr`'s doc comment), so `full_text`
+    // below is never usable for it; only a real page render + OCR can
+    // recover its data at all. Cheap to attempt unconditionally: it's a
+    // no-op (empty rows, falls through immediately) for any PDF that
+    // doesn't reach `run_pdf_ocr_pipeline` in the first place (Stage 1 in
+    // `on_do_load_file` already succeeds on the fast embedded-text path for
+    // those and never calls this function), and for PDFs that already need
+    // real Tesseract/mutool OCR, positional extraction is never worse than
+    // the flat-text tiers below — it uses the exact same underlying OCR.
+    progress(15, "Rendering pages for OCR\u{2026}");
+    let ocr_rows = parser::ocr_extractor::extract_pages_via_ocr(path);
+    if !ocr_rows.is_empty() {
+        progress(50, "Reading table columns\u{2026}");
+        if let Some(r) = parser::pdf_parser::parse_pdf_rows(ocr_rows, file_name) {
+            let real_count = r.transactions.iter().filter(|t| !t.is_opening_balance).count();
+            if real_count > 0 {
+                progress(100, "Done");
+                return Ok(r);
+            }
+        }
+    }
+
     progress(10, "Extracting embedded text\u{2026}");
     let full_text = parser::text_extractor::extract_full_text(path);
     let effective_text = if full_text.trim().is_empty() {
