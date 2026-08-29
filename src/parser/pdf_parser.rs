@@ -25,8 +25,8 @@ use crate::parser::{
     },
     noise_filter::is_noise_row,
     transaction_extractor::{
-        extract_cosmos_transactions, extract_fw_transactions, extract_icici_wealth_transactions,
-        extract_kotak_narrow_transactions,
+        extract_cosmos_transactions, extract_fw_transactions, extract_icici_normal_transactions,
+        extract_icici_wealth_transactions, extract_kotak_narrow_transactions,
     },
     ParseResult, Transaction,
 };
@@ -125,6 +125,24 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
             return Some(result);
         }
         log::debug!("[BSP PDF] extract_icici_wealth_transactions returned None — falling through");
+    }
+
+    // ── Early "normal" ICICI Bank detailed-statement detection ───────────────
+    // This layout's own header keywords ("withdrawal (dr)", "deposit (cr)",
+    // "balance") — distinct from the Wealth Management header handled above.
+    // Only meaningful when `rows` came from real OCR word-boxes (Tier 0):
+    // `extract_icici_normal_transactions` itself no-ops on Stage 1's flat
+    // X=0 embedded-text rows (see its doc comment for why that layout is
+    // unrecoverable at the flat-text layer at all), so this is safe to
+    // attempt unconditionally on both call sites.
+    if el.contains("withdra") && el.contains("deposit") && el.contains("balance") {
+        log::debug!(
+            "[BSP PDF] ICICI Bank Withdrawal/Deposit/Balance header detected — running extract_icici_normal_transactions"
+        );
+        if let Some(result) = extract_icici_normal_transactions(&rows, file_name) {
+            return Some(result);
+        }
+        log::debug!("[BSP PDF] extract_icici_normal_transactions returned None — falling through");
     }
 
     // ── Header detection ──────────────────────────────────────────────────────

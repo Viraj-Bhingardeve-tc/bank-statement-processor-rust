@@ -276,10 +276,27 @@ fn kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly() {
     );
 }
 
-/// **Real bug found by this suite, not fixed here** (out of scope: splitting
-/// this reliably risks reintroducing the exact "random amount extraction"
-/// class of bug the OCR-path fixes elsewhere in this suite exist to
-/// prevent — see the doc comment below for why).
+/// **"ICICI Bank.pdf" fixed (2026-08-29) — via a different mechanism than
+/// this test exercises, so its assertion below is intentionally unchanged.**
+/// This test's ICICI half only ever checked the Stage 2 *flat-text* path
+/// (`extract_full_text` → `parse_ocr_text`), which is genuinely
+/// unrecoverable for this file for exactly the reason described below — that
+/// remains true, hence `icici_real == 0` here still holds and always will.
+/// The actual fix lives one level up the real pipeline: `run_pdf_ocr_pipeline`
+/// (`main.rs`)'s Tier 0 renders the page to an image and reads it back with
+/// Tesseract (`ocr_extractor::extract_pages_via_ocr`), recovering genuine
+/// per-word X positions the flat-text layer had already destroyed, and
+/// `extract_icici_normal_transactions` (`transaction_extractor.rs`) turns
+/// those word-boxes into transactions. See
+/// `icici_bank_normal_pdf_imports_successfully_via_ocr` below for the
+/// end-to-end lock-in against the real fixture via that path. "IDBI Bank.pdf"
+/// is unaffected by this fix (different, still-unrecovered problem) and
+/// remains exactly as described below.
+///
+/// **IDBI Bank.pdf remains a real bug, not fixed here** (out of scope:
+/// splitting this reliably risks reintroducing the exact "random amount
+/// extraction" class of bug the OCR-path fixes elsewhere in this suite exist
+/// to prevent — see the doc comment below for why).
 ///
 /// "ICICI Bank.pdf" and "IDBI Bank.pdf" both extract fine at the text layer
 /// (no Identity-H garbage — that separate bug, which used to affect these
@@ -313,7 +330,7 @@ fn kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly() {
 /// bank-reported 24 total: "Dr Count 7" + "Cr Count 17") live only in the
 /// unparseable squashed line and are silently missing from the result.
 #[test]
-#[ignore = "KNOWN BUG (not fixed here, out of scope for this feature): ICICI Bank.pdf and IDBI Bank.pdf render their transaction table as one/a few single text lines with fields glued together with no consistent delimiter (including two currency amounts directly concatenated with zero separator) — splitting this reliably needs a dedicated column-aware extractor, not a regex; see doc comment"]
+#[ignore = "documents the Stage-2 flat-text limitation this test's ICICI half was originally about (still true, unchanged — ICICI Bank.pdf itself is fixed via a different path, see icici_bank_normal_pdf_imports_successfully_via_ocr) and the still-unfixed IDBI Bank.pdf squashed-line bug; see doc comment"]
 fn pdf_fixtures_with_a_squashed_single_line_table_extract_far_fewer_transactions_than_the_real_statement_contains(
 ) {
     // ICICI Bank.pdf: the whole table is one line → Stage 2 (raw OCR-text
@@ -763,6 +780,142 @@ fn icici_wealth_management_pdf_imports_successfully_via_ocr() {
         "expected over 60% of real transactions to have a non-empty Reference, got {}/{}",
         with_reference,
         real.len()
+    );
+}
+
+/// **Real bug found and fixed (2026-08-29): normal ICICI Bank PDF import.**
+/// This is a completely different root cause from the Wealth Management
+/// fixture above, despite both being "ICICI Bank" statements: this file's
+/// embedded text is perfectly fine and complete, but `text_extractor::
+/// extract_page_text` only breaks a line on the `'`/`"`/`T*`/`ET`
+/// content-stream operators (see that module's doc comment) — this PDF's
+/// generator moves the text cursor between visual lines with bare
+/// `Td`/`Tm` operators instead, which are silently ignored, so the entire
+/// transaction table collapses into one continuous run of text with fields
+/// occasionally glued together with zero delimiter (confirmed verbatim in
+/// this fixture: two adjacent 2-decimal amounts concatenated as
+/// `"58598.29378368.15"`). This is unrecoverable at the flat-text layer —
+/// see `pdf_fixtures_with_a_squashed_single_line_table_extract_far_fewer_
+/// transactions_than_the_real_statement_contains` above, whose ICICI
+/// assertion (Stage 2 flat-text finds zero transactions) remains true and
+/// intentionally unchanged.
+///
+/// Fixed the same way the Wealth Management fixture was: `main.rs`'s
+/// `run_pdf_ocr_pipeline` Tier 0 renders each page to an image and reads it
+/// back with Tesseract (`ocr_extractor::extract_pages_via_ocr`), recovering
+/// genuine per-word X positions regardless of how the embedded text layer
+/// glued things together, feeding a dedicated extractor
+/// (`transaction_extractor::extract_icici_normal_transactions`) for this
+/// statement's `Sl No | Tran Id | Value/Transaction/Posted Date | Cheque no
+/// / Ref No | Transaction Remarks | Withdrawal (Dr) | Deposit (Cr) |
+/// Balance` layout, whose header itself wraps across 2-3 physical OCR rows.
+/// See that function's doc comment for the two further OCR artifacts it
+/// specifically survives (a border-line glyph glued onto an amount, and an
+/// amount split across two physical rows).
+///
+/// This fixture is small (8 real transactions, cross-checked directly
+/// against the rendered PDF's own printed "Page Total" summary), so unlike
+/// the Wealth Management test above this asserts an *exact* transaction
+/// count and *exact* reconciliation (zero tolerance) rather than a
+/// statistical threshold.
+#[test]
+#[ignore = "requires mutool + tesseract on PATH and takes ~15 seconds (2-page render+OCR) — run explicitly: cargo test --ignored icici_bank_normal"]
+fn icici_bank_normal_pdf_imports_successfully_via_ocr() {
+    let tools_available = std::process::Command::new("mutool").arg("-v").output().is_ok()
+        && std::process::Command::new("tesseract").arg("--version").output().is_ok();
+    if !tools_available {
+        eprintln!(
+            "SKIPPED: mutool and/or tesseract not found on PATH — install both to run this test \
+             (see doc comment)"
+        );
+        return;
+    }
+
+    let path = fixture("ICICI Bank.pdf");
+    let rows = parser::ocr_extractor::extract_pages_via_ocr(&path);
+    assert!(
+        !rows.is_empty(),
+        "extract_pages_via_ocr returned zero rows — mutool/tesseract ran but produced nothing"
+    );
+
+    let result = pdf_parser::parse_pdf_rows(rows, "ICICI Bank.pdf")
+        .expect("parse_pdf_rows returned None for OCR'd ICICI Bank rows");
+
+    assert_eq!(result.bank_name, "ICICI Bank");
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert_eq!(
+        real.len(),
+        8,
+        "expected exactly 8 real transactions (cross-checked against the rendered PDF's own \
+         table), got {}",
+        real.len()
+    );
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set (Debit/Credit must never mix): {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+        assert!(
+            !t.date.is_empty(),
+            "transaction with empty date: {t:?}"
+        );
+    }
+
+    // Exact reconciliation — this fixture's own printed "Page Total"
+    // ("Opening Bal: 23,856.92", "Withdrawls: 1,59,800.65", "Deposits:
+    // 1,62,000.00", "Closing Bal: 26,056.27") gives ground truth to check
+    // against exactly, not just statistically.
+    assert_eq!(result.opening_balance, Some(23_856.92));
+    let total_withdrawals: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_deposits: f64 = real.iter().filter_map(|t| t.credit).sum();
+    assert!(
+        (total_withdrawals - 159_800.65).abs() < 0.01,
+        "total withdrawals {total_withdrawals:.2} != printed 1,59,800.65"
+    );
+    assert!(
+        (total_deposits - 162_000.00).abs() < 0.01,
+        "total deposits {total_deposits:.2} != printed 1,62,000.00"
+    );
+    let closing_balance = real.last().and_then(|t| t.balance);
+    assert_eq!(
+        closing_balance,
+        Some(26_056.27),
+        "last transaction's balance must equal the printed Closing Bal"
+    );
+
+    let mut prev_balance = result.opening_balance;
+    for t in &real {
+        if let (Some(pb), Some(bal)) = (prev_balance, t.balance) {
+            let expected = pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0);
+            assert!(
+                (expected - bal).abs() < 0.01,
+                "balance doesn't reconcile: prev={pb:.2} + credit={:?} - debit={:?} = {expected:.2}, \
+                 but stated balance={bal:.2} for {t:?}",
+                t.credit,
+                t.debit
+            );
+        }
+        prev_balance = t.balance;
+    }
+
+    // Redacted account-holder header (see `extract_icici_normal_
+    // transactions`'s doc comment): account_no is deliberately left empty
+    // rather than dug out from behind the black-box redaction, which masks
+    // to bare "XXXX" in the UI — the documented "unavailable" fallback.
+    assert_eq!(
+        result.account_no, "",
+        "account number must stay empty (redacted in the source PDF), not be reconstructed from \
+         text hidden behind the redaction"
     );
 }
 
