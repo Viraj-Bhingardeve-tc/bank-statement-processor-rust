@@ -63,6 +63,22 @@ fn fixture(name: &str) -> PathBuf {
 /// turned out to have the same squashed-single-line-table problem as "IDBI
 /// Bank.pdf" — see that test below.
 ///
+/// "IDFCFIRSTBankstatement.pdf" stayed in this list (it always parsed into
+/// *some* transactions) but had its own separate, later-discovered bug
+/// (2026-08-29): the same squashed-single-line-table root cause as ICICI/
+/// IDBI (every embedded-text item at `x=0.0`) meant Stage 1 never actually
+/// populated a real column here either, so this fixture was quietly riding
+/// on Stage 2's flat-text Debit/Credit *guessing* the whole time — which
+/// guessed wrong for the statement's very first transaction and a handful
+/// of others throughout, not just a cosmetic edge case. `parse_pdf_via_real_
+/// pipeline` (used by the loop below) still exercises that same flat-text
+/// path and is intentionally left asserting only "some transactions, no
+/// mixing" (loose enough that the pre-fix guesses satisfied it too); the
+/// real fix lives in a dedicated `extract_idfc_first_transactions`
+/// (`transaction_extractor.rs`) reached only via the Tier 0 OCR path — see
+/// `idfc_first_bank_pdf_debit_credit_is_never_mixed_via_ocr` below for the
+/// end-to-end lock-in against the real fixture via that path.
+///
 /// "Cosmos Co-operative.pdf" moved into this list after fixing the *actual*
 /// root cause of the bug `cosmos_pdf_exposes_a_missing_ocr_fallback_for_
 /// near_empty_text` used to document (that test name and its old rationale
@@ -1095,6 +1111,148 @@ fn idbi_bank_pdf_imports_successfully_via_ocr() {
         result.account_no, "",
         "account number must stay empty (redacted in the source PDF), not be reconstructed from \
          text hidden behind the redaction"
+    );
+}
+
+/// Locks in the "IDFCFIRSTBankstatement.pdf" Debit/Credit-mixing fix
+/// (2026-08-29) end-to-end against the real fixture. Same root cause as
+/// ICICI Bank.pdf/IDBI Bank.pdf: every embedded-text item lands at `x=0.0`
+/// (confirmed by dumping `text_extractor::extract_pages`'s raw rows), so
+/// Stage 1's column-based `parse_pdf_rows` can detect a header here but
+/// never populate an actual column from it, and the app fell back to Stage
+/// 2's flat-*text* heuristic parser — which has to guess Debit vs Credit
+/// from narration/ordering with no real column positions to check against.
+/// That guess was wrong for the *first* transaction (a salary NEFT debit of
+/// 10,022.00 came out as a Credit) and for a scattered handful of others
+/// throughout the statement, exactly the live bug report this test locks in
+/// the fix for — not a first-row-only issue, and not fixed by a global
+/// Debit/Credit swap (this statement already has 17 genuine Credits mixed
+/// among 57 genuine Debits; a blind swap would simply invert which side is
+/// wrong).
+///
+/// Fixed the same way as ICICI Bank.pdf/IDBI Bank.pdf: Tier 0 renders every
+/// page and reads real per-word X positions back with Tesseract, and a
+/// dedicated `extract_idfc_first_transactions` (`transaction_extractor.rs`)
+/// assigns Debit/Credit/Balance by which column an amount's X position
+/// actually falls under — never by guessing. See that function's doc
+/// comment for two IDFC-specific traps it survives: the per-page repeated
+/// "Opening Balance / Total Debit / Total Credit / Closing Balance" summary
+/// box, whose OWN "Debit"/"Credit"/"Balance" header words sit at different
+/// X positions than the real column header's and would silently poison the
+/// column anchors if not explicitly excluded from the anchor scan; and a
+/// narration's own reference number getting OCR-split onto the same row as
+/// the date/amounts (not just onto a continuation row), which — before the
+/// second bug fix here — got swept in as a phantom amount and silently
+/// dropped a whole transaction.
+///
+/// This fixture's own first page is genuinely missing from the 7-page PDF
+/// on disk (its footer prints "Page 2 of 8", "Page 7 of 8", etc. — the real
+/// statement was 8 pages; this saved fixture starts one page in), so the
+/// printed header's Opening Balance (2,63,436.28) does NOT reconcile with
+/// this file's own first visible transaction — that gap is a property of
+/// the fixture, not a bug here. Because of that, the Total Debit assertion
+/// below is a lower-bound / non-exact check, while Total Credit (unaffected
+/// — the missing page's own transactions all appear to be debits, matching
+/// the pattern visible on every other page) and the Closing Balance both
+/// reconcile exactly against the statement's own printed footer, which is
+/// possible specifically because `opening_balance` here means "the balance
+/// immediately before this fixture's own first transaction", not the whole
+/// statement's true opening balance — see `extract_idfc_first_transactions`
+/// for why that's the correct contract for a chronological statement.
+#[test]
+#[ignore = "requires mutool + tesseract on PATH and takes ~15 seconds (7-page render+OCR) — run explicitly: cargo test --ignored idfc_first"]
+fn idfc_first_bank_pdf_debit_credit_is_never_mixed_via_ocr() {
+    let tools_available = std::process::Command::new("mutool").arg("-v").output().is_ok()
+        && std::process::Command::new("tesseract").arg("--version").output().is_ok();
+    if !tools_available {
+        eprintln!(
+            "SKIPPED: mutool and/or tesseract not found on PATH — install both to run this test \
+             (see doc comment)"
+        );
+        return;
+    }
+
+    let path = fixture("IDFCFIRSTBankstatement.pdf");
+    let rows = parser::ocr_extractor::extract_pages_via_ocr(&path);
+    assert!(
+        !rows.is_empty(),
+        "extract_pages_via_ocr returned zero rows — mutool/tesseract ran but produced nothing"
+    );
+
+    let result = pdf_parser::parse_pdf_rows(rows, "IDFCFIRSTBankstatement.pdf")
+        .expect("parse_pdf_rows returned None for OCR'd IDFC First Bank rows");
+
+    assert_eq!(result.bank_name, "IDFC First Bank");
+    assert_eq!(
+        result.account_no, "10158467482",
+        "unlike ICICI Normal/IDBI, this statement's account number is printed in the clear, \
+         not redacted — it should be extracted, not left blank"
+    );
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert!(
+        real.len() >= 74,
+        "expected at least 74 real transactions (this fixture's own first page is missing, \
+         see doc comment, so a handful more may legitimately exist on it), got {}",
+        real.len()
+    );
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set (Debit/Credit must never mix): {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+        assert!(!t.date.is_empty(), "transaction with empty date: {t:?}");
+    }
+
+    // The FIRST transaction is the exact live bug report: a salary NEFT
+    // debit that was coming out as a Credit.
+    let first = real.first().expect("at least one real transaction");
+    assert_eq!(first.date, "02/04/2024");
+    assert_eq!(first.debit, Some(10_022.00));
+    assert_eq!(first.credit, None);
+    assert_eq!(first.balance, Some(207_508.28));
+
+    // Last transaction: date, credit amount, and the statement's own
+    // printed Closing Balance — reconciles exactly (see doc comment for
+    // why this is possible despite the fixture's missing first page).
+    let last = real.last().expect("at least one real transaction");
+    assert_eq!(last.date, "30/04/2024");
+    assert_eq!(last.credit, Some(300_000.00));
+    assert_eq!(last.debit, None);
+    assert_eq!(
+        last.balance,
+        Some(307_237.08),
+        "must reconcile exactly with the statement's own printed Closing Balance"
+    );
+
+    let debit_count = real.iter().filter(|t| t.debit.is_some()).count();
+    let credit_count = real.iter().filter(|t| t.credit.is_some()).count();
+    let total_debit: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_credit: f64 = real.iter().filter_map(|t| t.credit).sum();
+    assert_eq!(credit_count, 17);
+    assert!(
+        (total_credit - 1_030_823.80).abs() < 0.10,
+        "total credit {total_credit:.2} != printed Total Credit 10,30,823.80 — unlike Total \
+         Debit, this isn't affected by the fixture's missing first page (see doc comment)"
+    );
+    assert!(
+        debit_count >= 57,
+        "expected at least 57 debits (this fixture's missing first page may hold a few more), \
+         got {debit_count}"
+    );
+    assert!(
+        total_debit > 900_000.0,
+        "total debit {total_debit:.2} implausibly low — a real Debit column value is being \
+         dropped or misclassified somewhere"
     );
 }
 

@@ -26,7 +26,8 @@ use crate::parser::{
     noise_filter::is_noise_row,
     transaction_extractor::{
         extract_cosmos_transactions, extract_fw_transactions, extract_icici_normal_transactions,
-        extract_icici_wealth_transactions, extract_idbi_transactions, extract_kotak_narrow_transactions,
+        extract_icici_wealth_transactions, extract_idbi_transactions,
+        extract_idfc_first_transactions, extract_kotak_narrow_transactions,
     },
     ParseResult, Transaction,
 };
@@ -161,6 +162,27 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
             return Some(result);
         }
         log::debug!("[BSP PDF] extract_idbi_transactions returned None — falling through");
+    }
+
+    // ── Early IDFC FIRST Bank "Statement of Account" detection ────────────────
+    // "particulars"+"transaction" is IDFC-distinctive — neither ICICI Normal
+    // (needs "description"/"remark" wording) nor IDBI (needs "txn date")
+    // would match this header, and this block's own keywords don't overlap
+    // theirs either, so at most one of the three extractors ever actually
+    // fires for a given file's real header.
+    if el.contains("transaction")
+        && el.contains("particulars")
+        && el.contains("debit")
+        && el.contains("credit")
+        && el.contains("balance")
+    {
+        log::debug!(
+            "[BSP PDF] IDFC First Bank Statement of Account header detected — running extract_idfc_first_transactions"
+        );
+        if let Some(result) = extract_idfc_first_transactions(&rows, file_name) {
+            return Some(result);
+        }
+        log::debug!("[BSP PDF] extract_idfc_first_transactions returned None — falling through");
     }
 
     // ── Header detection ──────────────────────────────────────────────────────
