@@ -26,7 +26,7 @@ use crate::parser::{
     noise_filter::is_noise_row,
     transaction_extractor::{
         extract_cosmos_transactions, extract_fw_transactions, extract_icici_normal_transactions,
-        extract_icici_wealth_transactions, extract_kotak_narrow_transactions,
+        extract_icici_wealth_transactions, extract_idbi_transactions, extract_kotak_narrow_transactions,
     },
     ParseResult, Transaction,
 };
@@ -143,6 +143,24 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
             return Some(result);
         }
         log::debug!("[BSP PDF] extract_icici_normal_transactions returned None — falling through");
+    }
+
+    // ── Early IDBI Bank "Statement of Account" detection ──────────────────────
+    // "txn date" is IDBI-distinctive, so this is ordered after the ICICI
+    // Normal block above even though both share "withdra"+"deposit"+
+    // "balance" — harmless either way, since ICICI Normal's own header
+    // locator requires "description"/"cheque" wording that IDBI's header
+    // won't satisfy, and IDBI's requires "txn date" that ICICI Normal's
+    // header won't satisfy, so at most one of the two ever actually matches
+    // a given file's real header.
+    if el.contains("txn date") && el.contains("withdra") && el.contains("deposit") && el.contains("balance") {
+        log::debug!(
+            "[BSP PDF] IDBI Bank Statement of Account header detected — running extract_idbi_transactions"
+        );
+        if let Some(result) = extract_idbi_transactions(&rows, file_name) {
+            return Some(result);
+        }
+        log::debug!("[BSP PDF] extract_idbi_transactions returned None — falling through");
     }
 
     // ── Header detection ──────────────────────────────────────────────────────

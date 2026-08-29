@@ -974,6 +974,115 @@ fn extract_icici_wealth_ref(narration: &str) -> (String, String) {
 /// the redaction — `account_no` is left empty (masks to bare `XXXX` in the
 /// UI, the documented fallback for "unavailable") rather than resurrecting
 /// PII its owner blacked out.
+// Shared OCR-table block-classification helpers — originally built for
+// `extract_icici_normal_transactions`, reused as-is by
+// `extract_idbi_transactions` below (same OCR-word-box shape, same class of
+// glued-junk/split-amount artifacts). `col0`/`col1` mean debit/withdrawal
+// and credit/deposit respectively, whichever caller is using them.
+//
+// A narrow OCR quirk rules out the generic `calc_col_boundaries`/
+// `assign_cells` midpoint-bucketing machinery every other extractor in this
+// module uses: these tables' amount columns sit close enough together that
+// a multi-word narration continuation line routinely has its later word
+// start well past where a fixed midpoint boundary would put the
+// Narration/amount-columns fence — a plain x-bucket read would silently
+// swallow real narration words into the amount columns. Classifying by
+// *shape* first (does this item's text look like part of a number at all?)
+// and falling back to x only for genuine ambiguity between the money
+// columns sidesteps that entirely.
+//
+// Known OCR junk glyphs that land glued onto an otherwise-clean amount (a
+// mis-read cell border, observed on every amount that happens to sit at the
+// right edge of its column: "3,000.00}", "1,50,000.|").
+fn strip_ocr_junk(s: &str) -> String {
+    s.chars().filter(|c| !matches!(c, '}' | '|' | '{' | '[' | ']' | '$')).collect()
+}
+// True for an item that — once known junk glyphs are stripped — is *purely*
+// digits/commas/dots and therefore could only be all or part of an amount
+// (a Tran Id/Cheque No like "S8592" or a narration fragment with a "/"
+// always fails this).
+fn is_amount_shaped(text: &str) -> bool {
+    let cleaned = strip_ocr_junk(text);
+    !cleaned.is_empty() && cleaned.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.')
+}
+// A fragment "dangles" when it ends in a bare decimal point with no digits
+// after it — the unambiguous signature of an amount OCR split across two
+// physical rows (e.g. "1,58,266." continuing as "65" on the next row).
+fn dangling(frags: &[String]) -> bool {
+    frags.last().is_some_and(|f| strip_ocr_junk(f).ends_with('.'))
+}
+
+// Classify one row's items (already filtered to `x >= wall_x`) into the
+// block's Narration text and col0/col1/Balance fragment lists.
+//
+// Amount columns are resolved by nearest anchor X *unless* one or more
+// columns are already "dangling" (see above) — a split fragment's
+// continuation routinely lands closer to the *next* column's anchor than
+// its own (observed: a Deposit split's tail digits sit nearer to Balance's
+// anchor by raw distance), so absolute X is unusable there. What *does*
+// hold across every observed case: the dangling columns' relative
+// left-to-right order always matches the continuation fragments' own
+// left-to-right order on the row that completes them — pairing by sorted
+// order rather than by nearest distance resolves both splits correctly.
+fn classify_row(
+    row: &[PdfItem],
+    wall_x: f64,
+    anchors: [f64; 3], // [col0 (debit), col1 (credit), balance]
+    narration_parts: &mut Vec<String>,
+    col0_frags: &mut Vec<String>,
+    col1_frags: &mut Vec<String>,
+    balance_frags: &mut Vec<String>,
+) {
+    let mut narration_words: Vec<&str> = Vec::new();
+    let mut amount_items: Vec<&PdfItem> = Vec::new();
+    for it in row.iter() {
+        let t = it.text.trim();
+        if it.x < wall_x || t.is_empty() {
+            continue;
+        }
+        if is_amount_shaped(&it.text) {
+            amount_items.push(it);
+        } else if t.chars().any(|c| c.is_alphanumeric()) {
+            // A token with zero alphanumeric characters at all (a bare
+            // ":", ";", "." etc.) can never be part of a real narration —
+            // it's always a border-ruling-line misread landing as its own
+            // stray OCR word (observed gluing an errant ":" between two
+            // real words a row apart, e.g. "...SMC" / ":" / "GLOBAL...").
+            narration_words.push(it.text.as_str());
+        }
+    }
+    if !narration_words.is_empty() {
+        narration_parts.push(narration_words.join(" "));
+    }
+    if amount_items.is_empty() {
+        return;
+    }
+    amount_items.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+
+    let is_dangling = [dangling(col0_frags), dangling(col1_frags), dangling(balance_frags)];
+    let mut dangling_idxs: Vec<usize> = (0..3).filter(|&i| is_dangling[i]).collect();
+    dangling_idxs.sort_by(|&a, &b| anchors[a].partial_cmp(&anchors[b]).unwrap());
+
+    let nearest = |x: f64| -> usize {
+        (0..3)
+            .min_by(|&a, &b| (x - anchors[a]).abs().partial_cmp(&(x - anchors[b]).abs()).unwrap())
+            .unwrap()
+    };
+    let mut push_to = |idx: usize, text: &str| match idx {
+        0 => col0_frags.push(text.to_string()),
+        1 => col1_frags.push(text.to_string()),
+        _ => balance_frags.push(text.to_string()),
+    };
+
+    let paired = dangling_idxs.len().min(amount_items.len());
+    for i in 0..paired {
+        push_to(dangling_idxs[i], &amount_items[i].text);
+    }
+    for it in amount_items.iter().skip(paired) {
+        push_to(nearest(it.x), &it.text);
+    }
+}
+
 pub fn extract_icici_normal_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Option<ParseResult> {
     // Never fires for the Wealth Management layout (different extractor,
     // different header entirely) or for Stage 1's flat embedded-text rows —
@@ -1041,110 +1150,9 @@ pub fn extract_icici_normal_transactions(rows: &[Vec<PdfItem>], file_name: &str)
     // Account number: deliberately NOT extracted — see doc comment above.
     let account_no = String::new();
 
-    // A narrow OCR quirk rules out the generic `calc_col_boundaries`/
-    // `assign_cells` midpoint-bucketing machinery every other extractor in
-    // this module uses: this table's three amount columns sit only ~35-40pt
-    // apart, and a multi-word narration continuation line (e.g. "CRAFTCO/
-    // Axis" + a *separate* "Bank" word-box) routinely has its later word
-    // start well past where a fixed midpoint boundary would put the
-    // Narration/Withdrawal fence — a plain x-bucket read would silently
-    // swallow real narration words into the amount columns. Classifying by
-    // *shape* first (does this item's text look like part of a number at
-    // all?) and falling back to x only for genuine ambiguity between the
-    // three money columns sidesteps that entirely.
-    //
-    // Known OCR junk glyphs that land glued onto an otherwise-clean amount
-    // (a mis-read cell border, observed on every amount that happens to sit
-    // at the right edge of its column: "3,000.00}", "1,50,000.|").
-    fn strip_ocr_junk(s: &str) -> String {
-        s.chars().filter(|c| !matches!(c, '}' | '|' | '{' | '[' | ']' | '$')).collect()
-    }
-    // True for an item that — once known junk glyphs are stripped — is
-    // *purely* digits/commas/dots and therefore could only be all or part
-    // of a Withdrawal/Deposit/Balance amount (a Tran Id like "S8592" or a
-    // narration fragment with a "/" always fails this).
-    fn is_amount_shaped(text: &str) -> bool {
-        let cleaned = strip_ocr_junk(text);
-        !cleaned.is_empty() && cleaned.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.')
-    }
-    // A fragment "dangles" when it ends in a bare decimal point with no
-    // digits after it — the unambiguous signature of an amount OCR split
-    // across two physical rows (e.g. "1,58,266." continuing as "65" on the
-    // next row).
-    fn dangling(frags: &[String]) -> bool {
-        frags.last().is_some_and(|f| strip_ocr_junk(f).ends_with('.'))
-    }
-
-    // Classify one row's items (already filtered to `x >= wall_x`) into the
-    // block's Narration text and Debit/Withdrawal/Credit/Deposit/Balance
-    // fragment lists.
-    //
-    // Amount columns are resolved by nearest anchor X *unless* one or more
-    // columns are already "dangling" (see above) — a split fragment's
-    // continuation routinely lands closer to the *next* column's anchor
-    // than its own (observed: a Deposit split's tail digits sit nearer to
-    // Balance's anchor by raw distance), so absolute X is unusable there.
-    // What *does* hold across every observed case: the dangling columns'
-    // relative left-to-right order always matches the continuation
-    // fragments' own left-to-right order on the row that completes them —
-    // pairing by sorted order rather than by nearest distance resolves both
-    // splits in this fixture correctly.
-    fn classify_row(
-        row: &[PdfItem],
-        wall_x: f64,
-        anchors: [f64; 3], // [debit, credit, balance]
-        narration_parts: &mut Vec<String>,
-        debit_frags: &mut Vec<String>,
-        credit_frags: &mut Vec<String>,
-        balance_frags: &mut Vec<String>,
-    ) {
-        let mut narration_words: Vec<&str> = Vec::new();
-        let mut amount_items: Vec<&PdfItem> = Vec::new();
-        for it in row.iter() {
-            if it.x < wall_x || it.text.trim().is_empty() {
-                continue;
-            }
-            if is_amount_shaped(&it.text) {
-                amount_items.push(it);
-            } else {
-                narration_words.push(it.text.as_str());
-            }
-        }
-        if !narration_words.is_empty() {
-            narration_parts.push(narration_words.join(" "));
-        }
-        if amount_items.is_empty() {
-            return;
-        }
-        amount_items.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
-
-        let is_dangling = [
-            dangling(debit_frags),
-            dangling(credit_frags),
-            dangling(balance_frags),
-        ];
-        let mut dangling_idxs: Vec<usize> = (0..3).filter(|&i| is_dangling[i]).collect();
-        dangling_idxs.sort_by(|&a, &b| anchors[a].partial_cmp(&anchors[b]).unwrap());
-
-        let nearest = |x: f64| -> usize {
-            (0..3)
-                .min_by(|&a, &b| (x - anchors[a]).abs().partial_cmp(&(x - anchors[b]).abs()).unwrap())
-                .unwrap()
-        };
-        let mut push_to = |idx: usize, text: &str| match idx {
-            0 => debit_frags.push(text.to_string()),
-            1 => credit_frags.push(text.to_string()),
-            _ => balance_frags.push(text.to_string()),
-        };
-
-        let paired = dangling_idxs.len().min(amount_items.len());
-        for i in 0..paired {
-            push_to(dangling_idxs[i], &amount_items[i].text);
-        }
-        for it in amount_items.iter().skip(paired) {
-            push_to(nearest(it.x), &it.text);
-        }
-    }
+    // Shape-based amount/narration classification (`strip_ocr_junk`,
+    // `is_amount_shaped`, `dangling`, `classify_row`) now lives at module
+    // level above — shared with `extract_idbi_transactions`.
 
     struct Block {
         date_display: String,
@@ -1366,6 +1374,461 @@ pub fn extract_icici_normal_transactions(rows: &[Vec<PdfItem>], file_name: &str)
         opening_balance: op_balance,
         closing_balance: None,
         bank_name: "ICICI Bank".to_string(),
+        account_no,
+        source_name: file_name.to_string(),
+        col_map: Default::default(),
+        header_row_idx: 0,
+        noise_row_count: 0,
+        rejected_row_count: 0,
+    })
+}
+
+// ── extract_idbi_transactions ─────────────────────────────────────────────────
+
+/// Parser for IDBI Bank's "Statement of Account" PDF — the exact same
+/// architecture-level bug as `extract_icici_normal_transactions` (see that
+/// function's doc comment): this PDF's generator moves the text cursor
+/// between visual lines with bare `Td`/`Tm` operators, which
+/// `text_extractor::extract_page_text` silently ignores, so page 1's entire
+/// ~20-row transaction table collapses into one giant flat-text blob with
+/// no row/field delimiters — unrecoverable at the flat-text layer. Page 2 of
+/// this particular statement happens to also render its most recent 4
+/// transactions in a normal one-field-per-line layout (a distinct "recent
+/// transactions" section), so those 4 were already recoverable via the
+/// existing flat-text fallback — which is the entire reason only 4
+/// transactions were ever visible before this extractor existed, NOT a
+/// pagination bug, NOT a header-detection-starts-on-page-2 bug, NOT a
+/// validation-rejection bug, and NOT an opening-balance-misclassification
+/// bug. Like ICICI Normal, this extractor runs only against OCR word-boxes
+/// (Tier 0 — `ocr_extractor::extract_pages_via_ocr`), which recovers real
+/// per-word X/Y positions for *both* pages uniformly, regardless of how
+/// broken either page's own text layer is — so it recovers page 1's ~20
+/// rows and page 2's remaining 4 through the same code path.
+///
+/// Layout (2-row split header, repeats per page): `S.No | Description |
+/// Cheque No | Withdrawals (Dr) | Deposits (Cr) | Balance (INR)`, with a
+/// second header row spelling out `Txn Date | Value Date` above the
+/// Description column. Each transaction spans 1+ physical OCR rows (a new
+/// block starts wherever a valid `dd/mm/yyyy` date is found; the Description
+/// column continues across further rows for a long narration).
+///
+/// **Redacted account-holder header**: same as ICICI Normal — the
+/// customer-detail box is covered by a solid black rectangle on the
+/// rendered page, a deliberate redaction rather than hidden metadata to dig
+/// out. `account_no` is left empty (masks to bare `XXXX` in the UI).
+pub fn extract_idbi_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Option<ParseResult> {
+    // Same "this came from real OCR word-boxes, not Stage 1's flat X=0 rows"
+    // signal `extract_icici_normal_transactions` uses.
+    let header_window: Vec<&Vec<PdfItem>> = rows.iter().take(10).collect();
+    let early_text: String = header_window
+        .iter()
+        .map(|r| r.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let el = early_text.to_lowercase();
+    if !(el.contains("txn date")
+        && el.contains("withdra")
+        && el.contains("deposit")
+        && el.contains("balance"))
+    {
+        return None;
+    }
+    let distinct_x = header_window
+        .iter()
+        .flat_map(|r| r.iter().map(|it| it.x.round() as i64))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if distinct_x < 5 {
+        return None;
+    }
+
+    // Header keywords, individually — this table's header wraps across 2
+    // physical OCR rows ("S.No | Description | Cheque No | Withdrawals |
+    // Deposits | Balance" on one, "Txn Date | Value Date ... (Dr) | (Cr) |
+    // (INR)" on the next). `wall_x` anchors on the rightmost "Date" word
+    // (both "Txn Date" and "Value Date" say "Date" — taking the max picks
+    // whichever renders further right, Value Date, without needing to
+    // disambiguate by which date column it belongs to) so the two date
+    // columns and S.No never bleed into Description/amount classification.
+    let mut withdrawal_x = None;
+    let mut deposit_x = None;
+    let mut balance_x = None;
+    let mut narration_x = None;
+    let mut cheque_no_x = None;
+    let mut wall_x: f64 = 0.0;
+    for row in &header_window {
+        for it in row.iter() {
+            let l: String =
+                it.text.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+            if l.starts_with("withdra") && withdrawal_x.is_none() {
+                withdrawal_x = Some(it.x);
+            } else if l.starts_with("deposit") && deposit_x.is_none() {
+                deposit_x = Some(it.x);
+            } else if l.starts_with("balance") && balance_x.is_none() {
+                balance_x = Some(it.x);
+            } else if l == "description" && narration_x.is_none() {
+                narration_x = Some(it.x);
+            } else if l == "cheque" && cheque_no_x.is_none() {
+                cheque_no_x = Some(it.x);
+            } else if l == "date" {
+                wall_x = wall_x.max(it.x);
+            }
+        }
+    }
+    let (withdrawal_x, deposit_x, balance_x, narration_x) =
+        match (withdrawal_x, deposit_x, balance_x, narration_x) {
+            (Some(w), Some(d), Some(b), Some(n)) => (w, d, b, n),
+            _ => return None,
+        };
+    let wall_x = if wall_x > 0.0 { wall_x + 20.0 } else { return None };
+    // Cheque No candidates must sit strictly in the Cheque No column, not
+    // merely "somewhere before the amount columns" — that broader range
+    // also covers the whole Description column, and a bare digit-run that's
+    // really a narration continuation (e.g. a scheme code wrapped onto its
+    // own line, "202610006") sits at Description's own x, not Cheque No's.
+    // The midpoint between the two header words' x is a safe dividing line:
+    // real cheque numbers render indented under "Cheque" (verified against
+    // this fixture's one real cheque number, "409615" at x≈344 vs a
+    // Description-column wrap at x≈201 — comfortably on either side of the
+    // ~282 midpoint between "Description" at x≈235 and "Cheque" at x≈329).
+    let cheque_no_min_x = match cheque_no_x {
+        Some(cnx) => (narration_x + cnx) / 2.0,
+        None => wall_x,
+    };
+    let cheque_no_max_x = withdrawal_x.min(deposit_x) - 10.0;
+
+    // Account number: deliberately NOT extracted — see doc comment above.
+    let account_no = String::new();
+
+    // A transaction date in this statement is a plain `dd/mm/yyyy` (no
+    // month abbreviations, unlike ICICI Normal's "03/Apr/2025" columns) —
+    // never matches narration text, which this fixture never glues a
+    // slash-date into.
+    static DATE_ITEM_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^\D*(\d{1,2}/\d{1,2}/\d{4})").unwrap());
+
+    struct Block {
+        date_display: String,
+        date_ts: i64,
+        narration_parts: Vec<String>,
+        debit_frags: Vec<String>,
+        credit_frags: Vec<String>,
+        balance_frags: Vec<String>,
+        chq_no: Option<String>,
+    }
+
+    let mut txns: Vec<Transaction> = Vec::new();
+    let mut txn_counter = 0usize;
+    let mut cur: Option<Block> = None;
+
+    macro_rules! flush {
+        () => {
+            if let Some(b) = cur.take() {
+                let narration_joined: String = b
+                    .narration_parts
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                // Every real Description in this statement starts with a
+                // letter (a bank narration code like "NEFT-"/"IPAY/"/"Int."
+                // or a plain name); a leading run of anything else is the
+                // Description column's own left border ruling line,
+                // consistently misread by Tesseract as junk glued onto the
+                // first word — variously "|", "_|", "=|", "‘|", "—_|"
+                // depending on anti-aliasing noise (confirmed against every
+                // row of this fixture's raw OCR output: never a real
+                // character of the actual narration).
+                // The right edge of the Description column has the same
+                // border-ruling problem, glued onto the LAST word instead
+                // (a lone trailing ";"/":"/"." — confirmed against this
+                // fixture's raw OCR: never a real trailing character of an
+                // actual narration, which always ends mid-word or on a
+                // digit).
+                let narration_joined = narration_joined
+                    .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .to_string();
+                fn clean_amount_frags(frags: &[String]) -> String {
+                    frags
+                        .concat()
+                        .chars()
+                        .filter(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
+                        .collect()
+                }
+                let debit = parse_amount_str(&clean_amount_frags(&b.debit_frags));
+                let credit = parse_amount_str(&clean_amount_frags(&b.credit_frags));
+                let balance = parse_amount_str(&clean_amount_frags(&b.balance_frags));
+                if debit.is_some() || credit.is_some() {
+                    txn_counter += 1;
+                    let reference = b.chq_no.clone().unwrap_or_else(|| {
+                        extract_ref_from_narration(&narration_joined).unwrap_or_default()
+                    });
+                    let mut t = Transaction::new(format!("t_idbi_{}", txn_counter));
+                    t.date = b.date_display;
+                    t.date_ts = b.date_ts;
+                    t.narration = narration_joined;
+                    t.reference = reference;
+                    t.debit = debit;
+                    t.credit = credit;
+                    t.balance = balance;
+                    t.bank_name = "IDBI Bank".to_string();
+                    t.account_no = account_no.clone();
+                    txns.push(t);
+                }
+            }
+        };
+    }
+
+    for row in rows.iter() {
+        if row.is_empty() {
+            continue;
+        }
+        let row_joined: String =
+            row.iter().map(|it| it.text.as_str()).collect::<Vec<_>>().join(" ");
+        let rl = row_joined.to_lowercase();
+
+        // End-of-table noise: statement summary / legend. Every real
+        // transaction row precedes this in the source statement.
+        if rl.contains("statement summary")
+            || rl.contains("dr count")
+            || rl.contains("legends")
+            || rl.contains("this is a computer generated")
+        {
+            break;
+        }
+        // Repeated per-page header row.
+        if rl.contains("txn date") || (rl.contains("withdra") && rl.contains("deposit")) {
+            continue;
+        }
+        // Page-footer boilerplate (address/toll-free/page-number) sits
+        // between page 1's last real row and page 2's first one — *before*
+        // the statement summary noise caught above, so it can't `break`
+        // (page 2's real transactions still follow it) but must still be
+        // skipped rather than falling through to classification, where its
+        // page-footer text — mid-x-range enough to overlap the Description
+        // column — would otherwise get appended onto whatever transaction
+        // block is still open (confirmed against this fixture: without
+        // this, "Regd. Office: IDBI Tower, WTC Complex..." et al. bleed
+        // into the last transaction before the page break).
+        if rl.contains("idbi bank ltd")
+            || rl.contains("regd. office")
+            || rl.contains("toll-free numbers")
+            || rl.contains("chargeable number")
+            || (rl.starts_with("page ") && rl.contains(" of "))
+        {
+            continue;
+        }
+
+        // Cheque No: a pure-digit item sitting strictly in the Cheque No
+        // column (`cheque_no_min_x..cheque_no_max_x`, NOT the wider
+        // `wall_x..cheque_no_max_x` span — that would also catch a bare
+        // digit-run narration continuation sitting at Description's own x;
+        // see `cheque_no_min_x`'s doc comment). Identified by x-position +
+        // shape only — NOT excluded from being amount-shaped, since a real
+        // cheque number (e.g. "409615") always *is* digit-only. Filtered
+        // out of the row by exact x-match before classification so it
+        // can't concatenate onto a real amount and corrupt it.
+        let chq_no_item = row.iter().find(|it| {
+            it.x >= cheque_no_min_x
+                && it.x < cheque_no_max_x
+                && it.text.trim().chars().all(|c| c.is_ascii_digit())
+                && it.text.trim().len() >= 4
+        });
+        let chq_no_x = chq_no_item.map(|it| it.x);
+        let chq_no_found = chq_no_item.map(|it| it.text.trim().to_string());
+
+        // First (leftmost) valid slash-date anywhere in the row is this
+        // row's Txn Date — naturally the leftmost of the two date columns,
+        // whichever OCR manages to read completely.
+        let mut row_date_display = String::new();
+        let mut row_date_ts = 0i64;
+        for it in row.iter() {
+            let cleaned = it.text.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+            if let Some(caps) = DATE_ITEM_RE.captures(cleaned) {
+                let nd = normalize_transaction_date(&caps[1]);
+                if nd.valid {
+                    row_date_display = nd.display;
+                    row_date_ts = nd.ts;
+                    break;
+                }
+            }
+        }
+
+        if !row_date_display.is_empty() {
+            // New transaction block.
+            flush!();
+            let mut b = Block {
+                date_display: row_date_display,
+                date_ts: row_date_ts,
+                narration_parts: Vec::new(),
+                debit_frags: Vec::new(),
+                credit_frags: Vec::new(),
+                balance_frags: Vec::new(),
+                chq_no: chq_no_found,
+            };
+            let filtered_row: Vec<PdfItem> = match chq_no_x {
+                Some(cx) => row.iter().filter(|it| it.x != cx).cloned().collect(),
+                None => row.clone(),
+            };
+            classify_row(
+                &filtered_row,
+                wall_x,
+                [withdrawal_x, deposit_x, balance_x],
+                &mut b.narration_parts,
+                &mut b.debit_frags,
+                &mut b.credit_frags,
+                &mut b.balance_frags,
+            );
+            cur = Some(b);
+        } else if let Some(b) = cur.as_mut() {
+            if b.chq_no.is_none() {
+                b.chq_no = chq_no_found;
+            }
+            // A narration-continuation row's bare reference/scheme-code
+            // number (e.g. "202610006", the tail of "FY2025-202610006"
+            // split across OCR rows) is indistinguishable from a genuine
+            // split-amount continuation by shape alone. Only treat a bare
+            // digit-run as a real amount continuation when one of the
+            // amount columns is actually "dangling" (a genuine in-progress
+            // cross-row split) — otherwise route it into the narration
+            // instead of letting `classify_row`'s shape-based amount
+            // detection corrupt the real amount with it.
+            let any_dangling =
+                dangling(&b.debit_frags) || dangling(&b.credit_frags) || dangling(&b.balance_frags);
+            let filtered_row: Vec<PdfItem> = if any_dangling {
+                match chq_no_x {
+                    Some(cx) => row.iter().filter(|it| it.x != cx).cloned().collect(),
+                    None => row.clone(),
+                }
+            } else {
+                let mut kept = Vec::new();
+                let mut rescued_narration = Vec::new();
+                for it in row.iter() {
+                    if Some(it.x) == chq_no_x {
+                        continue;
+                    }
+                    let t = it.text.trim();
+                    let bare_whole_number = t.len() >= 4 && t.chars().all(|c| c.is_ascii_digit());
+                    if bare_whole_number {
+                        rescued_narration.push(t.to_string());
+                    } else {
+                        kept.push(it.clone());
+                    }
+                }
+                if !rescued_narration.is_empty() {
+                    b.narration_parts.push(rescued_narration.join(" "));
+                }
+                kept
+            };
+            classify_row(
+                &filtered_row,
+                wall_x,
+                [withdrawal_x, deposit_x, balance_x],
+                &mut b.narration_parts,
+                &mut b.debit_frags,
+                &mut b.credit_frags,
+                &mut b.balance_frags,
+            );
+        }
+    }
+    flush!();
+
+    // Anti-false-positive guard, same threshold every other dedicated
+    // extractor in this module uses.
+    if txns.len() < 2 {
+        log::debug!(
+            "[BSP IDBI] only {} transactions extracted from \"{}\" — treating as a non-match",
+            txns.len(),
+            file_name
+        );
+        return None;
+    }
+
+    // This statement lists transactions newest-first (S.No 1 is the most
+    // recent date), so `txns` was built in that same order above. But
+    // `compute_prev_balances` (and everything that reads `opening_balance`/
+    // "closing balance" off the returned `ParseResult` downstream, e.g. the
+    // Summary Panel) assumes the array is CHRONOLOGICAL — the balance
+    // *before* array element 0 is the account's true opening balance, and
+    // the last element is the most recent transaction. Reversing here (once
+    // the anti-false-positive guard above has already run on natural
+    // reading order) makes that hold, exactly like `extract_icici_normal_
+    // transactions`'s own source statement already does natively (oldest
+    // first) without needing this step.
+    txns.reverse();
+
+    let op_balance = compute_prev_balances(&mut txns, None);
+
+    // Debit/Credit must never mix — this table has separate Withdrawal/
+    // Deposit columns, so a real row only ever posts to one. Balance-chain
+    // ground truth decides which side is real, same as ICICI Normal.
+    for t in txns.iter_mut() {
+        if let (Some(dr), Some(cr)) = (t.debit, t.credit) {
+            let keep_credit = match (t.prev_balance, t.balance) {
+                (Some(pb), Some(bal)) => {
+                    let diff = ((bal - pb) * 100.0).round() / 100.0;
+                    let tol = |amt: f64| f64::max(1.0, amt * 0.02);
+                    let cr_fits = (diff - cr).abs() < tol(cr);
+                    let dr_fits = (diff + dr).abs() < tol(dr);
+                    if cr_fits && !dr_fits {
+                        true
+                    } else if dr_fits && !cr_fits {
+                        false
+                    } else {
+                        cr >= dr
+                    }
+                }
+                _ => cr >= dr,
+            };
+            if keep_credit {
+                t.debit = None;
+            } else {
+                t.credit = None;
+            }
+        }
+    }
+
+    // Balance-chain repair: unlike Debit/Credit (each independently
+    // OCR'd from its own clean column and verified correct against this
+    // fixture row-for-row), the printed Balance is fully redundant —
+    // always exactly `prev_balance + credit - debit` in a real statement —
+    // and empirically the more OCR-fragile field here (Tesseract twice
+    // dropped a leading digit outright, e.g. "13368.15" → "3368.15", and
+    // once misread a leading "1" as "{", stripped by `strip_ocr_junk` as
+    // punctuation before this point). Whenever a transaction's own balance
+    // doesn't reconcile with the chain, recompute it from Debit/Credit +
+    // the previous (already-repaired, since this walks oldest→newest)
+    // balance instead of trusting the single OCR'd number.
+    let mut running_balance = op_balance;
+    for t in txns.iter_mut() {
+        if let Some(pb) = running_balance {
+            let expected =
+                ((pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0)) * 100.0).round() / 100.0;
+            if let Some(bal) = t.balance {
+                if (expected - bal).abs() > 0.01 {
+                    log::debug!(
+                        "[BSP IDBI] balance chain mismatch for {} \"{}\": OCR'd {:.2}, chain says {:.2} — using chain value",
+                        t.date,
+                        safe_prefix(&t.narration, 40),
+                        bal,
+                        expected
+                    );
+                    t.balance = Some(expected);
+                    t.prev_balance = Some(pb);
+                }
+            }
+        }
+        running_balance = t.balance;
+    }
+
+    prepend_opening_balance_row(&mut txns, op_balance, "IDBI Bank", &account_no);
+
+    Some(ParseResult {
+        transactions: txns,
+        opening_balance: op_balance,
+        closing_balance: None,
+        bank_name: "IDBI Bank".to_string(),
         account_no,
         source_name: file_name.to_string(),
         col_map: Default::default(),

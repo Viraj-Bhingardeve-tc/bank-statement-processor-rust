@@ -289,14 +289,22 @@ fn kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly() {
 /// `extract_icici_normal_transactions` (`transaction_extractor.rs`) turns
 /// those word-boxes into transactions. See
 /// `icici_bank_normal_pdf_imports_successfully_via_ocr` below for the
-/// end-to-end lock-in against the real fixture via that path. "IDBI Bank.pdf"
-/// is unaffected by this fix (different, still-unrecovered problem) and
-/// remains exactly as described below.
+/// end-to-end lock-in against the real fixture via that path.
 ///
-/// **IDBI Bank.pdf remains a real bug, not fixed here** (out of scope:
-/// splitting this reliably risks reintroducing the exact "random amount
-/// extraction" class of bug the OCR-path fixes elsewhere in this suite exist
-/// to prevent — see the doc comment below for why).
+/// **"IDBI Bank.pdf" fixed too (2026-08-29) — same mechanism, same reason
+/// this test's IDBI assertion below is also intentionally unchanged.** Its
+/// squashed page 1 is the exact same root cause (bare `Td`/`Tm` positioning,
+/// no line-break operators) and the exact same fix: Tier 0 renders both
+/// pages and reads real per-word positions back with Tesseract, and a
+/// dedicated `extract_idbi_transactions` (`transaction_extractor.rs`) turns
+/// those word-boxes into transactions — recovering page 1's ~20 rows *and*
+/// page 2's remaining 4 uniformly, since OCR doesn't care that page 2's own
+/// text layer happened to be less broken to begin with. This test's IDBI
+/// half only ever checked `parse_pdf_via_real_pipeline` (Stage 1
+/// embedded-text → Stage 2 flat-text → multiline-preprocessed Stage 2),
+/// never the Tier 0 OCR path, so `idbi_real < 10` below remains true and
+/// intentionally unchanged. See `idbi_bank_pdf_imports_successfully_via_ocr`
+/// below for the end-to-end lock-in against the real fixture via that path.
 ///
 /// "ICICI Bank.pdf" and "IDBI Bank.pdf" both extract fine at the text layer
 /// (no Identity-H garbage — that separate bug, which used to affect these
@@ -323,14 +331,17 @@ fn kotak_narrow_layout_debit_credit_and_balance_reconcile_exactly() {
 /// problem), not a best-effort regex — genuinely out of scope for this
 /// session's time-box.
 ///
-/// "IDBI Bank.pdf" is a partial case, not a hard zero: its statement
-/// happens to *also* render its most recent 4 transactions in a normal
-/// one-field-per-line layout (a distinct "recent transactions" section)
-/// which parses correctly and reconciles — but the other ~20 (of a
-/// bank-reported 24 total: "Dr Count 7" + "Cr Count 17") live only in the
-/// unparseable squashed line and are silently missing from the result.
+/// "IDBI Bank.pdf" is a partial case, not a hard zero, at the Stage-1/2
+/// levels this test exercises: its statement happens to *also* render its
+/// most recent 4 transactions in a normal one-field-per-line layout (a
+/// distinct "recent transactions" section) which parses correctly and
+/// reconciles — but the other ~20 (of a bank-reported 24 total: "Dr Count 7"
+/// + "Cr Count 17") live only in the unparseable squashed line and are
+/// silently missing from this path's result. All 24 are recovered via the
+/// Tier 0 OCR path instead — see the doc comment above and
+/// `idbi_bank_pdf_imports_successfully_via_ocr` below.
 #[test]
-#[ignore = "documents the Stage-2 flat-text limitation this test's ICICI half was originally about (still true, unchanged — ICICI Bank.pdf itself is fixed via a different path, see icici_bank_normal_pdf_imports_successfully_via_ocr) and the still-unfixed IDBI Bank.pdf squashed-line bug; see doc comment"]
+#[ignore = "documents the Stage-2 flat-text limitation this test's ICICI and IDBI halves were originally about (both still true, unchanged — both fixed via a different path, see icici_bank_normal_pdf_imports_successfully_via_ocr and idbi_bank_pdf_imports_successfully_via_ocr); see doc comment"]
 fn pdf_fixtures_with_a_squashed_single_line_table_extract_far_fewer_transactions_than_the_real_statement_contains(
 ) {
     // ICICI Bank.pdf: the whole table is one line → Stage 2 (raw OCR-text
@@ -912,6 +923,174 @@ fn icici_bank_normal_pdf_imports_successfully_via_ocr() {
     // transactions`'s doc comment): account_no is deliberately left empty
     // rather than dug out from behind the black-box redaction, which masks
     // to bare "XXXX" in the UI — the documented "unavailable" fallback.
+    assert_eq!(
+        result.account_no, "",
+        "account number must stay empty (redacted in the source PDF), not be reconstructed from \
+         text hidden behind the redaction"
+    );
+}
+
+/// Locks in the "IDBI Bank.pdf" page-1 fix (2026-08-29) end-to-end against
+/// the real fixture, the same way `icici_bank_normal_pdf_imports_
+/// successfully_via_ocr` does for ICICI Bank.pdf immediately above — same
+/// root cause (bare `Td`/`Tm` positioning collapses page 1's ~20-row table
+/// into one flat text line with no row/field delimiters), same fix (Tier 0
+/// render+OCR via `ocr_extractor::extract_pages_via_ocr`, fed into a
+/// dedicated `transaction_extractor::extract_idbi_transactions`).
+///
+/// Page 2 of this statement happens to render one-field-per-line already, so
+/// its 4 "recent transactions" were always recoverable at the flat-text
+/// layer (see the previous test's doc comment) — this is exactly why only 4
+/// transactions were ever visible before this fix, not a pagination,
+/// header-detection, or opening-balance bug as originally suspected. OCR
+/// recovers page 1 and page 2 uniformly through the same code path, so this
+/// test's real value is confirming BOTH pages land in one continuous,
+/// non-duplicated 24-transaction list.
+///
+/// Ground truth is the fixture's own printed Statement Summary ("Dr Count
+/// 7", "Cr Count 17", "Dr Amount 905024.70", "Cr Amount 736050.90"), cross-
+/// checked row-for-row against both rendered pages directly (not just via
+/// this crate's own OCR round-trip — see `extract_idbi_transactions`'s doc
+/// comment for the three real bugs that first round of "it reconciles"
+/// checking missed entirely: two OCR-dropped leading balance digits masked
+/// by a coincidentally-still-plausible chain, one narration-continuation
+/// digit run wrongly captured as a Cheque No reference, and a mislabeled
+/// Opening/Closing Balance from returning the array in the statement's own
+/// newest-first order instead of chronological). Every one of the 24 real
+/// transactions' Date/Narration/Reference/Debit/Credit/Balance was verified
+/// this way; this test locks in both the aggregate counts and (for the
+/// first and last transactions specifically) the exact field values.
+///
+/// Debit and credit *counts* are asserted exactly (7/17). The *totals* are
+/// asserted within a small tolerance (a few paise) rather than exactly: the
+/// bank's own printed summary total itself differs from the sum of its own
+/// individually-printed transaction amounts by 2-4 paise (confirmed by hand
+/// on the rendered PDF — a rounding artifact in IDBI's own statement
+/// generator, not an extraction bug on this side).
+#[test]
+#[ignore = "requires mutool + tesseract on PATH and takes ~15 seconds (2-page render+OCR) — run explicitly: cargo test --ignored idbi_bank_pdf"]
+fn idbi_bank_pdf_imports_successfully_via_ocr() {
+    let tools_available = std::process::Command::new("mutool").arg("-v").output().is_ok()
+        && std::process::Command::new("tesseract").arg("--version").output().is_ok();
+    if !tools_available {
+        eprintln!(
+            "SKIPPED: mutool and/or tesseract not found on PATH — install both to run this test \
+             (see doc comment)"
+        );
+        return;
+    }
+
+    let path = fixture("IDBI Bank.pdf");
+    let rows = parser::ocr_extractor::extract_pages_via_ocr(&path);
+    assert!(
+        !rows.is_empty(),
+        "extract_pages_via_ocr returned zero rows — mutool/tesseract ran but produced nothing"
+    );
+
+    let result = pdf_parser::parse_pdf_rows(rows, "IDBI Bank.pdf")
+        .expect("parse_pdf_rows returned None for OCR'd IDBI Bank rows");
+
+    assert_eq!(result.bank_name, "IDBI Bank");
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert_eq!(
+        real.len(),
+        24,
+        "expected exactly 24 real transactions (bank-reported 'Dr Count 7' + 'Cr Count 17'), \
+         got {} — if this is 4, page 1 is being dropped again",
+        real.len()
+    );
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set (Debit/Credit must never mix): {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+        assert!(!t.date.is_empty(), "transaction with empty date: {t:?}");
+    }
+
+    let debit_count = real.iter().filter(|t| t.debit.is_some()).count();
+    let credit_count = real.iter().filter(|t| t.credit.is_some()).count();
+    assert_eq!(debit_count, 7, "expected 7 debits per the printed Statement Summary 'Dr Count'");
+    assert_eq!(credit_count, 17, "expected 17 credits per the printed Statement Summary 'Cr Count'");
+
+    let total_debit: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_credit: f64 = real.iter().filter_map(|t| t.credit).sum();
+    assert!(
+        (total_debit - 905_024.70).abs() < 0.10,
+        "total debit {total_debit:.2} != printed Dr Amount 905024.70"
+    );
+    assert!(
+        (total_credit - 736_050.90).abs() < 0.10,
+        "total credit {total_credit:.2} != printed Cr Amount 736050.90"
+    );
+
+    // The array is chronological (oldest first), NOT the statement's own
+    // newest-first print order — required so `opening_balance` below and
+    // the Summary Panel's "Closing Balance" (derived downstream from
+    // `real.last()`) land on the right ends of the date range. Verified
+    // directly against the rendered PDF: the true opening balance is the
+    // balance just before Sr24 (01/04/2025), i.e. 201093.74 - 18751.73.
+    assert_eq!(
+        result.opening_balance,
+        Some(182_342.01),
+        "opening_balance must be the balance before the OLDEST transaction, not the newest — \
+         if this is 368368.15 (or 378368.15), the array is back in the statement's own \
+         newest-first order"
+    );
+
+    // First transaction after chronological ordering (Sr24, oldest, from
+    // page 1's squashed table): date, credit amount, and balance.
+    let first = real.first().expect("at least one real transaction");
+    assert_eq!(first.date, "01/04/2025");
+    assert_eq!(first.credit, Some(18_751.73));
+    assert_eq!(first.debit, None);
+    assert_eq!(first.balance, Some(201_093.74));
+    assert_eq!(first.narration, "NEFT- HDFCN52025040151267045-SMC GLOBAL SECURITIES");
+
+    // Last transaction (Sr1, most recent, from page 2's own normally-laid-
+    // out section): date, debit amount, Cheque No used as reference, and
+    // balance — this specific balance is the one that locks in the
+    // balance-chain repair (Tesseract itself read "{3368.15", a misread "1"
+    // stripped as punctuation, leaving an OCR'd value 10000 short of the
+    // true 13368.15; the chain recomputes it from Sr2's balance - this
+    // debit instead of trusting the single OCR'd number).
+    let last = real.last().expect("at least one real transaction");
+    assert_eq!(last.date, "20/01/2026");
+    assert_eq!(last.debit, Some(365_000.00));
+    assert_eq!(last.credit, None);
+    assert_eq!(last.reference, "409615");
+    assert_eq!(
+        last.balance,
+        Some(13_368.15),
+        "if this is 3368.15, the balance-chain repair (extract_idbi_transactions) regressed"
+    );
+    assert_eq!(last.narration, "PRAJAKTA RAMKRISHNA");
+
+    // Locks in the Cheque-No-column-width fix: a bare narration-
+    // continuation digit run ("202610006", the wrapped tail of "PMSBY
+    // Renewal FY2025-202610006") must NOT be captured as if it came from
+    // the Cheque No column (which is genuinely blank for this row) — it's
+    // real narration text that also happens to look like a UTR reference,
+    // same as several other rows below.
+    let pmsby = real
+        .iter()
+        .find(|t| t.narration.contains("PMSBY"))
+        .expect("expected the PMSBY Renewal row in the fixture");
+    assert_eq!(pmsby.narration, "PMSBY Renewal FY2025- 202610006");
+    assert_eq!(pmsby.debit, Some(20.00));
+
+    // Redacted account-holder header (see `extract_idbi_transactions`'s doc
+    // comment): account_no is deliberately left empty rather than dug out
+    // from behind the black-box redaction, same as ICICI Bank.pdf above.
     assert_eq!(
         result.account_no, "",
         "account number must stay empty (redacted in the source PDF), not be reconstructed from \
