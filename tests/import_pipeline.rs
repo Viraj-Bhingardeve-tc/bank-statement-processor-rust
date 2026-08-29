@@ -1256,6 +1256,156 @@ fn idfc_first_bank_pdf_debit_credit_is_never_mixed_via_ocr() {
     );
 }
 
+/// SBI.pdf (2026-08-29) shipped with two independent bugs, both fixed here.
+///
+/// **Bank detection**: `detect_by_phrase` used a plain, unbounded substring
+/// search, so it matched the phrase "hdfc bank" inside a *counterparty's*
+/// name glued with no separator by `norm()` — this statement's narration
+/// text contains "...HDFC00161000007598HDFCBANKLTD..." (an NEFT/RTGS
+/// sender's own bank+account, "HDFC BANK LTD", nothing to do with whose
+/// statement this is), which `norm()` collapses into one unbroken run
+/// containing "hdfcbankltd". That substring match won HDFC Bank at 0.80
+/// confidence via P5 (phrase-in-full-text), which is high enough to block
+/// the correct filename-based SBI detection (P6 is capped at 0.65 and only
+/// runs when confidence is still < 0.70). Fixed in `bank_detection.rs` by
+/// requiring non-alphanumeric boundaries around a phrase match
+/// (`find_word_bounded`) — see `detect_counterparty_named_hdfc_bank_ltd_
+/// does_not_steal_sbi` in that module's own tests for the regression lock-in
+/// and confirmation that real HDFC detection (by IFSC, domain, and header
+/// phrase) is unaffected.
+///
+/// **Debit/Credit extraction**: the same squashed-single-line-table root
+/// cause as ICICI/IDBI/IDFC First (every embedded-text item at `x=0.0`)
+/// meant this needed its own dedicated Tier-0-OCR extractor,
+/// `extract_sbi_transactions`. Getting it right against the real fixture
+/// took five separate fixes, each found by comparing extracted output
+/// against the actual rendered PDF pages rather than trusting internal
+/// self-consistency: (1) a stray narration-continuation fragment landing in
+/// the Ref No. column's X range needed a shape filter, not just an X-range
+/// boundary; (2) a 2-digit-day date's 4-digit year sometimes wraps onto the
+/// *next* physical OCR row entirely, requiring a one-row lookahead
+/// reconstructing day+month and year independently (bridging both with one
+/// regex across an unpredictable amount of glued narration text — like the
+/// real word "WITHDRAWAL" landing with zero separator right after the
+/// month — turned out not to be reliably boundable, so this was rebuilt to
+/// extract day+month from the current row and the year from the next row's
+/// leading 4 digits, each on its own); (3) the Description column's own
+/// left edge needed a small margin, not an exact cutoff, because a
+/// genuine narration word occasionally rendered a fraction of a point to
+/// its left; (4) a per-page footer disclaimer wraps across two physical OCR
+/// rows and only the first was being skipped, so the second glued onto
+/// whatever transaction happened to precede it (worst case: the statement's
+/// very last transaction, corrupting its narration); (5) most seriously, a
+/// junk glyph (a border-line misread `|`) glued onto the *second* half of
+/// an OCR-split Ref No. fragment ("|4897691", continuing "162095" from the
+/// row above) failed the Ref column's digit-only shape check on its raw
+/// text, fell through into ordinary row content, and there *did* pass the
+/// amount shape check (which already strips junk) — concatenating a stray
+/// digit run onto a real Debit amount, corrupting it into an unparseable
+/// string and silently dropping the whole transaction. That fifth bug is
+/// the one that produced this task's headline symptom set: a dropped
+/// 07/05/2024 debit of ₹1,00,000 whose knock-on effect was far worse than
+/// one missing row — the balance-chain repair pass (same "trust the running
+/// total over a mismatched OCR'd balance" design as IDBI/IDFC First) then
+/// treated every subsequent transaction's correctly-OCR'd balance as wrong
+/// and overwrote it with a chain computed from the gap, corrupting every
+/// balance for the rest of the 11-month statement even though the raw OCR
+/// text for most of them was already correct.
+///
+/// Verified transaction-by-transaction against the actual rendered PDF
+/// pages (not just internal self-consistency): the first transaction (the
+/// literal bug report — a debit that was coming out as a credit before the
+/// column-based extractor replaced flat-text guessing), all 24 transactions
+/// on page 6 (Jul 2024), and all 24 transactions on page 11 (Nov 2024 –
+/// Feb 2025, including the two ambiguous same-day-same-amount ATM
+/// withdrawals whose dates cross a page boundary) match the PDF exactly —
+/// date, Debit/Credit side, and Balance, every one. No printed summary
+/// totals exist anywhere in this 12-page statement (confirmed: its last
+/// page ends directly with the disclaimer, no Total Debit/Credit box), so
+/// there is nothing to reconcile against beyond the balance chain itself,
+/// which closes with zero unexplained mismatches end to end.
+#[test]
+#[ignore = "requires mutool + tesseract on PATH and takes ~45 seconds (12-page render+OCR) — run explicitly: cargo test --ignored sbi_bank"]
+fn sbi_bank_pdf_is_identified_correctly_and_debit_credit_is_never_mixed_via_ocr() {
+    let tools_available = std::process::Command::new("mutool").arg("-v").output().is_ok()
+        && std::process::Command::new("tesseract").arg("--version").output().is_ok();
+    if !tools_available {
+        eprintln!(
+            "SKIPPED: mutool and/or tesseract not found on PATH — install both to run this test \
+             (see doc comment)"
+        );
+        return;
+    }
+
+    let path = fixture("SBI.pdf");
+    let rows = parser::ocr_extractor::extract_pages_via_ocr(&path);
+    assert!(
+        !rows.is_empty(),
+        "extract_pages_via_ocr returned zero rows — mutool/tesseract ran but produced nothing"
+    );
+
+    let result = pdf_parser::parse_pdf_rows(rows, "SBI.pdf")
+        .expect("parse_pdf_rows returned None for OCR'd SBI rows");
+
+    assert_eq!(
+        result.bank_name, "State Bank of India",
+        "must never be HDFC Bank — see doc comment for the counterparty-name false-positive this \
+         locks in"
+    );
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert_eq!(real.len(), 265, "expected exactly 265 real transactions");
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set (Debit/Credit must never mix): {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+        assert!(!t.date.is_empty(), "transaction with empty date: {t:?}");
+    }
+
+    // The FIRST transaction is the exact live bug report: a UPI debit that
+    // was coming out as a Credit before the column-based extractor replaced
+    // flat-text guessing.
+    let first = real.first().expect("at least one real transaction");
+    assert_eq!(first.date, "04/05/2024");
+    assert_eq!(first.debit, Some(30.0));
+    assert_eq!(first.credit, None);
+    assert_eq!(first.balance, Some(103_051.56));
+
+    // Last transaction: date, debit amount, and Balance — reconciles
+    // exactly with the statement's own last printed row (this statement has
+    // no separate printed Closing Balance summary box).
+    let last = real.last().expect("at least one real transaction");
+    assert_eq!(last.date, "28/03/2025");
+    assert_eq!(last.debit, Some(100_000.00));
+    assert_eq!(last.credit, None);
+    assert_eq!(last.balance, Some(15_827.25));
+
+    let debit_count = real.iter().filter(|t| t.debit.is_some()).count();
+    let credit_count = real.iter().filter(|t| t.credit.is_some()).count();
+    let total_debit: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_credit: f64 = real.iter().filter_map(|t| t.credit).sum();
+    assert_eq!(debit_count, 230);
+    assert_eq!(credit_count, 35);
+    assert!(
+        (total_debit - 1_643_490.97).abs() < 0.10,
+        "total debit {total_debit:.2} != expected 16,43,490.97"
+    );
+    assert!(
+        (total_credit - 1_556_236.66).abs() < 0.10,
+        "total credit {total_credit:.2} != expected 15,56,236.66"
+    );
+}
+
 /// The Excel fixture (HDFC.xls) must parse through the exact same
 /// `parse_excel_file` entry point the "Load File" button uses, and — since
 /// this session's Phase 1 work specifically fixed Excel-path bank detection

@@ -730,6 +730,39 @@ struct DetectHit {
     ifsc: Option<String>,
 }
 
+// `norm()` maps every separator (spaces, slashes, dashes, ...) to a plain
+// space and leaves alphanumerics untouched, so a phrase can end up sitting
+// in the middle of a longer glued alphanumeric run that was never meant to
+// be one word at all — e.g. a "BULK POSTING-ACHCr...HDFCBANKLTD-" narration
+// (a *counterparty* literally named "HDFC BANK LTD" in an ACH credit,
+// nothing to do with whose statement this is) collapses to
+// "...hdfcbankltd...", and a plain substring search happily reports a
+// "hdfcbank" phrase match inside it. Requiring real word boundaries on both
+// sides — the same discipline `IFSC_RE` already applies with `\b` — rejects
+// that false positive while still matching every legitimate case (a phrase
+// surrounded by spaces, or by the `.`/`@` characters `norm()` deliberately
+// preserves for domain-style phrases like "hdfcbank.com").
+fn find_word_bounded(text: &str, phrase: &str) -> Option<usize> {
+    let is_word = |c: char| c.is_ascii_alphanumeric();
+    let mut start = 0;
+    while let Some(rel) = text[start..].find(phrase) {
+        let pos = start + rel;
+        let before_ok = text[..pos].chars().next_back().is_none_or(|c| !is_word(c));
+        let after_ok = text[pos + phrase.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word(c));
+        if before_ok && after_ok {
+            return Some(pos);
+        }
+        start = pos + 1;
+        if start >= text.len() {
+            break;
+        }
+    }
+    None
+}
+
 fn detect_by_phrase(norm_text: &str) -> Option<DetectHit> {
     let mut best_bank = None;
     let mut best_conf = 0.0f64;
@@ -737,7 +770,7 @@ fn detect_by_phrase(norm_text: &str) -> Option<DetectHit> {
 
     for entry in PHRASE_MAP {
         for phrase in entry.phrases {
-            if let Some(pos) = norm_text.find(phrase) {
+            if let Some(pos) = find_word_bounded(norm_text, phrase) {
                 if pos < best_pos {
                     best_pos = pos;
                     best_conf = (0.95 * entry.weight).min(0.95);
@@ -1321,6 +1354,29 @@ mod tests {
             header_text: "State Bank of India\nAccount",
             text: "State Bank of India\nNEFT FROM HDFC BANK CUSTOMER",
             narrations: &["NEFT FROM HDFC BANK CUSTOMER"],
+            ..DetectOptions::default()
+        });
+        assert_eq!(result.bank_name, "State Bank of India");
+    }
+
+    #[test]
+    fn detect_counterparty_named_hdfc_bank_ltd_does_not_steal_sbi() {
+        // Real bug (2026-08-29): an SBI statement with no textual header at
+        // all (confirmed against the actual fixture — zero "State Bank"/
+        // "IFSC" occurrences anywhere) has a "BULK POSTING-ACHCr" narration
+        // whose counterparty is literally a company named "HDFC BANK LTD"
+        // — nothing to do with whose statement this is. `norm()` glues the
+        // whole narration into one run with no internal separator
+        // ("...hdfcbankltd..."), and a plain substring search used to
+        // report a "hdfcbank" phrase match inside it (P5, capped 0.80) —
+        // high enough to suppress filename-based detection (P6, needs
+        // confidence < 0.70 to even attempt), which would otherwise have
+        // correctly recognized "SBI" from the filename via fuzzy
+        // abbreviation matching. Word-boundary-checked phrase matching
+        // rejects the false positive so filename detection gets its turn.
+        let result = detect(DetectOptions {
+            text: "BULK POSTING-ACHCrHDFC00161000007598HDFCBANKLTD-488.00",
+            filename: "SBI.pdf",
             ..DetectOptions::default()
         });
         assert_eq!(result.bank_name, "State Bank of India");

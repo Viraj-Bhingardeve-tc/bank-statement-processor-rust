@@ -2360,6 +2360,548 @@ pub fn extract_idfc_first_transactions(
     })
 }
 
+// ── extract_sbi_transactions ───────────────────────────────────────────────────
+
+/// Parser for State Bank of India's "Txn Date / Value Date / Description /
+/// Ref No./Cheque No. / Debit / Credit / Balance" passbook-style statement —
+/// the same architecture-level bug as ICICI Normal/IDBI/IDFC First: every
+/// embedded-text item lands at `x=0.0` (confirmed directly against this
+/// fixture's own `text_extractor::extract_pages` output), so the app fell
+/// back to Stage 2's flat-*text* heuristic parser, which has no real column
+/// positions to check Debit against Credit with and guessed wrong for the
+/// very first transaction and others throughout. Fixed the same way: Tier 0
+/// renders every page and reads real per-word X positions back with
+/// Tesseract, and this extractor assigns Debit/Credit/Balance by which
+/// column an amount's X position actually falls under.
+///
+/// Two things are distinctive about this statement's layout compared to
+/// IDBI/IDFC First:
+///
+/// - **The date columns' own OCR'd values render wider than their header
+///   words.** Both `extract_idbi_transactions` and
+///   `extract_idfc_first_transactions` derive their "everything left of
+///   here is date/serial, not Narration" wall purely from the header row's
+///   own "Date" word position — that undershoots here, because each date
+///   value is OCR'd as three separate word-boxes (day / month / year, e.g.
+///   `"4"` `"May"` `"2024]"`) whose combined width extends well past where
+///   the header word "Date" itself sits. Using the **Description** header's
+///   own X position as the wall instead (verified against every row in
+///   this fixture: Description content always starts flush at the same X)
+///   sidesteps that entirely, and doubles as the boundary a row needs a
+///   date "before" to count as starting a new transaction block. Row-start
+///   detection itself also has to change to match: no single OCR word ever
+///   contains a full date here, so a block starts when the words *before*
+///   that wall — joined back together — spell `D Mon YYYY` (tolerating a
+///   trailing junk character OCR glues onto the year, e.g. `"2024]"` or
+///   `"2024/TO"` from a border-line misread merging into the very next
+///   narration word), not when any single item matches a date regex on its
+///   own.
+///
+/// - **"Ref No./Cheque No." is one combined free-text column** (values like
+///   `"TRANSFER TO4897695162091"`, not a bare cheque number), sitting
+///   between Description and Debit. Its own digit run is what this
+///   extractor uses as `reference` (stripping the "TRANSFER TO"/"TRANSFER
+///   FROM" prefix), but — same risk `extract_idbi_transactions`'s Cheque No
+///   handling exists to avoid — every item in that column's X range must be
+///   pulled out and excluded from amount classification *before*
+///   `classify_row` ever sees the row, or a long reference digit-run reads
+///   as amount-shaped and concatenates onto (corrupting) the real Debit or
+///   Credit next to it.
+///
+/// No account number is printed anywhere in this fixture's extracted text
+/// (confirmed: zero "Account"/"IFSC"/"Branch" hits) — left blank rather
+/// than guessed, same documented fallback as ICICI Normal/IDBI.
+pub fn extract_sbi_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Option<ParseResult> {
+    let header_window: Vec<&Vec<PdfItem>> = rows.iter().take(10).collect();
+    let early_text: String = header_window
+        .iter()
+        .map(|r| {
+            r.iter()
+                .map(|it| it.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let el = early_text.to_lowercase();
+    if !(el.contains("txn date")
+        && el.contains("description")
+        && el.contains("debit")
+        && el.contains("credit")
+        && el.contains("balance"))
+    {
+        return None;
+    }
+    let distinct_x = header_window
+        .iter()
+        .flat_map(|r| r.iter().map(|it| it.x.round() as i64))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if distinct_x < 5 {
+        return None;
+    }
+
+    // Header keywords, individually — this table's header wraps across 2
+    // physical OCR rows ("Txn | Date |Value | Description | Ref |
+    // No./Cheque | Debit | Credit | Balance" on one, "Date | No."
+    // continuation on the next).
+    let mut debit_x = None;
+    let mut credit_x = None;
+    let mut balance_x = None;
+    let mut narration_x = None;
+    let mut ref_x = None;
+    for row in &header_window {
+        for it in row.iter() {
+            let l: String = it
+                .text
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect();
+            if l == "debit" && debit_x.is_none() {
+                debit_x = Some(it.x);
+            } else if l == "credit" && credit_x.is_none() {
+                credit_x = Some(it.x);
+            } else if l.starts_with("balance") && balance_x.is_none() {
+                balance_x = Some(it.x);
+            } else if l == "description" && narration_x.is_none() {
+                narration_x = Some(it.x);
+            } else if l == "ref" && ref_x.is_none() {
+                ref_x = Some(it.x);
+            }
+        }
+    }
+    let (debit_x, credit_x, balance_x, narration_x, ref_x) =
+        match (debit_x, credit_x, balance_x, narration_x, ref_x) {
+            (Some(d), Some(c), Some(b), Some(n), Some(r)) => (d, c, b, n, r),
+            _ => return None,
+        };
+    // Everything left of Description is a date column (Txn Date, Value
+    // Date) or the header's own labels — see doc comment for why this is
+    // anchored on Description's own X rather than on the date columns'
+    // header words. A small safety margin is subtracted: Description's own
+    // real content occasionally starts a point or two left of the header
+    // word's own X (confirmed against this fixture: the narration's first
+    // word, "TO", rendered at `x=143.8` on one row against a Description
+    // header at `x=144.5`) — landing it on the date-region side of a bare
+    // `narration_x` cutoff, which corrupts the joined date-region text and
+    // breaks the year-reconstruction lookahead below. The real date
+    // components never render anywhere near this close to Description
+    // (the widest observed, a glued "2024/TO" year, still sits at
+    // `x=120.0`), so this margin costs nothing on that side.
+    let wall_x = narration_x - 5.0;
+    // The Ref No./Cheque No. column sits between Description and Debit;
+    // its midpoint with each neighbor is the same safe dividing line
+    // `extract_idbi_transactions` uses for its own Cheque No column.
+    let ref_min_x = (narration_x + ref_x) / 2.0;
+    let ref_max_x = (ref_x + debit_x) / 2.0;
+
+    let account_no = String::new();
+
+    // Reconstructs a `D Mon YYYY` date from consecutive OCR word-boxes
+    // (day, month, year). Between month and year, `[^0-9]{0,4}` tolerates
+    // whatever the OCR actually produces there rather than assuming one
+    // consistent shape — confirmed to vary across this fixture: a plain
+    // space ("May 2024"), a space plus a border-line-misread character
+    // glued onto the month ("May| 2024"), or nothing at all, month and
+    // year glued into one token with zero separator ("Feb2025"). The year
+    // itself frequently has junk glued onto its *end* too, by the same
+    // border-line misread ("2024]", "2024/TO"); `\d{4}` only needs the
+    // leading four digits, so trailing junk there is harmless.
+    static DATE_JOINED_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(\d{1,2})\s+([A-Za-z]{3})[^0-9]{0,4}(\d{4})").unwrap()
+    });
+    // Day+month with no year at all — the signature of a date whose year
+    // wrapped onto the next physical OCR row (see the lookahead below).
+    // Captures day/month so the lookahead can splice in a year found
+    // independently on the next row, rather than trying to bridge the two
+    // rows' text with one regex — a real narration word can glue directly
+    // onto the month with zero separator ("Feb|WITHDRAWAL"), and that word
+    // can be far longer than any fixed junk-tolerance budget (confirmed:
+    // "WITHDRAWAL" alone is 10 characters), so no bounded gap regex can
+    // reliably span both a day-month token and the year that follows it.
+    static DAY_MONTH_ONLY_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^(\d{1,2})\s+([A-Za-z]{3})\b").unwrap());
+    // A 4-digit year, required to be the very first thing on the next row's
+    // date-region — confirmed true across every wrapped-year case in this
+    // fixture ("2024 2024...", "2025 2025|...").
+    static YEAR_LEADING_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^(\d{4})").unwrap());
+
+    struct Block {
+        date_display: String,
+        date_ts: i64,
+        narration_parts: Vec<String>,
+        debit_frags: Vec<String>,
+        credit_frags: Vec<String>,
+        balance_frags: Vec<String>,
+        ref_parts: Vec<String>,
+    }
+
+    let mut txns: Vec<Transaction> = Vec::new();
+    let mut txn_counter = 0usize;
+    let mut cur: Option<Block> = None;
+
+    macro_rules! flush {
+        () => {
+            if let Some(b) = cur.take() {
+                let narration_joined: String = b
+                    .narration_parts
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let narration_joined = narration_joined
+                    .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .to_string();
+                fn clean_amount_frags(frags: &[String]) -> String {
+                    frags
+                        .concat()
+                        .chars()
+                        .filter(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
+                        .collect()
+                }
+                let debit = parse_amount_str(&clean_amount_frags(&b.debit_frags));
+                let credit = parse_amount_str(&clean_amount_frags(&b.credit_frags));
+                let balance = parse_amount_str(&clean_amount_frags(&b.balance_frags));
+                if debit.is_some() || credit.is_some() {
+                    txn_counter += 1;
+                    // The Ref No./Cheque No. column's own digit run
+                    // ("TRANSFER TO4897695162091" → "4897695162091");
+                    // falls back to a narration-embedded reference (the
+                    // UPI transaction ID) when that column is blank, e.g.
+                    // "CREDIT INTEREST--" rows.
+                    let ref_digits: String = b
+                        .ref_parts
+                        .concat()
+                        .chars()
+                        .filter(|c| c.is_ascii_digit())
+                        .collect();
+                    let reference = if !ref_digits.is_empty() {
+                        ref_digits
+                    } else {
+                        extract_ref_from_narration(&narration_joined).unwrap_or_default()
+                    };
+                    let mut t = Transaction::new(format!("t_sbi_{}", txn_counter));
+                    t.date = b.date_display;
+                    t.date_ts = b.date_ts;
+                    t.narration = narration_joined;
+                    t.reference = reference;
+                    t.debit = debit;
+                    t.credit = credit;
+                    t.balance = balance;
+                    t.bank_name = "State Bank of India".to_string();
+                    t.account_no = account_no.clone();
+                    txns.push(t);
+                }
+            }
+        };
+    }
+
+    // Set on the iteration that reconstructs a date whose year landed on
+    // the *next* physical OCR row (see the lookahead below) — that next
+    // row's own date-region must not be re-examined for a date of its own
+    // (it's already been consumed), but its content is still real
+    // continuation content for the block that date just opened.
+    let mut skip_next_date_region = false;
+
+    // True when an item unambiguously belongs to the Ref No./Cheque No.
+    // column: either the literal "TRANSFER"/"TO"/"FROM" words this
+    // statement's Ref column is always built from, or a bare digit run
+    // (the reference number itself, sometimes OCR-split into two pieces
+    // like "4897691" + "162095"). A stray narration-continuation fragment
+    // landing in the same X range (confirmed against this fixture: the
+    // tail of a wrapped UPI handle, "g519654819" OCR-split as
+    // "g51965481" + "9/UPI-", with that trailing piece landing inside the
+    // Ref column's X range) is neither of those shapes, so this shape
+    // check catches what the X-range boundary alone lets through.
+    //
+    // Junk glyphs are stripped before the digit check, same as
+    // `is_amount_shaped` — otherwise a border-line misread gluing onto the
+    // *second* OCR-split half of a reference number ("|4897691", the
+    // continuation of "4897691"+"162095") fails this shape check on the
+    // raw text, falls through into ordinary row content instead of
+    // `ref_parts`, and then *does* pass `is_amount_shaped` (which already
+    // strips junk) — concatenating a stray digit run onto whatever real
+    // amount shares that block, corrupting it into an unparseable string
+    // and silently dropping the whole transaction. Confirmed against this
+    // fixture: this exact fragment on 07/05/2024 (block-start amount
+    // "1,00,000.00") produced debit_frags == ["1,00,000.00", "|4897691"],
+    // which fails to parse as any amount at all, and the transaction
+    // vanished from the output entirely.
+    // A lone single digit is excluded even when it's otherwise "pure
+    // digit" — every genuine reference fragment observed in this fixture
+    // is a multi-digit chunk (e.g. "4897691" + "162095"), never a single
+    // character, whereas a mid-word OCR split of a *narration's own*
+    // embedded UPI transaction ID ("45597238226" split as "45597238" +
+    // "1" + "226") can coincidentally drop a lone digit into this exact X
+    // range. Confirmed against this fixture: without this guard, that "1"
+    // prepends onto the real reference, "4897693162093" becoming
+    // "14897693162093".
+    let is_ref_shaped = |text: &str| -> bool {
+        let t = text.trim();
+        let upper = t.to_uppercase();
+        if upper == "TRANSFER" || upper == "TO" || upper == "FROM" {
+            return true;
+        }
+        let cleaned = strip_ocr_junk(t);
+        cleaned.len() > 1 && cleaned.chars().all(|c| c.is_ascii_digit())
+    };
+
+    for i in 0..rows.len() {
+        let row = &rows[i];
+        if row.is_empty() {
+            continue;
+        }
+        let row_joined: String = row
+            .iter()
+            .map(|it| it.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let rl = row_joined.to_lowercase();
+
+        // End-of-table noise: the per-page footer disclaimer. Every real
+        // transaction row precedes it on its own page, but the table
+        // continues on the next page afterward — see the header-repeat
+        // check below — so this is a `continue`, not a `break`. The
+        // disclaimer itself wraps across two physical OCR rows ("Please do
+        // not share your ATM..." / "with anyone over mail, SMS, phone
+        // call..."), and only the first one contained a matched phrase —
+        // the second, un-skipped, glued straight onto the last real
+        // transaction's narration as a bogus continuation (confirmed on
+        // this fixture's last page, whose disclaimer is also the table's
+        // very last content).
+        if rl.contains("computer generated statement")
+            || rl.contains("do not share your atm")
+            || rl.contains("bank never asks")
+            || rl.contains("with anyone over mail")
+        {
+            continue;
+        }
+        // Repeated per-page column header (2 rows: labels, then "Date |
+        // No." continuation — paired via skip_next_row, same pattern as
+        // extract_idfc_first_transactions's own repeated header).
+        if rl.contains("txn date") || (rl.contains("description") && rl.contains("balance")) {
+            continue;
+        }
+
+        // Ref No./Cheque No. column content, wherever it appears (the
+        // block-start row or any continuation row) — collected into the
+        // current block and excluded from the row before classification,
+        // same rationale as `extract_idbi_transactions`'s Cheque No
+        // handling.
+        let (ref_items, rest): (Vec<PdfItem>, Vec<PdfItem>) = row
+            .iter()
+            .cloned()
+            .partition(|it| it.x >= ref_min_x && it.x < ref_max_x && is_ref_shaped(&it.text));
+
+        // A new transaction block starts when the words left of
+        // Description (day/month/year, possibly with header labels mixed
+        // in on the header rows already filtered above) spell out a real
+        // date. Continuation rows have nothing left of Description at all.
+        let date_region: String = rest
+            .iter()
+            .filter(|it| it.x < wall_x)
+            .map(|it| it.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let mut row_date = if skip_next_date_region {
+            skip_next_date_region = false;
+            None
+        } else {
+            DATE_JOINED_RE.captures(&date_region).and_then(|caps| {
+                let candidate = format!("{} {} {}", &caps[1], &caps[2], &caps[3]);
+                let nd = normalize_transaction_date(&candidate);
+                nd.valid.then_some((nd.display, nd.ts))
+            })
+        };
+
+        // A 2-digit day widens the Value Date value enough that Tesseract
+        // sometimes wraps its 4-digit year onto the *next* physical OCR
+        // row entirely, leaving this row's own date-region as just
+        // "25 May 25 May" — day+month twice, no year at all. Confirmed
+        // against this fixture: every 25/26 May row hits this, and without
+        // reassembling the date across both rows those transactions have
+        // no detectable date at all, so they silently merge into whatever
+        // block preceded them instead of starting their own — corrupting
+        // it (concatenating multiple unrelated amounts together, which
+        // then usually fails to parse as one number and drops the merged
+        // transaction entirely, exactly the "5 real transactions vanish"
+        // failure this recovers from).
+        if row_date.is_none() {
+            if let Some(dm_caps) = DAY_MONTH_ONLY_RE.captures(date_region.trim()) {
+                if let Some(next_row) = rows.get(i + 1) {
+                    let next_date_region: String = next_row
+                        .iter()
+                        .filter(|it| it.x < wall_x)
+                        .map(|it| it.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if let Some(yr_caps) = YEAR_LEADING_RE.captures(next_date_region.trim()) {
+                        let candidate = format!("{} {} {}", &dm_caps[1], &dm_caps[2], &yr_caps[1]);
+                        let nd = normalize_transaction_date(&candidate);
+                        if nd.valid {
+                            row_date = Some((nd.display, nd.ts));
+                            skip_next_date_region = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let content: Vec<PdfItem> = rest.into_iter().filter(|it| it.x >= wall_x).collect();
+
+        if let Some((date_display, date_ts)) = row_date {
+            // New transaction block.
+            flush!();
+            let mut b = Block {
+                date_display,
+                date_ts,
+                narration_parts: Vec::new(),
+                debit_frags: Vec::new(),
+                credit_frags: Vec::new(),
+                balance_frags: Vec::new(),
+                ref_parts: ref_items.iter().map(|it| it.text.clone()).collect(),
+            };
+            classify_row(
+                &content,
+                wall_x,
+                [debit_x, credit_x, balance_x],
+                &mut b.narration_parts,
+                &mut b.debit_frags,
+                &mut b.credit_frags,
+                &mut b.balance_frags,
+            );
+            cur = Some(b);
+        } else if let Some(b) = cur.as_mut() {
+            b.ref_parts
+                .extend(ref_items.iter().map(|it| it.text.clone()));
+            // Same bare-digit-run rescue as IDBI/IDFC First: only treat a
+            // bare digit-run as a genuine split-amount continuation when
+            // one of the amount columns is actually "dangling"; otherwise
+            // route it into narration instead of letting shape-based
+            // amount detection corrupt the real amount with it.
+            let any_dangling =
+                dangling(&b.debit_frags) || dangling(&b.credit_frags) || dangling(&b.balance_frags);
+            let filtered_row: Vec<PdfItem> = if any_dangling {
+                content
+            } else {
+                let mut kept = Vec::new();
+                let mut rescued_narration = Vec::new();
+                for it in content.iter() {
+                    let t = it.text.trim();
+                    let bare_whole_number = !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
+                    if bare_whole_number {
+                        rescued_narration.push(t.to_string());
+                    } else {
+                        kept.push(it.clone());
+                    }
+                }
+                if !rescued_narration.is_empty() {
+                    b.narration_parts.push(rescued_narration.join(" "));
+                }
+                kept
+            };
+            classify_row(
+                &filtered_row,
+                wall_x,
+                [debit_x, credit_x, balance_x],
+                &mut b.narration_parts,
+                &mut b.debit_frags,
+                &mut b.credit_frags,
+                &mut b.balance_frags,
+            );
+        }
+    }
+    flush!();
+
+    // Anti-false-positive guard, same threshold every other dedicated
+    // extractor in this module uses.
+    if txns.len() < 2 {
+        log::debug!(
+            "[BSP SBI] only {} transactions extracted from \"{}\" — treating as a non-match",
+            txns.len(),
+            file_name
+        );
+        return None;
+    }
+
+    // Already chronological (oldest first) — no reordering needed.
+    let op_balance = compute_prev_balances(&mut txns, None);
+
+    // Debit/Credit must never mix — this table has separate Debit/Credit
+    // columns, so a real row only ever posts to one. Balance-chain ground
+    // truth decides which side is real, same as every other extractor
+    // above.
+    for t in txns.iter_mut() {
+        if let (Some(dr), Some(cr)) = (t.debit, t.credit) {
+            let keep_credit = match (t.prev_balance, t.balance) {
+                (Some(pb), Some(bal)) => {
+                    let diff = ((bal - pb) * 100.0).round() / 100.0;
+                    let tol = |amt: f64| f64::max(1.0, amt * 0.02);
+                    let cr_fits = (diff - cr).abs() < tol(cr);
+                    let dr_fits = (diff + dr).abs() < tol(dr);
+                    if cr_fits && !dr_fits {
+                        true
+                    } else if dr_fits && !cr_fits {
+                        false
+                    } else {
+                        cr >= dr
+                    }
+                }
+                _ => cr >= dr,
+            };
+            if keep_credit {
+                t.debit = None;
+            } else {
+                t.credit = None;
+            }
+        }
+    }
+
+    // Balance-chain repair, same rationale as IDBI/IDFC First: a Balance
+    // that doesn't reconcile with the chain is corrected from it rather
+    // than trusted as printed.
+    let mut running_balance = op_balance;
+    for t in txns.iter_mut() {
+        if let Some(pb) = running_balance {
+            let expected =
+                ((pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0)) * 100.0).round() / 100.0;
+            if let Some(bal) = t.balance {
+                if (expected - bal).abs() > 0.01 {
+                    log::debug!(
+                        "[BSP SBI] balance chain mismatch for {} \"{}\": OCR'd {:.2}, chain says {:.2} — using chain value",
+                        t.date,
+                        safe_prefix(&t.narration, 40),
+                        bal,
+                        expected
+                    );
+                    t.balance = Some(expected);
+                    t.prev_balance = Some(pb);
+                }
+            }
+        }
+        running_balance = t.balance;
+    }
+
+    prepend_opening_balance_row(&mut txns, op_balance, "State Bank of India", &account_no);
+
+    Some(ParseResult {
+        transactions: txns,
+        opening_balance: op_balance,
+        closing_balance: None,
+        bank_name: "State Bank of India".to_string(),
+        account_no,
+        source_name: file_name.to_string(),
+        col_map: Default::default(),
+        header_row_idx: 0,
+        noise_row_count: 0,
+        rejected_row_count: 0,
+    })
+}
+
 // ── extract_cosmos_transactions ───────────────────────────────────────────────
 
 /// Port of `Parser._parseCosmosFW(rows, fileName)`.

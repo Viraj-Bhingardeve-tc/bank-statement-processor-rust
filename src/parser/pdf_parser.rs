@@ -28,6 +28,7 @@ use crate::parser::{
         extract_cosmos_transactions, extract_fw_transactions, extract_icici_normal_transactions,
         extract_icici_wealth_transactions, extract_idbi_transactions,
         extract_idfc_first_transactions, extract_kotak_narrow_transactions,
+        extract_sbi_transactions,
     },
     ParseResult, Transaction,
 };
@@ -183,6 +184,25 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
             return Some(result);
         }
         log::debug!("[BSP PDF] extract_idfc_first_transactions returned None — falling through");
+    }
+
+    // ── Early State Bank of India "Txn Date/Description" detection ────────────
+    // "description"+"txn date" without "particulars"/"withdra" is SBI-
+    // distinctive — neither IDFC First (needs "particulars") nor IDBI
+    // (needs "withdra"+"deposit") would match this header.
+    if el.contains("txn date")
+        && el.contains("description")
+        && el.contains("debit")
+        && el.contains("credit")
+        && el.contains("balance")
+    {
+        log::debug!(
+            "[BSP PDF] State Bank of India Txn Date/Description header detected — running extract_sbi_transactions"
+        );
+        if let Some(result) = extract_sbi_transactions(&rows, file_name) {
+            return Some(result);
+        }
+        log::debug!("[BSP PDF] extract_sbi_transactions returned None — falling through");
     }
 
     // ── Header detection ──────────────────────────────────────────────────────
