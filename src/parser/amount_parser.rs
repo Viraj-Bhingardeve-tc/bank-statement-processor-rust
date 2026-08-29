@@ -175,7 +175,7 @@ fn parse_str(raw: &str) -> Option<f64> {
     // 6. (amount) → negative (e.g. "(1500.00)" → "-1500.00")
     let s = RE_NEGATIVE_PARENS.replace(&s, "-$1").into_owned();
 
-    let s = s.trim().to_string();
+    let mut s = s.trim().to_string();
 
     if s.is_empty() || s == "-" {
         return None;
@@ -183,6 +183,32 @@ fn parse_str(raw: &str) -> Option<f64> {
     // Reject nil / n/a strings
     if s.eq_ignore_ascii_case("nil") || s.eq_ignore_ascii_case("n/a") {
         return None;
+    }
+
+    // Strip up to 2 stray trailing OCR-junk characters that survived every
+    // step above — an unmatched closing paren/brace/pipe glued on from an
+    // adjacent column bleeding into this cell during word-clustering (real
+    // bug found against an actual encrypted Bank of Maharashtra statement:
+    // "8,079.33)" — a lone ")" with no matching "(", left over from the
+    // neighboring Channel column's "(9008-NEFT/RTGS CELL)" text — comma-
+    // strips to "8079.33)", which the balanced-parens rule above doesn't
+    // touch since there's no opening paren to pair with). Capped at 2
+    // characters deliberately: a genuine amount only ever picks up one
+    // stray glued glyph, never more, and an unbounded strip is dangerous —
+    // tried first, and found to wrongly turn a *different* cell's leaked
+    // Channel-column text ("9008-NEFT/", from that same real statement)
+    // into a spurious 4-digit "amount" by eating through "NEFT/" entirely.
+    // Never strips a digit either way, so this still can't turn real value
+    // into noise — and it runs before the decimal-place check below so a
+    // junk suffix can't first inflate the apparent fractional-digit count
+    // into a false rejection.
+    let mut stripped = 0;
+    while stripped < 2
+        && s.parse::<f64>().is_err()
+        && s.chars().last().is_some_and(|c| !c.is_ascii_digit())
+    {
+        s.pop();
+        stripped += 1;
     }
 
     // 7. Reject if raw digit count > 10 (OCR-concatenated reference number)
@@ -361,6 +387,37 @@ mod tests {
         assert_eq!(parse_amount_str("1,500.00 CR"), Some(1_500.0));
         assert_eq!(parse_amount_str("2,800.00 Cr"), Some(2_800.0));
         assert_eq!(parse_amount_str("5000.00CR"), Some(5_000.0));
+    }
+
+    // Real bug found (2026-08-29) against an actual encrypted Bank of
+    // Maharashtra statement: OCR glued a stray, unmatched ")" from the
+    // neighboring Channel column's "(9008-NEFT/RTGS CELL)" text onto this
+    // row's Balance cell, and the balanced-parens rule doesn't touch it
+    // (there's no "(" to pair with) — desyncing the downstream balance-
+    // movement debit/credit correction pass for every transaction after it.
+    #[test]
+    fn stray_unmatched_trailing_paren_stripped() {
+        assert_eq!(parse_amount_str("8,079.33)"), Some(8_079.33));
+        assert_eq!(parse_amount_str("279.33)"), Some(279.33));
+    }
+
+    #[test]
+    fn stray_trailing_junk_never_strips_a_digit() {
+        // Genuinely unparseable garbage must still be rejected, not
+        // stripped down to a plausible-looking wrong number.
+        assert_eq!(parse_amount_str("abc123"), None);
+        assert_eq!(parse_amount_str(")))"), None);
+    }
+
+    #[test]
+    fn junk_strip_is_capped_so_leaked_channel_text_stays_rejected() {
+        // Real bug found fixing the above: an unbounded strip wrongly turned
+        // *another* cell's leaked Channel-column text from the same real
+        // Bank of Maharashtra statement ("9008-NEFT/", meaning "9008-NEFT/
+        // RTGS CELL") into a spurious 4-digit "amount" (9008) by eating
+        // through "NEFT/" entirely. The cap (2 chars) must reject this while
+        // still fixing the single-stray-glyph case above.
+        assert_eq!(parse_amount_str("9008-NEFT/"), None);
     }
 
     #[test]

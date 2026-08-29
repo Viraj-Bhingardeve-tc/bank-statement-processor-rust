@@ -467,6 +467,35 @@ pub fn detect_excel_cols<S: AsRef<str>>(row: &[S]) -> ColumnMap {
         // BTreeMap iterates in ascending key order → lower col index wins on tie
         for (&col, &sc) in &scores[&field] {
             if sc > best_sc && !taken.contains(&col) {
+                // Real bug fixed (2026-08-29, Bank of Maharashtra
+                // password-protected PDF import): `debitcredit` is checked
+                // ahead of `debit`/`credit` in ASSIGN_ORDER, and a plain,
+                // complete header like "Debit" scores a *weak* (10-point)
+                // reverse-prefix match against the combined
+                // `COL_DEBITCREDIT` list (`"debit/credit".starts_with(
+                // "debit")`) purely because it happens to be a textual
+                // prefix of that unrelated compound keyword — not because
+                // it's a truncated fragment of it. Letting that weak match
+                // claim the column before `debit`'s own *exact* (100-point)
+                // match gets a turn silently reclassified every debit
+                // amount as a signed DebitCredit value for any statement
+                // with a plain "Debit"/"Credit" header (confirmed against a
+                // real Bank of Maharashtra statement: the first transaction,
+                // and every one after it until the balance-correction pass
+                // resynced, came out as Credit). A genuinely combined
+                // "Debit/Credit" header doesn't lose anything here — it
+                // still wins its slot via an exact (100-point) match,
+                // unaffected by this guard, which only ever blocks a
+                // *non-exact* debitcredit match from preempting a column
+                // that's an *exact* match for the specific field it would
+                // otherwise steal.
+                if field == ColField::DebitCredit
+                    && sc < 100
+                    && (scores[&ColField::Debit].get(&col) == Some(&100)
+                        || scores[&ColField::Credit].get(&col) == Some(&100))
+                {
+                    continue;
+                }
                 best_sc = sc;
                 best_col = col as i32;
             }
@@ -566,6 +595,20 @@ pub fn find_pdf_header(rows: &[Vec<PdfItem>]) -> Option<PdfHeaderResult> {
         for &field in ASSIGN_ORDER {
             if let Some(&(x, sc)) = scores.get(&field) {
                 if sc >= 10 && !taken_x.contains(&x.to_bits()) {
+                    // Same guard as `detect_excel_cols` — see its doc
+                    // comment: a non-exact debitcredit match must not
+                    // preempt this x-position when it's an *exact* match
+                    // for the plain debit/credit fields checked later.
+                    if field == ColField::DebitCredit && sc < 100 {
+                        let steals_exact = |f: ColField| {
+                            scores
+                                .get(&f)
+                                .is_some_and(|&(fx, fsc)| fx.to_bits() == x.to_bits() && fsc == 100)
+                        };
+                        if steals_exact(ColField::Debit) || steals_exact(ColField::Credit) {
+                            continue;
+                        }
+                    }
                     col_x.set(field, x);
                     taken_x.insert(x.to_bits());
                 }
@@ -1106,11 +1149,20 @@ mod tests {
 
     // SBI Bank header — two date-matching columns; leftmost (lower index) wins.
     //
-    // PARITY NOTE: "Debit" (val="debit") scores 100 for the debit field AND 10 for
-    // debitcredit (via `"debit/credit".starts_with("debit")` → p.starts_with(val) rule).
-    // debitcredit has higher priority in ORDER → it claims col 4 before the debit field
-    // can.  This is the exact JS _detectExcelCols behaviour.  The downstream
-    // _correctDebitCreditByBalance post-pass then fixes the swap via balance movement.
+    // Real bug fixed (2026-08-29, Bank of Maharashtra password-protected PDF
+    // import): "Debit" (val="debit") used to score 10 for debitcredit too
+    // (`"debit/credit".starts_with("debit")` — a false positive; "/" right
+    // after the shared prefix means "debit/credit" is a different, compound
+    // concept, not "debit" continued) and, `debitcredit` being checked
+    // before `debit` in ASSIGNMENT_ORDER, claimed col 4 before the (100-
+    // point, exact-match) `debit` field ever got a turn — silently
+    // reclassifying every debit amount as a signed DebitCredit value for any
+    // statement with a plain "Debit"/"Credit" header (this SBI-shaped one
+    // included). `score_cell` now requires the character right after the
+    // shared prefix to be alphabetic (a genuine word continuation, like
+    // "with"+"drawal") for that fallback match to count at all, so a
+    // complete word like "debit" no longer scores against a compound
+    // pattern it isn't a truncation of — see that function's doc comment.
     #[test]
     fn sbi_header() {
         let row = &[
@@ -1126,16 +1178,9 @@ mod tests {
         assert_eq!(m.date, 0, "date col (Txn Date wins over Value Date)");
         assert_eq!(m.narration, 2, "narration col");
         assert_eq!(m.reference, 3, "reference col");
-        // "Debit" → debitcredit scores 10 (p.starts_with(val)) > threshold 9 → claims col 4
-        assert_eq!(
-            m.debit_credit, 4,
-            "debitcredit steals 'Debit' col (score 10 > 9)"
-        );
-        assert_eq!(m.debit, -1, "debit stolen by debitcredit");
-        assert_eq!(
-            m.credit, 5,
-            "credit col ('Credit' scores 0 for debitcredit)"
-        );
+        assert_eq!(m.debit_credit, -1, "plain 'Debit' no longer misdetected as a combined column");
+        assert_eq!(m.debit, 4, "'Debit' correctly assigned to the debit field");
+        assert_eq!(m.credit, 5, "credit col");
         assert_eq!(m.balance, 6, "balance col");
     }
 
@@ -1663,32 +1708,34 @@ mod tests {
         );
     }
 
-    // Plain "Debit" (no slash) scores 10 for debitcredit via p.starts_with(val).
-    // debitcredit has higher priority in ORDER → steals the column.
-    // col_x.debit = None → guard condition `debit && credit` is not met → no merge.
-    // This is correct JS behaviour: the slash guard requires "/" in the debit item text.
+    // Plain "Debit"/"Credit" (no slash) — two separate, genuinely unsigned
+    // columns, not a combined one. Real bug fixed (2026-08-29): "Debit" used
+    // to score 10 for debitcredit via the (since-corrected) `p.starts_with(val)`
+    // false positive — see `score_cell`'s doc comment — and, debitcredit
+    // being checked first, stole the column before plain `debit` (exact
+    // match, 100) ever got a turn. Now `debit`/`credit` are each correctly
+    // assigned to their own column and `debit_credit` is never populated for
+    // this shape at all.
     #[test]
     fn find_pdf_header_no_slash_no_merge() {
         let rows = vec![make_row(&[
             (10.0, "Date", 30.0),
             (100.0, "Narration", 60.0),
-            (200.0, "Debit", 30.0), // no slash; debitcredit steals it (score 10 > 9)
+            (200.0, "Debit", 30.0),
             (240.0, "Credit", 30.0),
         ])];
         let result = find_pdf_header(&rows).expect("header found");
-        // "Debit" (score 10 for debitcredit) → debitcredit claims x=200 first
         assert!(
-            result.col_x.debit_credit.is_some(),
-            "debitcredit claims 'Debit' x-pos (score 10 > threshold 9)"
+            result.col_x.debit_credit.is_none(),
+            "plain 'Debit'/'Credit' must never be merged into a combined debitcredit column"
         );
         assert!(
-            result.col_x.debit.is_none(),
-            "debit not separately set — stolen by debitcredit"
+            result.col_x.debit.is_some(),
+            "'Debit' correctly assigned to its own field"
         );
-        // "Credit" scores 0 for debitcredit → not stolen; remains as credit
         assert!(
             result.col_x.credit.is_some(),
-            "credit separately detected ('Credit' scores 0 for debitcredit)"
+            "'Credit' correctly assigned to its own field"
         );
     }
 

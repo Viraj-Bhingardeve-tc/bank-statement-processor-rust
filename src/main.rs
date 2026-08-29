@@ -1177,6 +1177,96 @@ fn run_pdf_ocr_pipeline<F: Fn(i32, &str)>(
     Err("No transactions found — PDF may use embedded fonts".to_string())
 }
 
+/// Outcome of the password-protected OCR fallback tier (mutool `-p` render +
+/// Tesseract), attempted only after Stage 1 (`text_extractor::
+/// extract_pages_with_password`) and Stage 2 (`extract_full_text_with_password`
+/// + `ocr_parser`) — both synchronous, lopdf-based — already failed to
+/// produce a usable transaction from the password the user just supplied.
+///
+/// Two real gaps this closes, either of which left the password-protected
+/// import pipeline strictly weaker than the unencrypted one before this fix:
+/// `lopdf` 0.35's standard-security-handler support only covers encryption
+/// revisions 2-4 (`lopdf::encryption`'s `!(2..=4).contains(&revision)`
+/// check) — a revision 5/6 "AES-256" PDF (the modern default for many
+/// statement generators) fails at that check before the password is even
+/// looked at, so Stage 1/2 can't touch it no matter how correct the
+/// password is; and even once genuinely decrypted, the decrypted content
+/// can still hit the exact same "flat-text extraction can't recover this
+/// layout" problems `ocr_extractor::extract_pages_via_ocr` already exists to
+/// solve for unencrypted PDFs (vector-only pages, `Td`/`Tm`-glued fields,
+/// …) — those fixes were previously unreachable for any encrypted file.
+/// `mutool draw -p` decrypts and rasterizes in one step, entirely
+/// independent of `lopdf`'s decryption support, so this tier recovers pages
+/// neither Stage 1 nor Stage 2 can reach at all.
+enum PdfPwdOcrOutcome {
+    Ok(parser::ParseResult),
+    /// `mutool` itself rejected the password — meaningful only when Stage 1
+    /// didn't already get a definitive "incorrect" answer from `lopdf`
+    /// (i.e. the file's encryption revision is one `lopdf` can't even
+    /// attempt), which is the only way control reaches this tier still not
+    /// knowing whether the password is right.
+    IncorrectPassword,
+    Failed(String),
+}
+
+#[cfg(feature = "slint-ui")]
+fn run_pdf_ocr_tier_with_password<F: Fn(i32, &str)>(
+    path: &std::path::Path,
+    password: &[u8],
+    file_name: &str,
+    progress: F,
+) -> PdfPwdOcrOutcome {
+    progress(15, "Rendering pages for OCR\u{2026}");
+    let rows = match parser::ocr_extractor::extract_pages_via_ocr_with_password(path, password) {
+        parser::ocr_extractor::OcrPasswordOutcome::Ok(rows) => rows,
+        parser::ocr_extractor::OcrPasswordOutcome::IncorrectPassword => {
+            return PdfPwdOcrOutcome::IncorrectPassword;
+        }
+        parser::ocr_extractor::OcrPasswordOutcome::Unavailable => {
+            return PdfPwdOcrOutcome::Failed(
+                "No transactions found after unlock \u{2014} OCR fallback unavailable \
+                 (install mutool + tesseract)"
+                    .to_string(),
+            );
+        }
+    };
+    if !rows.is_empty() {
+        progress(70, "Reading table columns\u{2026}");
+        if let Some(mut r) = parser::pdf_parser::parse_pdf_rows(rows, file_name) {
+            let real_count = r.transactions.iter().filter(|t| !t.is_opening_balance).count();
+            if real_count > 0 {
+                // `parse_pdf_rows`'s generic column-loop (the path this tier
+                // uses for any bank without its own dedicated extractor —
+                // e.g. Bank of Maharashtra) has no reference-extraction step
+                // of its own; only the per-bank extractors (Cosmos, ICICI
+                // variants, Kotak) pull a UTR/RRN out of narration
+                // themselves. Real bug found testing against the actual
+                // encrypted Bank of Maharashtra fixture end-to-end: every
+                // transaction's UPI/NEFT reference was sitting right there
+                // in narration (e.g. "618403418296/UTIB/VILA...") but Ref
+                // stayed empty. Backfill with the same generic 9+-digit
+                // boundary-bounded extractor the per-bank extractors already
+                // fall back to — narration is left untouched (same contract
+                // as `extract_icici_wealth_ref`'s own fallback branch), so
+                // this only ever adds a reference, never removes narration
+                // text.
+                for t in r.transactions.iter_mut() {
+                    if t.reference.is_empty() {
+                        if let Some(reference) =
+                            parser::transaction_extractor::extract_ref_from_narration(&t.narration)
+                        {
+                            t.reference = reference;
+                        }
+                    }
+                }
+                progress(100, "Done");
+                return PdfPwdOcrOutcome::Ok(r);
+            }
+        }
+    }
+    PdfPwdOcrOutcome::Failed("No transactions found after unlock".to_string())
+}
+
 #[cfg(feature = "slint-ui")]
 fn run_image_ocr_pipeline<F: Fn(i32, &str)>(
     path: &std::path::Path,
@@ -6996,6 +7086,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 h.set_status_bank(SharedString::from("Unlocking PDF\u{2026}"));
 
+                // Set only when Stage 1's own `lopdf` decrypt attempt fails
+                // for a reason *other* than a definitively-wrong password
+                // (most notably: an encryption revision `lopdf` 0.35 doesn't
+                // support at all — see `lopdf::encryption`'s `2..=4` check,
+                // which rejects the increasingly common revision 5/6
+                // "AES-256" PDFs before it even looks at the password).
+                // Carried through so the final failure message (if Stage 2
+                // and the OCR tier below also come up empty) says *why*
+                // instead of a generic "no transactions found".
+                let mut stage1_err_msg: Option<String> = None;
+
                 let stage1 =
                     match parser::text_extractor::extract_pages_with_password(&path, &pwd_bytes) {
                         Ok(rows) if !rows.is_empty() => {
@@ -7020,30 +7121,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ));
                                 return;
                             }
-                            h.set_pdf_pwd_visible(false);
-                            {
-                                let mut st = state_ref.lock().unwrap();
-                                st.pending_pdf_path = None;
-                                st.pending_pdf_name = String::new();
-                            }
-                            let msg = format!("PDF unlock failed: {}", emsg);
-                            if is_batch {
-                                {
-                                    let mut st = state_ref.lock().unwrap();
-                                    if let Some(bp) = st.batch_progress.as_mut() {
-                                        record_batch_failure(bp, &file_name, &msg);
-                                    }
-                                }
-                                continue_batch(&h, &state_ref, &db_ref);
-                            } else {
-                                h.set_status_bank(SharedString::from(msg.as_str()));
-                            }
-                            return;
+                            // Not a confirmed-wrong-password error (e.g.
+                            // "unsupported encryption") — `lopdf` couldn't
+                            // even attempt this file. Don't give up: fall
+                            // through to Stage 2, then the OCR-with-password
+                            // tier below, exactly as if Stage 1 had simply
+                            // found no rows. Never logs `emsg` alongside
+                            // anything password-derived — it's a `lopdf`
+                            // error string only (encryption metadata/revision,
+                            // never the password itself).
+                            log::warn!("[PdfPwd] Stage 1 decrypt/extract failed: {}", emsg);
+                            stage1_err_msg = Some(emsg);
+                            None
                         }
                     };
 
-                // From here on the password was accepted — close the modal and
-                // clear the pending-path state before proceeding.
+                // From here on, Stage 1 either succeeded outright or failed
+                // in a way that isn't a confirmed-wrong password — close the
+                // modal now. If the OCR tier below later gets a definitive
+                // "wrong password" answer from `mutool` (the one case Stage 1
+                // couldn't rule out itself), it re-opens the modal.
                 h.set_pdf_pwd_visible(false);
                 {
                     let mut st = state_ref.lock().unwrap();
@@ -7051,7 +7148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     st.pending_pdf_name = String::new();
                 }
 
-                let parse_result = if stage1.is_some() {
+                let stage2 = if stage1.is_some() {
                     stage1
                 } else {
                     let full_text =
@@ -7089,29 +7186,119 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                if is_batch {
-                    {
-                        let mut st = state_ref.lock().unwrap();
-                        if let Some(bp) = st.batch_progress.as_mut() {
-                            match parse_result {
-                                Some(r) => record_batch_success(bp, &db_ref, &path, &file_name, r),
-                                None => record_batch_failure(
-                                    bp,
-                                    &file_name,
-                                    "No transactions found after unlock",
-                                ),
+                if let Some(r) = stage2 {
+                    if is_batch {
+                        {
+                            let mut st = state_ref.lock().unwrap();
+                            if let Some(bp) = st.batch_progress.as_mut() {
+                                record_batch_success(bp, &db_ref, &path, &file_name, r);
                             }
                         }
+                        continue_batch(&h, &state_ref, &db_ref);
+                    } else {
+                        apply_parse_result(&h, &state_ref, &db_ref, r, &file_name);
                     }
-                    continue_batch(&h, &state_ref, &db_ref);
-                } else {
-                    match parse_result {
-                        Some(r) => apply_parse_result(&h, &state_ref, &db_ref, r, &file_name),
-                        None => h.set_status_bank(SharedString::from(
-                            "No transactions found after unlock",
-                        )),
-                    }
+                    return;
                 }
+
+                // Stage 1 and Stage 2 (both fast, lopdf-based, synchronous)
+                // found nothing usable — last resort: render+OCR with the
+                // password via `mutool`, same class of fix already shipped
+                // for unencrypted PDFs (ICICI Wealth Management / ICICI
+                // Bank), now reachable for encrypted files too. Genuinely
+                // slow (page render + Tesseract per page), so — matching the
+                // unencrypted OCR path's own synchronous/background split —
+                // this runs on a background thread with a progress modal
+                // instead of blocking the UI thread.
+                h.set_ocr_visible(true);
+                h.set_ocr_msg(SharedString::from("Unlocking and scanning PDF\u{2026}"));
+                h.set_ocr_pct(0);
+                let handle2 = handle.clone();
+                let state_ref2 = state_ref.clone();
+                let db_ref2 = db_ref.clone();
+                let path2 = path.clone();
+                let file_name2 = file_name.clone();
+                let pwd_bytes2 = pwd_bytes.clone();
+                let stage1_err_msg2 = stage1_err_msg.clone();
+                std::thread::spawn(move || {
+                    let progress_handle = handle2.clone();
+                    let outcome = run_pdf_ocr_tier_with_password(
+                        &path2,
+                        &pwd_bytes2,
+                        &file_name2,
+                        move |pct, msg| {
+                            let h = progress_handle.clone();
+                            let msg = msg.to_string();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(h) = h.upgrade() {
+                                    h.set_ocr_pct(pct);
+                                    h.set_ocr_msg(SharedString::from(msg.as_str()));
+                                }
+                            });
+                        },
+                    );
+                    // `pwd_bytes2` (and the password argument passed into
+                    // `mutool` above) go out of scope here — the last point
+                    // this password exists anywhere in memory.
+                    drop(pwd_bytes2);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(h2) = handle2.upgrade() else { return };
+                        h2.set_ocr_visible(false);
+                        match outcome {
+                            PdfPwdOcrOutcome::Ok(r) => {
+                                if is_batch {
+                                    let mut st = state_ref2.lock().unwrap();
+                                    if let Some(bp) = st.batch_progress.as_mut() {
+                                        record_batch_success(bp, &db_ref2, &path2, &file_name2, r);
+                                    }
+                                    drop(st);
+                                    continue_batch(&h2, &state_ref2, &db_ref2);
+                                } else {
+                                    apply_parse_result(&h2, &state_ref2, &db_ref2, r, &file_name2);
+                                }
+                            }
+                            PdfPwdOcrOutcome::IncorrectPassword => {
+                                // The one case Stage 1 couldn't rule out
+                                // itself (an encryption revision it can't
+                                // even attempt) — `mutool` just gave the
+                                // definitive answer. Re-open the prompt.
+                                {
+                                    let mut st = state_ref2.lock().unwrap();
+                                    st.pending_pdf_path = Some(path2.clone());
+                                    st.pending_pdf_name = file_name2.clone();
+                                }
+                                h2.set_pdf_pwd_input(SharedString::from(""));
+                                h2.set_pdf_pwd_prompt(SharedString::from(
+                                    format!(
+                                        "Incorrect password for '{}' \u{2014} please try again:",
+                                        file_name2
+                                    )
+                                    .as_str(),
+                                ));
+                                h2.set_pdf_pwd_visible(true);
+                                h2.set_status_bank(SharedString::from(
+                                    "Incorrect PDF password \u{2014} please try again",
+                                ));
+                            }
+                            PdfPwdOcrOutcome::Failed(msg) => {
+                                let msg = stage1_err_msg2
+                                    .as_ref()
+                                    .map(|e| format!("PDF unlock failed: {e}"))
+                                    .unwrap_or(msg);
+                                if is_batch {
+                                    let mut st = state_ref2.lock().unwrap();
+                                    if let Some(bp) = st.batch_progress.as_mut() {
+                                        record_batch_failure(bp, &file_name2, &msg);
+                                    }
+                                    drop(st);
+                                    continue_batch(&h2, &state_ref2, &db_ref2);
+                                } else {
+                                    h2.set_status_bank(SharedString::from(msg.as_str()));
+                                }
+                            }
+                        }
+                    });
+                });
             });
         }
         {

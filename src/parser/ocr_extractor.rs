@@ -127,12 +127,38 @@ pub fn extract_via_tesseract(pdf_path: &Path) -> Option<String> {
 /// elsewhere in this module.
 const RENDER_DPI: u32 = 300;
 
-/// Rasterize every page of `pdf_path` to `<tmpdir>/page<N>.png` via the
-/// `mutool` CLI. Returns the temp directory (caller's responsibility to
-/// remove) and the PNG paths in page order. `None` if `mutool` isn't on
-/// PATH or the render fails outright — graceful degrade, same contract as
-/// `extract_via_tesseract`.
-fn rasterize_pdf_pages(pdf_path: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
+/// Outcome of a password-aware rasterize/OCR attempt — unlike the
+/// unauthenticated path (which only ever needs a plain "did this work"
+/// bool), a password attempt has three genuinely different outcomes the
+/// caller must react to differently: proceed with the pages, re-prompt for
+/// a corrected password, or report a real tool/environment failure.
+pub enum OcrPasswordOutcome {
+    Ok(Vec<Vec<PdfItem>>),
+    /// `mutool` itself rejected the password (`"cannot authenticate
+    /// password"` on stderr) — this is a genuine wrong-password signal, not
+    /// a missing-tool or render failure, and must never be logged alongside
+    /// the password that produced it.
+    IncorrectPassword,
+    /// `mutool`/`tesseract` missing, or a non-password render failure.
+    Unavailable,
+}
+
+enum RasterizeOutcome {
+    Ok((PathBuf, Vec<PathBuf>)),
+    IncorrectPassword,
+    Unavailable,
+}
+
+/// Shared rasterize implementation for both the unauthenticated and
+/// password-protected paths. `password` is passed to `mutool draw -p`
+/// verbatim as raw bytes reinterpreted as UTF-8 (lossily, matching how the
+/// rest of the password-handling code — `text_extractor::
+/// extract_pages_with_password` — already treats the password as UTF-8
+/// bytes) and is **never** included in any log line, including the ones
+/// that echo `mutool`'s own stderr (checked below: `mutool`'s error text
+/// for a bad password is a fixed string plus the *file path*, never an
+/// echo of the password argument itself).
+fn rasterize_pdf_pages_inner(pdf_path: &Path, password: Option<&[u8]>) -> RasterizeOutcome {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -144,28 +170,37 @@ fn rasterize_pdf_pages(pdf_path: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
     ));
     if std::fs::create_dir_all(&dir).is_err() {
         log::warn!("[OCR] could not create render temp dir {:?}", dir);
-        return None;
+        return RasterizeOutcome::Unavailable;
     }
 
     let pattern = dir.join("page%d.png");
-    let run = Command::new("mutool")
-        .arg("draw")
-        .arg("-o")
-        .arg(&pattern)
-        .arg("-r")
-        .arg(RENDER_DPI.to_string())
-        .arg(pdf_path)
-        .output();
+    let mut cmd = Command::new("mutool");
+    cmd.arg("draw");
+    if let Some(pwd) = password {
+        // Lossy UTF-8 is intentional and matches `extract_pages_with_password`'s
+        // existing contract elsewhere in this codebase — a password that
+        // round-trips through UTF-8 (the overwhelming common case) is
+        // unaffected; one that doesn't would already fail lopdf's own
+        // password check the same way.
+        cmd.arg("-p").arg(String::from_utf8_lossy(pwd).as_ref());
+    }
+    cmd.arg("-o").arg(&pattern).arg("-r").arg(RENDER_DPI.to_string()).arg(pdf_path);
+    let run = cmd.output();
     match run {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
-            log::warn!(
-                "[OCR] mutool draw failed for {:?}: {}",
-                pdf_path,
-                String::from_utf8_lossy(&out.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if password.is_some() && stderr.contains("cannot authenticate password") {
+                // Deliberately do not log `stderr` here even though it
+                // contains no password material (see doc comment) — a
+                // wrong-password attempt is expected user behavior, not a
+                // condition worth a log line at all.
+                let _ = std::fs::remove_dir_all(&dir);
+                return RasterizeOutcome::IncorrectPassword;
+            }
+            log::warn!("[OCR] mutool draw failed for {:?}: {}", pdf_path, stderr);
             let _ = std::fs::remove_dir_all(&dir);
-            return None;
+            return RasterizeOutcome::Unavailable;
         }
         Err(e) => {
             log::warn!(
@@ -173,7 +208,7 @@ fn rasterize_pdf_pages(pdf_path: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
                 pdf_path
             );
             let _ = std::fs::remove_dir_all(&dir);
-            return None;
+            return RasterizeOutcome::Unavailable;
         }
     }
 
@@ -189,15 +224,15 @@ fn rasterize_pdf_pages(pdf_path: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
             .collect(),
         Err(_) => {
             let _ = std::fs::remove_dir_all(&dir);
-            return None;
+            return RasterizeOutcome::Unavailable;
         }
     };
     if pages.is_empty() {
         let _ = std::fs::remove_dir_all(&dir);
-        return None;
+        return RasterizeOutcome::Unavailable;
     }
     pages.sort_by_key(|(n, _)| *n);
-    Some((dir, pages.into_iter().map(|(_, p)| p).collect()))
+    RasterizeOutcome::Ok((dir, pages.into_iter().map(|(_, p)| p).collect()))
 }
 
 /// Run `tesseract <img> stdout tsv` and parse its word-level (level 5) rows
@@ -262,8 +297,40 @@ fn ocr_words_tsv(img_path: &Path) -> Vec<RawPdfItem> {
 /// contract as the rest of this module; the caller falls through to the
 /// existing flat-text OCR tier.
 pub fn extract_pages_via_ocr(pdf_path: &Path) -> Vec<Vec<PdfItem>> {
-    let Some((dir, pages)) = rasterize_pdf_pages(pdf_path) else {
-        return Vec::new();
+    match extract_pages_via_ocr_inner(pdf_path, None) {
+        OcrPasswordOutcome::Ok(rows) => rows,
+        _ => Vec::new(),
+    }
+}
+
+/// Password-protected variant of `extract_pages_via_ocr` — the OCR-fallback
+/// counterpart to `text_extractor::extract_pages_with_password`. Used when
+/// an encrypted PDF's password has been supplied but either (a) `lopdf`
+/// can't decrypt this file's encryption revision at all (it only supports
+/// standard-security-handler revisions 2-4 — see `lopdf::encryption`; a
+/// revision 5/6 "AES-256" PDF, common from many modern statement
+/// generators, fails at the *revision* check before the password is even
+/// checked), or (b) decryption succeeded but the decrypted content still
+/// isn't extractable by any text-layer means (the same class of problem
+/// `extract_pages_via_ocr` solves for unencrypted vector-only PDFs).
+/// `mutool` decrypts and rasterizes in one step via its own `-p` flag,
+/// independent of `lopdf`'s decryption support entirely, so this recovers
+/// pages `lopdf` cannot touch at all.
+///
+/// Returns `OcrPasswordOutcome::IncorrectPassword` only when `mutool`
+/// itself rejects the password — never guessed from a generic failure — so
+/// the caller can safely re-show the password prompt instead of a dead-end
+/// error. The password is never logged (see `rasterize_pdf_pages_inner`'s
+/// doc comment) and is used only for this one `mutool` invocation.
+pub fn extract_pages_via_ocr_with_password(pdf_path: &Path, password: &[u8]) -> OcrPasswordOutcome {
+    extract_pages_via_ocr_inner(pdf_path, Some(password))
+}
+
+fn extract_pages_via_ocr_inner(pdf_path: &Path, password: Option<&[u8]>) -> OcrPasswordOutcome {
+    let (dir, pages) = match rasterize_pdf_pages_inner(pdf_path, password) {
+        RasterizeOutcome::Ok(v) => v,
+        RasterizeOutcome::IncorrectPassword => return OcrPasswordOutcome::IncorrectPassword,
+        RasterizeOutcome::Unavailable => return OcrPasswordOutcome::Unavailable,
     };
 
     let mut all_raw: Vec<RawPdfItem> = Vec::new();
@@ -286,5 +353,5 @@ pub fn extract_pages_via_ocr(pdf_path: &Path) -> Vec<Vec<PdfItem>> {
     }
 
     let _ = std::fs::remove_dir_all(&dir);
-    cluster_into_rows(all_raw, 5.0)
+    OcrPasswordOutcome::Ok(cluster_into_rows(all_raw, 5.0))
 }

@@ -496,7 +496,7 @@ pub fn extract_fw_transactions(
 
 /// Extract a 9+ digit reference number embedded in a narration
 /// (sequences that appear between slashes or at segment start/end).
-fn extract_ref_from_narration(narr: &str) -> Option<String> {
+pub fn extract_ref_from_narration(narr: &str) -> Option<String> {
     // Look for 9+ consecutive digit sequences bounded by /, -, space, or string start/end
     let mut i = 0;
     let bytes = narr.as_bytes();
