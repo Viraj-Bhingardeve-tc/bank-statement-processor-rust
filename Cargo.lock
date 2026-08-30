@@ -695,6 +695,7 @@ dependencies = [
  "csv",
  "env_logger",
  "hmac",
+ "image",
  "keyring",
  "log",
  "lopdf",

@@ -28,7 +28,7 @@ use crate::parser::{
         extract_cosmos_transactions, extract_fw_transactions, extract_icici_normal_transactions,
         extract_icici_wealth_transactions, extract_idbi_transactions,
         extract_idfc_first_transactions, extract_kotak_narrow_transactions,
-        extract_sbi_transactions,
+        extract_sbi_transactions, extract_union_bank_transactions,
     },
     ParseResult, Transaction,
 };
@@ -203,6 +203,23 @@ pub fn parse_pdf_rows(rows: Vec<Vec<PdfItem>>, file_name: &str) -> Option<ParseR
             return Some(result);
         }
         log::debug!("[BSP PDF] extract_sbi_transactions returned None — falling through");
+    }
+
+    // ── Union Bank of India "UPIAR"/"UPIAB" narration-signature detection ─────
+    // No header keyword to gate on here — this fixture's own first page (the
+    // one that would carry "Debit"/"Credit"/"Balance" header text) is
+    // genuinely missing, and continuation pages never repeat it (see
+    // `extract_union_bank_transactions`'s doc comment). The extractor gates
+    // itself internally on its narration-code signature and the presence of
+    // three well-separated amount-column clusters, so it's always safe to
+    // attempt — every other extractor above already had first claim on any
+    // header text this file might have had, and this one returns `None`
+    // immediately for any file that doesn't match its own signature.
+    if let Some(result) = extract_union_bank_transactions(&rows, file_name) {
+        log::debug!(
+            "[BSP PDF] Union Bank of India UPIAR/UPIAB narration signature detected — extract_union_bank_transactions succeeded"
+        );
+        return Some(result);
     }
 
     // ── Header detection ──────────────────────────────────────────────────────

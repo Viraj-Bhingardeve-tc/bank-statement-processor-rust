@@ -763,6 +763,34 @@ fn find_word_bounded(text: &str, phrase: &str) -> Option<usize> {
     None
 }
 
+// A UPI/NEFT/IMPS/RTGS/ECS/NACH/ACH/POS transaction reference — the
+// slash-or-colon-delimited blob every Indian bank statement narration packs
+// a counterparty's own bank code into ("UPIAB/410969711856/CR/MRRAJES/
+// SCBL/9773690640-2@y", "IMPSAR/509113411756/RashiDubey/916010011970001",
+// "POS:Bundltechnolog/vBangalore/409601718694"). Matching the reference's
+// *shape* rather than relying on the separately-parsed `Transaction::
+// narration` field sidesteps a real mismatch: that field has already had
+// its "/DR/"/"/CR/" marker stripped by the time bank detection runs (e.g.
+// raw "UPIAB/410969711856/CR/MRRAJES/SCBL/..." parses to narration
+// "UPIAB/410969711856//MRRAJES/SCBL/..."), so a naive substring-removal
+// using the parsed narration would silently fail to match the raw text at
+// all and leave the false positive in place.
+static TXN_REF_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)\b(?:UPI|NEFT|IMPS|RTGS|ECS|NACH|ACH|POS)[A-Z]{0,3}[:\-]?/?[A-Za-z0-9@/.\-]{6,100}",
+    )
+    .unwrap()
+});
+
+// Blanks out every transaction-reference-shaped span in `text` before it's
+// handed to a whole-document phrase scan (P5) — see that call site's doc
+// comment for why. A genuine header/branding phrase is never itself
+// preceded by one of these payment-rail prefixes, so this can only ever
+// remove narration content, never a real match.
+fn strip_transaction_references(text: &str) -> String {
+    TXN_REF_RE.replace_all(text, " ").into_owned()
+}
+
 fn detect_by_phrase(norm_text: &str) -> Option<DetectHit> {
     let mut best_bank = None;
     let mut best_conf = 0.0f64;
@@ -1041,9 +1069,22 @@ pub fn detect(opts: DetectOptions<'_>) -> BankDetectionResult {
         update!(detect_by_fuzzy(header_text));
     }
 
-    // P5: phrase match in full text, confidence capped at 0.80
+    // P5: phrase match in full text, confidence capped at 0.80 — scanned
+    // with every known transaction narration stripped out first (see
+    // `strip_narrations`'s doc comment). A counterparty's bank code sitting
+    // inside a UPI/NEFT/IMPS reference ("UPIAR/.../DR/NAME/SCBL/handle") is
+    // otherwise indistinguishable, to a plain phrase scan, from the
+    // statement's own real letterhead — and at this tier's 0.80 cap it
+    // would outrank filename detection (P6, capped 0.65) and even the
+    // narration-aware IFSC-frequency tier built for exactly this evidence
+    // class (P7, capped 0.55). Narration-derived evidence must never be
+    // stronger than either of those, per this tier's whole reason for
+    // existing below P3/P4: real header/branding text — genuinely
+    // independent of any single transaction — still matches here (it isn't
+    // narration content, so stripping narrations leaves it untouched).
     if result.as_ref().is_none_or(|r| r.confidence < 0.82) {
-        if let Some(h) = detect_by_phrase(&norm(text)) {
+        let sans_refs = strip_transaction_references(text);
+        if let Some(h) = detect_by_phrase(&norm(&sans_refs)) {
             let adj = h.confidence.min(0.80);
             if result.as_ref().is_none_or(|r| adj > r.confidence) {
                 result = Some(DetectHit {
@@ -1380,6 +1421,46 @@ mod tests {
             ..DetectOptions::default()
         });
         assert_eq!(result.bank_name, "State Bank of India");
+    }
+
+    #[test]
+    fn detect_union_bank_not_saraswat_via_narration_counterparty_code() {
+        // Real bug (2026-08-30): a Union Bank of India statement with no
+        // textual header at all (its own true first page is missing from
+        // the fixture, same class of gap as the SBI case above) has an
+        // ordinary UPI narration whose *counterparty's* bank is Saraswat
+        // Co-op Bank — "UPIAB/410969711856/CR/MRRAJES/SCBL/9773690640-2@y",
+        // nothing to do with whose statement this is. Unlike the SBI case,
+        // "SCBL" already sits inside clean `/.../` delimiters — word-
+        // boundary checking alone does not reject it — so P5 (phrase
+        // anywhere in the full document text) reported Saraswat Co-op Bank
+        // at 0.80 confidence, high enough to suppress the correct filename-
+        // based "Union Bank of India" detection (P6, needs confidence
+        // < 0.70 to even attempt). Stripping every UPI/NEFT/IMPS/RTGS/ECS/
+        // NACH/ACH/POS transaction-reference-shaped span out of the text
+        // before P5 scans it removes this narration entirely, so filename
+        // detection gets its turn.
+        let result = detect(DetectOptions {
+            text: "UPIAB/410969711856/CR/MRRAJES/SCBL/9773690640-2@y",
+            filename: "Union Bank.pdf",
+            ..DetectOptions::default()
+        });
+        assert_eq!(result.bank_name, "Union Bank of India");
+    }
+
+    #[test]
+    fn detect_saraswat_bank_by_phrase_still_works() {
+        // Regression guard for the fix above: a *real* Saraswat Co-op Bank
+        // statement's own header phrase must still win — stripping
+        // transaction-reference-shaped spans out of the text must never
+        // remove genuine header/branding prose, which is never itself
+        // preceded by a payment-rail prefix.
+        let result = detect(DetectOptions {
+            header_text: "Saraswat Co-operative Bank Statement",
+            text: "Saraswat Co-operative Bank Statement",
+            ..DetectOptions::default()
+        });
+        assert_eq!(result.bank_name, "Saraswat Co-op Bank");
     }
 
     #[test]

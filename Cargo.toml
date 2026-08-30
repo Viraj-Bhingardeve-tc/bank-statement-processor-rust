@@ -94,6 +94,16 @@ lopdf = "=0.35.0"
 # ── Parallel processing (batch — Phase 9+) ───────────────────────────────────
 rayon = "1"
 
+# ── PNG bounding-box crop for OCR pre-processing ─────────────────────────────
+# PNG decode/encode only (no jpeg/gif/bmp/tiff/webp codecs) — see
+# `ocr_extractor::crop_trailing_blank_space`'s doc comment for why this is
+# needed: Tesseract's automatic page-layout analysis silently loses an
+# entire wide text region on a rendered page whose content is a small block
+# followed by a large blank area (a short final page, most commonly),
+# treating that whole region as blank — confirmed against a real fixture
+# whose true last page has only 6 transaction rows.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # ── OS credential store + key generation (secrets/encryption at rest) ───────
 keyring = "4.1.2"
 rand    = "0.10.1"

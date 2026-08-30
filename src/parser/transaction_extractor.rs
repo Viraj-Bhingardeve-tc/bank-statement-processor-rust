@@ -2902,6 +2902,692 @@ pub fn extract_sbi_transactions(rows: &[Vec<PdfItem>], file_name: &str) -> Optio
     })
 }
 
+/// Recovers a single OCR-misread digit inside an already-extracted Debit or
+/// Credit amount by cross-checking it against the amount *implied* by two
+/// independently-printed Balance-column readings (this row's own Balance and
+/// the previous row's) — confirmed against a real fixture (Union Bank.pdf,
+/// 2026-08-30): Tesseract read a printed "2,560.00" Debit as "2,060.00" — a
+/// genuine single-glyph misrecognition ("5" -> "0"), not a parsing bug — while
+/// reading that same row's own Balance column correctly. Debit/Credit and
+/// Balance are physically separate printed fields on the page; OCR misreading
+/// one is not evidence the other is wrong too, so when they disagree the
+/// right question is "which field is actually broken here", not "trust
+/// Balance and silently overwrite it" (the fallback this replaces) — that
+/// fallback fixes the symptom on this one row but propagates the *wrong*
+/// amount into every following row's running balance, permanently offsetting
+/// all of them by the misread digit's value.
+///
+/// This deliberately corrects only a like-for-like digit substitution, never
+/// invents a transaction from nothing (see the separate balance-movement
+/// recovery above, for a row with no amount in either column at all) and
+/// never reclassifies which side an amount belongs to. It fires only when
+/// the OCR'd amount and the balance-implied amount round to the same number
+/// of decimal digits (same magnitude — ruling out a dropped/duplicated
+/// digit, which is a different failure mode) and differ in exactly one digit
+/// position.
+///
+/// A single differing digit is *necessary* but, on its own, was found not to
+/// be sufficient: verified directly against this fixture, a large "bulk
+/// transfer" credit whose Balance column was itself the field OCR misread
+/// (its own leading digit, "775363.26" printed but read as "175363.26")
+/// still passed the single-digit-position test against the *amount* — the
+/// two numbers agreeing in 8 of 9 characters is not, on its own, evidence
+/// about *which* of the two fields is the broken one, only that *some*
+/// single-glyph substitution connects them. Trusting it there corrupted a
+/// correct 749,657.00 credit down to 149,657.00 and then cascaded a
+/// ₹600,000 offset through every following row's running balance for the
+/// rest of the statement — a strictly worse outcome than the plain
+/// balance-chain fallback it was meant to improve on, which handled that
+/// same row correctly by leaving the amount alone and re-anchoring Balance
+/// instead.
+///
+/// The distinguishing signal that separates the genuine case (a real
+/// "2,560.00" Debit misread as "2,060.00", digit in the *hundreds* place)
+/// from that false positive (misread in the *hundred-thousands* place) is
+/// the misread digit's own place value: real bank statement amounts in this
+/// codebase's fixtures are dominated by everyday transaction sizes, where a
+/// single stray Tesseract glyph substitution plausibly swings the total by
+/// tens or hundreds of rupees; a discrepancy reaching into the thousands (or
+/// far beyond, as the false-positive case did) is far likelier to mean a
+/// different field misread, a missing/duplicate row, or a genuinely
+/// different amount — exactly the cases the balance-chain fallback already
+/// exists to handle. Capping the eligible swing at under ₹1,000 keeps this
+/// squarely inside "a single low-order digit", while still safely rejecting
+/// a single-digit substitution that happens to land in a higher place
+/// value. No specific amount, digit, or transaction is referenced anywhere
+/// in this logic — it generalizes to any single low-order-digit OCR misread
+/// in any amount, on this or any future statement using this recovery.
+fn recover_single_digit_amount_misread(ocr_amount: f64, implied_amount: f64) -> Option<f64> {
+    if implied_amount <= 0.0 {
+        return None;
+    }
+    if (implied_amount - ocr_amount).abs() >= 1000.0 {
+        return None;
+    }
+    let a = format!("{:.2}", ocr_amount);
+    let b = format!("{:.2}", implied_amount);
+    if a == b || a.len() != b.len() {
+        return None;
+    }
+    let diff_positions = a.bytes().zip(b.bytes()).filter(|(x, y)| x != y).count();
+    (diff_positions == 1).then_some(implied_amount)
+}
+
+#[cfg(test)]
+mod recover_single_digit_amount_misread_tests {
+    use super::recover_single_digit_amount_misread;
+
+    #[test]
+    fn recovers_the_confirmed_real_case() {
+        // The actual bug report (2026-08-30): "2,560.00" printed, "2,060.00"
+        // OCR'd — a hundreds-place digit misread ("5" -> "0").
+        assert_eq!(
+            recover_single_digit_amount_misread(2060.00, 2560.00),
+            Some(2560.00)
+        );
+    }
+
+    #[test]
+    fn rejects_a_high_place_value_coincidental_single_digit_match() {
+        // Real fixture false-positive (2026-08-30): a leading (hundred-
+        // thousands place) digit "match" that was actually the *Balance*
+        // column misread, not this amount — see doc comment above.
+        assert_eq!(
+            recover_single_digit_amount_misread(749_657.00, 149_657.00),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_when_more_than_one_digit_differs() {
+        assert_eq!(recover_single_digit_amount_misread(1234.00, 5678.00), None);
+    }
+
+    #[test]
+    fn rejects_when_digit_counts_differ() {
+        assert_eq!(recover_single_digit_amount_misread(560.00, 2560.00), None);
+    }
+
+    #[test]
+    fn rejects_a_non_positive_implied_amount() {
+        assert_eq!(recover_single_digit_amount_misread(500.00, -500.00), None);
+        assert_eq!(recover_single_digit_amount_misread(500.00, 0.0), None);
+    }
+
+    #[test]
+    fn rejects_when_already_equal() {
+        assert_eq!(recover_single_digit_amount_misread(2560.00, 2560.00), None);
+    }
+}
+
+// ── extract_union_bank_transactions ─────────────────────────────────────────
+//
+// Same squashed-single-line-table root cause as ICICI/IDBI/IDFC First/SBI
+// (every embedded-text item lands at `x=0.0` — confirmed via
+// `text_extractor::extract_pages` directly against this fixture), so Tier 0's
+// positional OCR (`ocr_extractor::extract_pages_via_ocr`) is required to
+// recover real per-word X positions.
+//
+// Two things make this statement distinctly harder than the others already
+// fixed:
+//
+// 1. **No header row exists anywhere in this fixture.** Every other
+//    dedicated extractor in this module reads its column X anchors straight
+//    off header text ("Debit"/"Credit"/"Balance" words in the first few
+//    rows). This fixture's true first page — the one page that would have
+//    carried those header words — is genuinely missing from the saved file
+//    (confirmed: its own first rendered page already says "Page No2" in its
+//    footer, and zero header keyword — "debit", "credit", "withdrawal",
+//    "deposit", "particulars" — appears anywhere across all 79 pages).
+//    IDFC First's fixture had a similar missing-first-page problem, but its
+//    *continuation* pages kept repeating the column header on every page;
+//    this one's don't repeat it at all. With no header text available to
+//    read anchors from, this extractor derives them from the data itself:
+//    every amount-shaped item's X position across the whole document is
+//    collected, and the three most populous, well-separated X values are
+//    taken as [Debit, Credit, Balance] in that left-to-right order — the
+//    same universal column order every bank statement in this codebase
+//    uses, and the order this file's own printed values actually cluster
+//    into (confirmed against the real rendered pages: a Debit-heavy cluster
+//    around x≈490-520 — most of this account's activity is outgoing UPI
+//    payments — a much smaller Credit cluster around x≈580-610, and a
+//    Balance cluster, present on every single row, around x≈660-740). This
+//    reads the real column each amount was printed in, exactly like every
+//    other extractor's header-anchored version; it just has to locate the
+//    columns from the printed data itself rather than from labels that
+//    don't exist anywhere in this file.
+//
+// 2. **The Ref No. column's value is sometimes glued directly onto the
+//    always-blank neighboring column's dash** ("S64527257_-" as one OCR
+//    token, instead of "S64527257" and "-" as two separate ones) — handled
+//    the same way IDBI's Cheque No. glue was: keep only the digits/letters
+//    that shape into a real reference and discard the rest.
+//
+// Not used as evidence for classification here (see the Debit/Credit-
+// resolution block below for why narration is never trusted over the real
+// column), but confirmed as an independent cross-check while building this
+// extractor: this statement's own UPI narrations carry an explicit "/DR/"
+// or "/CR/" marker as part of the reference text itself (e.g.
+// "UPIAR/409523420876/DR/FOODSPH/..." vs "UPIAB/507642064932/CR/
+// ASHOKKU/..."), and every one matches the column this extractor
+// independently assigns from X position alone.
+// The final `flush!()` call's write to `last_known_balance` is genuinely
+// unread (nothing follows it) — every earlier one, across however many
+// transactions the statement actually has, is read by the next one.
+#[allow(unused_assignments)]
+pub fn extract_union_bank_transactions(
+    rows: &[Vec<PdfItem>],
+    file_name: &str,
+) -> Option<ParseResult> {
+    // This statement's own core-banking narration convention — "UPIAR"/
+    // "UPIAB" glued with no separator (unlike the generic "UPI/DR/"/
+    // "UPI/CR/" shape every other bank in this codebase uses) — is the only
+    // reliable signature available to gate this extractor on, since no
+    // header text survives in this fixture to key off of (see doc comment
+    // above).
+    let upi_signature_count = rows
+        .iter()
+        .flat_map(|r| r.iter())
+        .filter(|it| {
+            let u = it.text.to_uppercase();
+            u.starts_with("UPIAR") || u.starts_with("UPIAB")
+        })
+        .count();
+    if upi_signature_count < 5 {
+        return None;
+    }
+
+    // Column anchors derived from the data itself — see doc comment. Two
+    // refinements over the obvious "round each X to the nearest point and
+    // tally" approach turned out to matter, both found by comparing this
+    // extractor's actual output against the real rendered pages rather than
+    // trusting the anchors on sight:
+    //
+    // 1. **A floor of x>300.** Without it, a bare digit-run wrapped onto its
+    //    own physical OCR row from inside a merchant code or UPI reference
+    //    (this fixture's "BHARATPE907720" split as "BHARATPE9" then
+    //    "07720") is just as "amount-shaped" as a real Debit/Credit/Balance
+    //    value, and such fragments cluster tightly enough around the
+    //    Narration column's own X (~x=102) to outrank the *real* Debit
+    //    column in raw frequency — confirmed against this fixture: the
+    //    unfiltered version picked x≈102 as an anchor outright, silently
+    //    relabeling the true Debit column as Credit and flipping every
+    //    single transaction's side. Date/Time (~x=39), Narration (~x=100-
+    //    190), the Ref No. code (~x=214), and its always-blank neighbor
+    //    (~x=280) all sit well left of 300; real amounts don't start until
+    //    ~x=480 on this statement. 300 is comfortably inside that gap on
+    //    either side, so this floor can only ever exclude narration-shaped
+    //    noise, never a genuine amount.
+    // 2. **30pt-wide bins, not exact-integer buckets.** A column's amounts
+    //    right-align, so a value's own left edge drifts left as its digit
+    //    count grows (a 6-digit balance starts several points left of a
+    //    5-digit one in the same column) — confirmed against this fixture:
+    //    the real Balance column alone splits across at least two distinct
+    //    per-integer peaks a few points apart. Binning first and tallying
+    //    per bin (representative X = the mean of every value that landed in
+    //    it) merges that natural spread back into one column instead of
+    //    letting it dilute the column's vote against noise elsewhere.
+    //
+    // With both in place the three most frequent, mutually-separated
+    // (>50pt apart) bins become the anchors, sorted ascending — Debit <
+    // Credit < Balance, matching every bank statement's own printed column
+    // order (confirmed against the real rendered pages: a Debit-heavy
+    // cluster at x≈507.6 — most of this account's activity is outgoing UPI
+    // payments — a smaller Credit cluster at x≈599.4, and the Balance
+    // cluster, present on every single row, at x≈679.5).
+    const ANCHOR_BIN_WIDTH: f64 = 30.0;
+    const ANCHOR_NARRATION_FLOOR: f64 = 300.0;
+    const ANCHOR_MIN_SEPARATION: f64 = 50.0;
+
+    let amount_xs: Vec<f64> = rows
+        .iter()
+        .flat_map(|r| r.iter())
+        .filter(|it| it.x > ANCHOR_NARRATION_FLOOR && is_amount_shaped(&it.text))
+        .map(|it| it.x)
+        .collect();
+    if amount_xs.len() < 10 {
+        return None;
+    }
+    let mut freq: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for x in &amount_xs {
+        *freq
+            .entry((x / ANCHOR_BIN_WIDTH).round() as i64)
+            .or_insert(0) += 1;
+    }
+    let mut by_freq: Vec<(i64, usize)> = freq.into_iter().collect();
+    by_freq.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut anchor_bins: Vec<i64> = Vec::new();
+    for (bin, _) in &by_freq {
+        if anchor_bins
+            .iter()
+            .all(|a: &i64| (*a - *bin).abs() as f64 * ANCHOR_BIN_WIDTH > ANCHOR_MIN_SEPARATION)
+        {
+            anchor_bins.push(*bin);
+            if anchor_bins.len() == 3 {
+                break;
+            }
+        }
+    }
+    if anchor_bins.len() < 3 {
+        return None;
+    }
+    let mut anchors: Vec<f64> = anchor_bins
+        .iter()
+        .map(|&bin| {
+            let members: Vec<f64> = amount_xs
+                .iter()
+                .cloned()
+                .filter(|x| (x / ANCHOR_BIN_WIDTH).round() as i64 == bin)
+                .collect();
+            members.iter().sum::<f64>() / members.len() as f64
+        })
+        .collect();
+    anchors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let (debit_x, credit_x, balance_x) = (anchors[0], anchors[1], anchors[2]);
+
+    // Narration's own true left edge sits around x≈100 — far enough right
+    // of Date/Time (x≈39-40) that a wide margin here is safe, and far
+    // enough left of the Ref No. column (x≈214) that it never bleeds into
+    // it.
+    let wall_x = 90.0;
+    // Ref No. column: the "S" + digits code sits in a narrow band between
+    // narration and the placeholder dash column.
+    let ref_min_x = 200.0;
+    let ref_max_x = 300.0;
+
+    // Account number: not present anywhere in this fixture's extractable
+    // text (same genuine absence as SBI, not redaction — its one source
+    // page is missing).
+    let account_no = String::new();
+
+    static DATE_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"^(\d{2})-(\d{2})-(\d{4})").unwrap());
+
+    // True for an item that belongs to the Ref No. column or its always-
+    // blank neighbor: a single-letter + digits reference code (sometimes
+    // with the neighbor's dash glued directly onto it, "S64527257_-") — the
+    // letter isn't fixed at "S": this statement's own Ref No. codes are
+    // confirmed to also use "W" later on ("W23169211" on its true final
+    // page), so any single letter qualifies rather than hardcoding the one
+    // this fixture happens to start with — a bare digit run (the rarer case
+    // where OCR drops the leading letter entirely, misreading it as "$" and
+    // leaving nothing alphabetic behind), or the dash placeholder alone.
+    let is_ref_or_placeholder = |text: &str| -> bool {
+        let cleaned: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        cleaned.is_empty()
+            || cleaned.chars().all(|c| c.is_ascii_digit())
+            || (cleaned.len() > 1
+                && cleaned.starts_with(|c: char| c.is_ascii_uppercase())
+                && cleaned[1..].chars().all(|c| c.is_ascii_digit()))
+    };
+
+    struct Block {
+        date_display: String,
+        date_ts: i64,
+        narration_parts: Vec<String>,
+        debit_frags: Vec<String>,
+        credit_frags: Vec<String>,
+        balance_frags: Vec<String>,
+        ref_parts: Vec<String>,
+    }
+
+    let mut txns: Vec<Transaction> = Vec::new();
+    let mut txn_counter = 0usize;
+    let mut cur: Option<Block> = None;
+    // Tracks the last successfully-read printed Balance across flushes, used
+    // only by the recovery step below — never for deciding which *column*
+    // an already-present amount belongs to (that would be the balance-
+    // movement inference this whole extractor is built to avoid; see the
+    // Debit/Credit-resolution block later in this function). This is a
+    // narrower, different situation: Tesseract can occasionally miss an
+    // amount's text entirely — confirmed against this fixture, a real
+    // credit of 600.00 has no trace anywhere in the OCR output for its row,
+    // while the same row's Date, Narration, Ref No., and Balance all read
+    // correctly — leaving both `debit_frags` and `credit_frags` completely
+    // empty. With no amount in either column to classify, there's no
+    // column-choice being made at all; the balance movement is the only
+    // signal left that a transaction happened here, and its sign correctly
+    // says which side it was ("balance rose, therefore Credit" is a fact
+    // about arithmetic, not a guess about layout). Left unrecovered, this
+    // silently drops the transaction and permanently offsets every
+    // following Balance by its amount — confirmed against this fixture:
+    // this exact transaction was the sole cause of a flat 600.00 Balance
+    // discrepancy persisting across roughly 700 later transactions, with
+    // every one of their own Debit/Credit values independently correct.
+    let mut last_known_balance: Option<f64> = None;
+
+    macro_rules! flush {
+        () => {
+            if let Some(b) = cur.take() {
+                let narration_joined: String = b
+                    .narration_parts
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let narration_joined = narration_joined
+                    .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .to_string();
+                fn clean_amount_frags(frags: &[String]) -> String {
+                    frags
+                        .concat()
+                        .chars()
+                        .filter(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
+                        .collect()
+                }
+                let mut debit = parse_amount_str(&clean_amount_frags(&b.debit_frags));
+                let mut credit = parse_amount_str(&clean_amount_frags(&b.credit_frags));
+                let balance = parse_amount_str(&clean_amount_frags(&b.balance_frags));
+                if debit.is_none() && credit.is_none() {
+                    if let (Some(prev), Some(bal)) = (last_known_balance, balance) {
+                        let delta = ((bal - prev) * 100.0).round() / 100.0;
+                        if delta > 0.01 {
+                            credit = Some(delta);
+                        } else if delta < -0.01 {
+                            debit = Some(-delta);
+                        }
+                    }
+                }
+                if let Some(bal) = balance {
+                    last_known_balance = Some(bal);
+                }
+                if debit.is_some() || credit.is_some() {
+                    txn_counter += 1;
+                    let ref_digits: String = b
+                        .ref_parts
+                        .iter()
+                        .flat_map(|s| s.chars())
+                        .filter(|c| c.is_ascii_digit())
+                        .collect();
+                    let reference = if !ref_digits.is_empty() {
+                        ref_digits
+                    } else {
+                        extract_ref_from_narration(&narration_joined).unwrap_or_default()
+                    };
+                    let mut t = Transaction::new(format!("t_union_{}", txn_counter));
+                    t.date = b.date_display;
+                    t.date_ts = b.date_ts;
+                    t.narration = narration_joined;
+                    t.reference = reference;
+                    t.debit = debit;
+                    t.credit = credit;
+                    t.balance = balance;
+                    t.bank_name = "Union Bank of India".to_string();
+                    t.account_no = account_no.clone();
+                    txns.push(t);
+                }
+            }
+        };
+    }
+
+    for row in rows.iter() {
+        if row.is_empty() {
+            continue;
+        }
+        // End-of-page footer disclaimer — never a transaction, but with no
+        // "computer generated statement"-style single distinctive phrase to
+        // key off of (this one is generic, wraps across several physical
+        // OCR rows, and — confirmed against this fixture's last page —
+        // otherwise glues straight onto whatever real transaction happens
+        // to precede it, corrupting its narration and reference).
+        let row_joined: String = row
+            .iter()
+            .map(|it| it.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let rl = row_joined.to_lowercase();
+        if rl.contains("page no")
+            || rl.contains("for any queries")
+            || rl.contains("system generated output")
+            || rl.contains("avail our loan")
+            || rl.contains("customer service help line")
+        {
+            continue;
+        }
+
+        let (ref_items, rest): (Vec<PdfItem>, Vec<PdfItem>) = row.iter().cloned().partition(|it| {
+            it.x >= ref_min_x && it.x < ref_max_x && is_ref_or_placeholder(&it.text)
+        });
+
+        // A new transaction block starts when the leftmost item (x < the
+        // Narration wall) is a "DD-MM-YYYY"-shaped date. A continuation row
+        // either has nothing there at all (pure narration wrap) or a
+        // "HH:MM:SS"-shaped time — Date and Time render as two stacked
+        // lines within the same visual cell, so OCR sees them as two
+        // physical rows; the time carries no information this extractor
+        // needs (day-level granularity is enough, matching every other
+        // extractor in this module) and is excluded from content purely by
+        // sitting left of `wall_x`, same as the date.
+        let leading = rest.iter().find(|it| it.x < wall_x);
+        let row_date = leading.and_then(|it| {
+            let caps = DATE_RE.captures(&it.text)?;
+            let candidate = format!("{}/{}/{}", &caps[1], &caps[2], &caps[3]);
+            let nd = normalize_transaction_date(&candidate);
+            nd.valid.then_some((nd.display, nd.ts))
+        });
+
+        let content: Vec<PdfItem> = rest.into_iter().filter(|it| it.x >= wall_x).collect();
+
+        // Same bare-digit-run rescue as IDBI/IDFC First/SBI: a narration's
+        // own merchant/store code or reference number can wrap onto its own
+        // physical OCR row with no decimal point (this fixture's
+        // "BHARATPE907720" split as "BHARATPE9" then "07720"; "IMPSAR/5091"
+        // then "134117", the tail of "IMPSAR/5091134117"), which otherwise
+        // passes the shape-only amount check and gets merged into a real
+        // Debit/Credit amount — confirmed against this fixture: without
+        // this, the very first transaction's real "30.00" Debit was
+        // corrupted into "7720.00", and, on a block-*start* row rather than
+        // a continuation, this statement's own final "100,000.00" IMPSAR
+        // Debit was corrupted into an unparseable "134117100,000.00" and
+        // silently dropped. Applying this to the block-start row's content
+        // needs no "dangling" guard the way a continuation row's does: a
+        // fresh block's amount columns start empty, so there's no genuine
+        // split-amount continuation this could ever wrongly interfere with.
+        //
+        // A trailing-dot variant of the same trap also needs catching here:
+        // a merchant terminal ID wrapped as "blinkit104" then "020." (the
+        // tail of "blinkit104020.", a genuine sentence-ending period, not a
+        // decimal point) is *not* a bare digit run — its trailing "." fails
+        // the plain all-digit check — but it *does* still pass the
+        // shape-only amount check (which allows dots), and it isn't a
+        // legitimate dangling-amount continuation either (that mechanism
+        // triggers only when the block's *own* last-recorded fragment
+        // already ends in ".", which this block's — a plain "553.00" —
+        // never does). Confirmed against this fixture: without also
+        // rescuing this, a real 553.00 Debit was corrupted into an
+        // unparseable "553.00020." and silently dropped.
+        let rescue_bare_digits =
+            |content: Vec<PdfItem>, narration_parts: &mut Vec<String>| -> Vec<PdfItem> {
+                let mut kept = Vec::new();
+                let mut rescued_narration = Vec::new();
+                for it in content {
+                    let t = it.text.trim();
+                    let digits_only = t.strip_suffix('.').unwrap_or(t);
+                    let bare_whole_number =
+                        !digits_only.is_empty() && digits_only.chars().all(|c| c.is_ascii_digit());
+                    if bare_whole_number {
+                        rescued_narration.push(t.to_string());
+                    } else {
+                        kept.push(it);
+                    }
+                }
+                if !rescued_narration.is_empty() {
+                    narration_parts.push(rescued_narration.join(" "));
+                }
+                kept
+            };
+
+        if let Some((date_display, date_ts)) = row_date {
+            flush!();
+            let mut b = Block {
+                date_display,
+                date_ts,
+                narration_parts: Vec::new(),
+                debit_frags: Vec::new(),
+                credit_frags: Vec::new(),
+                balance_frags: Vec::new(),
+                ref_parts: ref_items.iter().map(|it| it.text.clone()).collect(),
+            };
+            let filtered_content = rescue_bare_digits(content, &mut b.narration_parts);
+            classify_row(
+                &filtered_content,
+                wall_x,
+                [debit_x, credit_x, balance_x],
+                &mut b.narration_parts,
+                &mut b.debit_frags,
+                &mut b.credit_frags,
+                &mut b.balance_frags,
+            );
+            cur = Some(b);
+        } else if let Some(b) = cur.as_mut() {
+            b.ref_parts
+                .extend(ref_items.iter().map(|it| it.text.clone()));
+            // Only rescue when no amount column is actually "dangling" (a
+            // genuine split-amount continuation), same rationale as
+            // IDBI/IDFC First/SBI.
+            let any_dangling =
+                dangling(&b.debit_frags) || dangling(&b.credit_frags) || dangling(&b.balance_frags);
+            let filtered_content = if any_dangling {
+                content
+            } else {
+                rescue_bare_digits(content, &mut b.narration_parts)
+            };
+            classify_row(
+                &filtered_content,
+                wall_x,
+                [debit_x, credit_x, balance_x],
+                &mut b.narration_parts,
+                &mut b.debit_frags,
+                &mut b.credit_frags,
+                &mut b.balance_frags,
+            );
+        }
+    }
+    flush!();
+
+    // Anti-false-positive guard, same threshold every other dedicated
+    // extractor in this module uses.
+    if txns.len() < 2 {
+        log::debug!(
+            "[BSP Union] only {} transactions extracted from \"{}\" — treating as a non-match",
+            txns.len(),
+            file_name
+        );
+        return None;
+    }
+
+    // Already chronological (oldest first) — no reordering needed.
+    let op_balance = compute_prev_balances(&mut txns, None);
+
+    // Debit/Credit must never mix — this table has separate Debit/Credit
+    // columns (see doc comment above), so a real row only ever posts to
+    // one. This is purely a safety net for the rare row whose amount lands
+    // ambiguously between two anchors; balance-chain ground truth decides
+    // which side is real, same as every other extractor in this module —
+    // never narration content, and never blind row order.
+    for t in txns.iter_mut() {
+        if let (Some(dr), Some(cr)) = (t.debit, t.credit) {
+            let keep_credit = match (t.prev_balance, t.balance) {
+                (Some(pb), Some(bal)) => {
+                    let diff = ((bal - pb) * 100.0).round() / 100.0;
+                    let tol = |amt: f64| f64::max(1.0, amt * 0.02);
+                    let cr_fits = (diff - cr).abs() < tol(cr);
+                    let dr_fits = (diff + dr).abs() < tol(dr);
+                    if cr_fits && !dr_fits {
+                        true
+                    } else if dr_fits && !cr_fits {
+                        false
+                    } else {
+                        cr >= dr
+                    }
+                }
+                _ => cr >= dr,
+            };
+            if keep_credit {
+                t.debit = None;
+            } else {
+                t.credit = None;
+            }
+        }
+    }
+
+    // Balance-chain repair, same rationale as IDBI/IDFC First/SBI: a
+    // Balance that doesn't reconcile with the chain is corrected from it
+    // rather than trusted as printed — but only *after* first checking
+    // whether this row's own Debit/Credit amount is the thing actually
+    // broken (a single OCR-misread digit — see
+    // `recover_single_digit_amount_misread`'s doc comment for why blindly
+    // overwriting Balance instead would propagate the wrong amount forward
+    // into every following row).
+    let mut running_balance = op_balance;
+    for t in txns.iter_mut() {
+        if let Some(pb) = running_balance {
+            let expected =
+                ((pb + t.credit.unwrap_or(0.0) - t.debit.unwrap_or(0.0)) * 100.0).round() / 100.0;
+            if let Some(bal) = t.balance {
+                if (expected - bal).abs() > 0.01 {
+                    let implied_delta = ((bal - pb) * 100.0).round() / 100.0;
+                    let digit_fix = if let Some(cr) = t.credit {
+                        recover_single_digit_amount_misread(cr, implied_delta)
+                            .map(|fixed| (true, cr, fixed))
+                    } else if let Some(dr) = t.debit {
+                        recover_single_digit_amount_misread(dr, -implied_delta)
+                            .map(|fixed| (false, dr, fixed))
+                    } else {
+                        None
+                    };
+                    if let Some((is_credit, before, fixed)) = digit_fix {
+                        log::debug!(
+                            "[BSP Union] recovered single-digit OCR misread for {} \"{}\": {:.2} -> {:.2} ({} column; confirmed by balance chain)",
+                            t.date,
+                            safe_prefix(&t.narration, 40),
+                            before,
+                            fixed,
+                            if is_credit { "Credit" } else { "Debit" }
+                        );
+                        if is_credit {
+                            t.credit = Some(fixed);
+                        } else {
+                            t.debit = Some(fixed);
+                        }
+                        // Balance was correct all along — the amount was
+                        // the broken field — so leave `t.balance` as
+                        // printed and just re-anchor prev_balance.
+                        t.prev_balance = Some(pb);
+                    } else {
+                        log::debug!(
+                            "[BSP Union] balance chain mismatch for {} \"{}\": OCR'd {:.2}, chain says {:.2} — using chain value",
+                            t.date,
+                            safe_prefix(&t.narration, 40),
+                            bal,
+                            expected
+                        );
+                        t.balance = Some(expected);
+                        t.prev_balance = Some(pb);
+                    }
+                }
+            }
+        }
+        running_balance = t.balance;
+    }
+
+    prepend_opening_balance_row(&mut txns, op_balance, "Union Bank of India", &account_no);
+
+    Some(ParseResult {
+        transactions: txns,
+        opening_balance: op_balance,
+        closing_balance: None,
+        bank_name: "Union Bank of India".to_string(),
+        account_no,
+        source_name: file_name.to_string(),
+        col_map: Default::default(),
+        header_row_idx: 0,
+        noise_row_count: 0,
+        rejected_row_count: 0,
+    })
+}
+
 // ── extract_cosmos_transactions ───────────────────────────────────────────────
 
 /// Port of `Parser._parseCosmosFW(rows, fileName)`.

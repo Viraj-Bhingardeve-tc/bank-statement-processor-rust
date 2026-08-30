@@ -79,6 +79,17 @@ fn fixture(name: &str) -> PathBuf {
 /// `idfc_first_bank_pdf_debit_credit_is_never_mixed_via_ocr` below for the
 /// end-to-end lock-in against the real fixture via that path.
 ///
+/// "Union Bank.pdf" had the exact same fate, discovered even later
+/// (2026-08-30): the same `x=0.0` root cause, the same silent flat-text
+/// Debit/Credit guessing riding underneath this loop's loose assertions
+/// the whole time, and its own dedicated Tier-0-OCR extractor,
+/// `extract_union_bank_transactions` — see that function's doc comment for
+/// why this one needed a genuinely different anchoring strategy (no header
+/// row survives anywhere in this fixture to read Debit/Credit/Balance
+/// column positions from, unlike every other extractor in this module) and
+/// `union_bank_pdf_debit_credit_is_never_mixed_via_ocr` below for the
+/// end-to-end lock-in.
+///
 /// "Cosmos Co-operative.pdf" moved into this list after fixing the *actual*
 /// root cause of the bug `cosmos_pdf_exposes_a_missing_ocr_fallback_for_
 /// near_empty_text` used to document (that test name and its old rationale
@@ -1404,6 +1415,212 @@ fn sbi_bank_pdf_is_identified_correctly_and_debit_credit_is_never_mixed_via_ocr(
         (total_credit - 1_556_236.66).abs() < 0.10,
         "total credit {total_credit:.2} != expected 15,56,236.66"
     );
+}
+
+/// Union Bank.pdf (2026-08-30) shipped with two independent bugs, both
+/// fixed here, plus a third defect in the shared OCR pipeline itself that
+/// this fixture is what exposed.
+///
+/// **Bank detection**: the actual statement was detected as "Saraswat
+/// Co-op Bank". Root cause: `detect_by_phrase`'s P5 tier (phrase match
+/// anywhere in the full document text, capped 0.80) found "scbl" — a
+/// counterparty's bank code embedded in an ordinary UPI narration
+/// ("UPIAB/.../CR/MRRAJES/SCBL/9773690640-2@y", the *other party's* bank
+/// in a peer-to-peer transfer, nothing to do with whose statement this is)
+/// — and that confidence was high enough to suppress the correct
+/// filename-based "Union Bank of India" detection (P6, capped 0.65). This
+/// wasn't a word-boundary problem like the SBI "hdfcbankltd" bug fixed
+/// earlier — "SCBL" already sits inside clean `/.../` delimiters — it's
+/// that a counterparty's bank code embedded in *any* correctly-delimited
+/// UPI/NEFT/IMPS/RTGS/ECS/NACH/ACH/POS reference is still not evidence
+/// about the statement's own bank at all. Fixed in `bank_detection.rs` by
+/// stripping every such transaction-reference-shaped span out of the text
+/// before P5 ever scans it (`strip_transaction_references`) — a genuine
+/// header/branding phrase is never itself preceded by one of those
+/// payment-rail prefixes, so this can only ever remove narration noise,
+/// never a real match. See `detect_union_bank_not_saraswat_via_narration_
+/// counterparty_code` in `bank_detection.rs`'s own tests for the
+/// regression lock-in, and confirmation that Saraswat Co-op Bank's own
+/// real header phrase still detects correctly.
+///
+/// **Debit/Credit extraction**: the same squashed-single-line-table root
+/// cause as ICICI/IDBI/IDFC First/SBI, needing its own dedicated
+/// `extract_union_bank_transactions`. This fixture is uniquely hard among
+/// all of them: no header row survives anywhere in its 79 pages (the one
+/// page that would have carried "Debit"/"Credit"/"Balance" header text is
+/// missing, and — unlike IDFC First — continuation pages never repeat it),
+/// so column anchors have to be *derived from the printed amounts
+/// themselves* via frequency clustering rather than read from labels; see
+/// that function's doc comment for the two refinements that took (a
+/// narration-position floor and wide bins to survive right-alignment
+/// digit-width spread) and for the reference-column-prefix, bare-digit,
+/// and trailing-dot narration traps found and fixed along the way.
+///
+/// **Shared OCR pipeline**: building this extractor also exposed a defect
+/// in `ocr_extractor` itself, unrelated to any one bank — Tesseract's
+/// automatic page-layout analysis silently loses an entire wide text
+/// region on a page whose real content is a small block followed by a
+/// disproportionately large blank area (this fixture's own true final
+/// page, six transaction rows above a mostly-empty page), regardless of
+/// `--psm`/`--oem`/DPI. Fixed generally in `ocr_extractor::crop_trailing_
+/// blank_space`, applied to every rendered page for every bank — see that
+/// function's doc comment; it can only ever remove pixels already
+/// confirmed blank, so it's a no-op for any normally-populated page.
+///
+/// Verified transaction-by-transaction against the real rendered pages —
+/// not just internal self-consistency — across a wide sample spanning the
+/// full statement (pages 1, 6, 10, 11, 15, 20, 30, 55, 65, 71-79): the
+/// first transaction (a Debit that was coming out as a Credit before this
+/// fix), dozens of transactions from the early, middle, and final pages,
+/// every Debit and every Credit example checked, and one specific fully-
+/// OCR-missed transaction (a genuine "600.00" Credit with literally no
+/// trace of the amount anywhere in Tesseract's output, recovered via the
+/// balance-movement-recovery fallback in `extract_union_bank_transactions`
+/// — see that function's own doc comment for why this is not the
+/// balance-movement *column-choice* inference this whole extractor is
+/// otherwise built to avoid). All match exactly.
+///
+/// **Single-digit OCR misread in an amount, not just a Balance** (found and
+/// fixed 2026-08-30, after the three defects above): a real "2,560.00"
+/// Debit (12/03/2025, "Amazon I") was read by Tesseract as "2,060.00" — a
+/// genuine single-glyph misrecognition ("5" -> "0"), not a parsing bug —
+/// confirmed directly against the rendered page. Left as printed, this
+/// silently offset every following Balance, and the running total_debit,
+/// by exactly 500.00 for the rest of the statement, because the balance-
+/// chain repair below only knew how to overwrite a mismatching *Balance*
+/// from the chain, which just propagates a broken *amount* forward instead
+/// of fixing it at the source. Fixed generically via
+/// `recover_single_digit_amount_misread`: when a row's amount and Balance
+/// disagree with the chain, and the amount implied by the Balance movement
+/// differs from the OCR'd amount in exactly one low-order digit (under
+/// ₹1,000 — see that function's doc comment for why a same-shape match in a
+/// *high*-order digit turned out to need rejecting, found via a real false
+/// positive elsewhere in this same fixture: a large transfer whose Balance,
+/// not its amount, was what OCR had actually misread), the amount is
+/// corrected instead of the Balance. No amount, digit, or transaction is
+/// referenced by name anywhere in that logic. Debit/Credit total and every
+/// Balance now reconcile exactly against the statement's true printed
+/// values, including this row.
+#[test]
+#[ignore = "requires mutool + tesseract on PATH and takes ~5-6 minutes (79-page render+OCR) — run explicitly: cargo test --ignored union_bank"]
+fn union_bank_pdf_debit_credit_is_never_mixed_via_ocr() {
+    let tools_available = std::process::Command::new("mutool")
+        .arg("-v")
+        .output()
+        .is_ok()
+        && std::process::Command::new("tesseract")
+            .arg("--version")
+            .output()
+            .is_ok();
+    if !tools_available {
+        eprintln!(
+            "SKIPPED: mutool and/or tesseract not found on PATH — install both to run this test \
+             (see doc comment)"
+        );
+        return;
+    }
+
+    let path = fixture("Union Bank.pdf");
+    let rows = parser::ocr_extractor::extract_pages_via_ocr(&path);
+    assert!(
+        !rows.is_empty(),
+        "extract_pages_via_ocr returned zero rows — mutool/tesseract ran but produced nothing"
+    );
+
+    let result = pdf_parser::parse_pdf_rows(rows, "Union Bank.pdf")
+        .expect("parse_pdf_rows returned None for OCR'd Union Bank rows");
+
+    assert_eq!(
+        result.bank_name, "Union Bank of India",
+        "must never be Saraswat Co-op Bank — see doc comment for the counterparty-narration-code \
+         false positive this locks in"
+    );
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert_eq!(real.len(), 1447, "expected exactly 1447 real transactions");
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set (Debit/Credit must never mix): {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+        assert!(!t.date.is_empty(), "transaction with empty date: {t:?}");
+    }
+
+    // The FIRST transaction is the exact live bug report: a UPI debit that
+    // was coming out as a Credit before the column-based extractor replaced
+    // flat-text guessing.
+    let first = real.first().expect("at least one real transaction");
+    assert_eq!(first.date, "04/04/2024");
+    assert_eq!(first.debit, Some(30.0));
+    assert_eq!(first.credit, None);
+    assert_eq!(first.balance, Some(86_355.35));
+
+    // Last transaction: date, Debit amount, and Balance all reconcile
+    // exactly with the statement's own last printed row — including the
+    // single-digit-misread correction earlier in the statement flowing
+    // all the way through to the closing balance with zero residual gap.
+    let last = real.last().expect("at least one real transaction");
+    assert_eq!(last.date, "01/04/2025");
+    assert_eq!(last.debit, Some(1_027.00));
+    assert_eq!(last.credit, None);
+    assert_eq!(last.balance, Some(76_957.29));
+
+    let debit_count = real.iter().filter(|t| t.debit.is_some()).count();
+    let credit_count = real.iter().filter(|t| t.credit.is_some()).count();
+    let total_debit: f64 = real.iter().filter_map(|t| t.debit).sum();
+    let total_credit: f64 = real.iter().filter_map(|t| t.credit).sum();
+    assert_eq!(debit_count, 1182);
+    assert_eq!(credit_count, 265);
+    assert!(
+        (total_debit - 6_326_950.50).abs() < 0.10,
+        "total debit {total_debit:.2} != expected 63,26,950.50 (exact reconciliation with the \
+         statement's true printed total, including the recovered 2,560.00 Debit)"
+    );
+    assert!(
+        (total_credit - 6_317_522.44).abs() < 0.10,
+        "total credit {total_credit:.2} != expected 63,17,522.44"
+    );
+
+    // Opening balance (prepended as the synthetic is_opening_balance row)
+    // must reconcile exactly with the closing balance via the debit/credit
+    // totals above: opening + total_credit - total_debit == closing.
+    let opening = result
+        .transactions
+        .iter()
+        .find(|t| t.is_opening_balance)
+        .and_then(|t| t.balance)
+        .expect("opening balance row with a balance");
+    let closing = last.balance.expect("last transaction has a balance");
+    assert!(
+        (opening + total_credit - total_debit - closing).abs() < 0.10,
+        "opening ({opening:.2}) + credit ({total_credit:.2}) - debit ({total_debit:.2}) != \
+         closing ({closing:.2})"
+    );
+
+    // No duplicate transactions: same date + narration + debit + credit +
+    // balance appearing more than once would mean a row got double-counted
+    // somewhere in extraction.
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    for t in &real {
+        let key = (
+            t.date.as_str(),
+            t.narration.as_str(),
+            t.debit.map(|v| (v * 100.0).round() as i64),
+            t.credit.map(|v| (v * 100.0).round() as i64),
+            t.balance.map(|v| (v * 100.0).round() as i64),
+        );
+        assert!(seen.insert(key), "duplicate transaction detected: {t:?}");
+    }
 }
 
 /// The Excel fixture (HDFC.xls) must parse through the exact same
