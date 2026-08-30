@@ -995,7 +995,21 @@ component TxnTableRow inherits Rectangle {
         Rectangle { width: 75px; clip: true;
             HorizontalBox {
                 padding-left: 4px; padding-right: 4px;
-                padding-top: 0px; padding-bottom: 0px;
+                // Vertically centers this column's fixed-14px-tall badges
+                // within the row instead of leaving them top-anchored —
+                // same root cause and same fix as MFtr's own "UI fix,
+                // 2026-08-26, applied app-wide" padding-top/padding-bottom
+                // comment above: a HorizontalBox does not itself center a
+                // fixed-height child, it top-anchors it, so equal padding
+                // computed from (row height - child height) / 2 is what
+                // actually centers it. `root.height` (this row's own
+                // `compact ? 24px : 30px`) keeps this correct in both
+                // modes, unlike a hardcoded padding value (real bug,
+                // 2026-08-30 — this column and Tags/Action below were
+                // added 2026-08-27, after the MFtr fix landed, but never
+                // received it).
+                padding-top: (root.height - 14px) / 2;
+                padding-bottom: (root.height - 14px) / 2;
                 spacing: 2px; alignment: start;
                 // AUTO (row-color 1) vs MANUAL (row-color 6) is who classified
                 // the row — engine (rule/keyword/AI) vs a human (Save/Save &
@@ -1041,7 +1055,11 @@ component TxnTableRow inherits Rectangle {
         Rectangle { width: 80px; clip: true;
             HorizontalBox {
                 padding-left: 3px; padding-right: 3px;
-                padding-top: 0px; padding-bottom: 0px;
+                // Vertically centers this column's fixed-14px-tall badges —
+                // see the Status column's matching comment above for why
+                // (same root cause, same fix, real bug 2026-08-30).
+                padding-top: (root.height - 14px) / 2;
+                padding-bottom: (root.height - 14px) / 2;
                 spacing: 2px; alignment: start;
                 if root.data.has-gst : Rectangle {
                     height: 14px; min-width: 26px; background: #C8E6C9;
@@ -1073,7 +1091,13 @@ component TxnTableRow inherits Rectangle {
         // doesn't need it in the first place, so `clip: true` is back).
         Rectangle { width: 148px; clip: true;
             HorizontalBox {
-                padding: 0px; spacing: 4px; alignment: center;
+                padding-left: 0px; padding-right: 0px;
+                // Vertically centers this column's fixed-20px-tall
+                // View/Edit/Delete buttons — same root cause and fix as
+                // the Status/Tags columns above (real bug, 2026-08-30).
+                padding-top: (root.height - 20px) / 2;
+                padding-bottom: (root.height - 20px) / 2;
+                spacing: 4px; alignment: center;
                 RowTextActionBtn {
                     text: "View";
                     clicked => { root.view-clicked(root.row-idx); }
