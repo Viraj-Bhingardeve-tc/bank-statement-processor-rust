@@ -666,9 +666,38 @@ component RowTextActionBtn inherits Rectangle {
 component ROField inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "";
+    // Root cause of a real reported bug (2026-08-30): with no `min-width`
+    // set here, Slint derives this Rectangle's implicit minimum width from
+    // its children's natural content size — and the label Text below has
+    // no width cap, so its *unwrapped* text width becomes that minimum.
+    // Two ROFields side by side in a HorizontalBox both declare
+    // `horizontal-stretch: 1` at every call site (equal split intended),
+    // but stretch only distributes space *left over after* each child's
+    // own minimum is satisfied — so a longer label ("Current Vendor/
+    // Customer" vs "Ledger for Posting", "Account Number" vs "Bank Name")
+    // silently pushed its own field wider than its paired sibling,
+    // confirmed by pixel-measuring a real screenshot (e.g. 341px vs 295px
+    // for that pair, not the intended even split). `min-width: 0px`
+    // disables that implicit derivation so the caller's `horizontal-
+    // stretch: 1` is the *only* thing deciding width, matching how the
+    // editable LineEdit/ComboBox fields elsewhere in this modal already
+    // split evenly regardless of their own label length.
+    //
+    // FOLLOW-UP (still 2026-08-30): `min-width: 0px` alone measured no
+    // different — pixel-identical box widths before and after, confirmed
+    // by re-measuring a fresh screenshot off the rebuilt binary. Slint's
+    // layout baseline for a stretch cell is its *minimum* size, but a
+    // Rectangle's implicit `preferred-width` (derived separately from
+    // content, and read by the parent layout independently of an
+    // explicit `min-width`) was still winning. Pinning `preferred-width`
+    // to 0px as well removes that second, separate content-derived input
+    // entirely, leaving `horizontal-stretch` as the only thing left that
+    // can decide width.
+    min-width: 0px;
+    preferred-width: 0px;
     VerticalBox {
         padding: 0px; spacing: 3px;
-        Text { text: root.label; font-size: 11px; font-weight: 600; color: #0D47A1; }
+        Text { text: root.label; font-size: 11px; font-weight: 600; color: #0D47A1; overflow: elide; }
         Rectangle {
             height: 30px; background: #F5F5F5; border-radius: 4px;
             border-width: 1px; border-color: #E0E0E0;
@@ -3734,24 +3763,43 @@ export component MainScreen inherits Rectangle {
                         }
                     }
                     Rectangle { height: 1px; background: #EEEEEE; }
-                    Text { text: "Vendor / Payer / Payee"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    LineEdit {
-                        placeholder-text: "e.g. Airtel, Self, Bank"; height: 34px;
-                        text: root.etxn-vendor;
-                        edited(v) => { root.etxn-vendor = v; }
+                    // Editable-field sizing normalized to match the ROField rows above
+                    // (Bank Name / Account Number etc. — UI change, 2026-08-30): label
+                    // font-size 12px -> 11px, field height 34px -> 30px, and each
+                    // label+field pair wrapped in its own tight-spacing group (3px,
+                    // same as ROField's internal label-to-box gap) so the label hugs
+                    // its own field instead of sitting the same 10px away from both
+                    // its field and the previous group. Only sizing/spacing changed —
+                    // LineEdit/ComboBox stay editable (unlike ROField, deliberately —
+                    // see that component's own doc comment), same bindings/callbacks
+                    // as before.
+                    VerticalBox {
+                        padding: 0px; spacing: 3px;
+                        Text { text: "Vendor / Payer / Payee"; font-size: 11px; font-weight: 600; color: #0D47A1; }
+                        LineEdit {
+                            placeholder-text: "e.g. Airtel, Self, Bank"; height: 30px;
+                            text: root.etxn-vendor;
+                            edited(v) => { root.etxn-vendor = v; }
+                        }
                     }
-                    Text { text: "Account Head"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    LineEdit {
-                        placeholder-text: "e.g. Telephone Expense"; height: 34px;
-                        text: root.etxn-head;
-                        edited(v) => { root.etxn-head = v; }
+                    VerticalBox {
+                        padding: 0px; spacing: 3px;
+                        Text { text: "Account Head"; font-size: 11px; font-weight: 600; color: #0D47A1; }
+                        LineEdit {
+                            placeholder-text: "e.g. Telephone Expense"; height: 30px;
+                            text: root.etxn-head;
+                            edited(v) => { root.etxn-head = v; }
+                        }
                     }
-                    Text { text: "Type"; font-size: 12px; font-weight: 600; color: #0D47A1; }
-                    ComboBox {
-                        model: ["-- Select --", "Receipt", "Payment", "Contra"];
-                        current-index: root.etxn-type-idx;
-                        height: 34px;
-                        selected(v) => { root.etxn-type-idx = self.current-index; }
+                    VerticalBox {
+                        padding: 0px; spacing: 3px;
+                        Text { text: "Type"; font-size: 11px; font-weight: 600; color: #0D47A1; }
+                        ComboBox {
+                            model: ["-- Select --", "Receipt", "Payment", "Contra"];
+                            current-index: root.etxn-type-idx;
+                            height: 30px;
+                            selected(v) => { root.etxn-type-idx = self.current-index; }
+                        }
                     }
                 }
                 }
@@ -3777,10 +3825,12 @@ export component MainScreen inherits Rectangle {
                         text: "Mark as Suspense"; bg: #E65100; fg: white;
                         clicked => { root.mark-suspense(root.edit-txn-idx); root.modal-state = ""; }
                     }
-                    MBtn {
-                        text: "Delete"; bg: #C62828; fg: white;
-                        clicked => { root.request-delete-txn-confirm(root.edit-txn-idx); }
-                    }
+                    // Delete button removed from this modal (UI change, 2026-08-30) — the same
+                    // confirm flow (`request-delete-txn-confirm`) is still reachable from the
+                    // transaction table row's own delete icon (see its `delete-clicked` handler
+                    // above, whose own comment already noted it "reuses the exact same confirm
+                    // flow the old in-modal Delete button already used"), so no functionality is
+                    // lost, only this redundant in-modal copy.
                     MBtn { text: "Cancel"; bg: #F5F5F5; fg: #546E7A; enabled: true; clicked => { root.modal-state = ""; } }
                 }
             }
