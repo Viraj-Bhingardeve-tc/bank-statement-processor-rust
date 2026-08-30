@@ -58,6 +58,15 @@ static IFSC_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("PSIB", "Punjab and Sind Bank");
     m.insert("COSB", "Cosmos Co-operative Bank");
     m.insert("SRCB", "Saraswat Co-op Bank");
+    // Verified against real-world IFSC listings (Razorpay/ClearTax IFSC
+    // lookup, e.g. MCBL0960052, MCBL0960061) — consistent "MCBL" prefix
+    // across every branch. Not exercised by the real fixture this bank was
+    // added for (its own header/IFSC text is missing from the file — see
+    // the Mahanagar PHRASE_MAP entry's doc comment), but registering it
+    // here is what lets a *future* Mahanagar statement that does carry a
+    // real header/IFSC get detected at full confidence (P1, 0.98) instead
+    // of falling all the way to the filename tier.
+    m.insert("MCBL", "Mahanagar Co-operative Bank");
     m.insert("SCBL", "Standard Chartered Bank");
     m.insert("HSBC", "HSBC Bank");
     m.insert("CITI", "Citibank");
@@ -334,6 +343,50 @@ static PHRASE_MAP: &[PhraseEntry] = &[
         ],
     },
     PhraseEntry {
+        // Real fixture (2026-08-30, "Mahanager Co-operative bank.pdf"):
+        // every page of the actual file is pure transaction-table body —
+        // confirmed by rendering all 5 pages to images and reading them
+        // directly — with no header, no footer, no letterhead, and no PDF
+        // metadata (Title/Author/Subject are all absent; Producer is just
+        // "iText", a generic PDF-generation library) carrying the bank's
+        // own identity anywhere. The account's own IFSC/branch never
+        // appears in extractable text either, so P1/P2/P3/P4/P5 (header-
+        // and body-text tiers) all have nothing to find — filename (P6) is
+        // the only evidence source this file actually has, which is why
+        // this entry exists even though the phrase never appears in the
+        // statement body itself.
+        //
+        // The filename itself carries a common real-world misspelling —
+        // "Mahanager" (missing the second "a") instead of "Mahanagar" —
+        // so both spellings are listed; the misspelled variant is a
+        // legitimate lexical form of this bank's own name (the same kind
+        // of tolerance HDFC's "hdfcbk" or ICICI's "icicibank" entries
+        // already give their own bank), not a hardcoded one-off.
+        //
+        // Deliberately does NOT include "ubin" or any fragment of this
+        // account's own linked Union Bank account number/IFSC prefix,
+        // which repeats constantly through this statement's narration
+        // ("SAVINGS 410702010405405 UBIN") as the destination of the
+        // customer's own IMPS self-transfers — that is counterparty
+        // evidence about a *different* bank, not this statement's own
+        // identity, and must never be treated as a match for either bank.
+        bank: "Mahanagar Co-operative Bank",
+        weight: 1.0,
+        phrases: &[
+            "mahanagar co-operative bank",
+            "mahanagar co operative bank",
+            "mahanagar cooperative bank",
+            "mahanagar co-op",
+            "mahanagar co op",
+            "mahanagar bank",
+            "gs mahanagar",
+            "mahanager co-operative bank",
+            "mahanager co operative bank",
+            "mahanager cooperative bank",
+            "mahanager bank",
+        ],
+    },
+    PhraseEntry {
         bank: "Paytm Payments Bank",
         weight: 1.0,
         phrases: &["paytm payments bank", "paytmbank.com", "paytm bank"],
@@ -482,6 +535,16 @@ static OCR_ABBREVS: &[AbbrevEntry] = &[
     AbbrevEntry {
         abbrev: "CUB",
         bank: "City Union Bank",
+        max_dist: 1,
+    },
+    AbbrevEntry {
+        // Not exercised by the real fixture this bank was added for (its
+        // header text is missing entirely — see the Mahanagar PHRASE_MAP
+        // entry's doc comment) — this is for a future scanned/OCR'd
+        // Mahanagar statement whose header *does* survive, same as every
+        // other short-code entry in this table.
+        abbrev: "MCBL",
+        bank: "Mahanagar Co-operative Bank",
         max_dist: 1,
     },
 ];
@@ -1461,6 +1524,46 @@ mod tests {
             ..DetectOptions::default()
         });
         assert_eq!(result.bank_name, "Saraswat Co-op Bank");
+    }
+
+    #[test]
+    fn detect_mahanagar_co_operative_bank_via_filename_despite_common_typo() {
+        // Real fixture (2026-08-30, "Mahanager Co-operative bank.pdf"):
+        // every one of its 5 pages is pure transaction-table body (verified
+        // by rendering each page to an image) — no header, no footer, no
+        // PDF metadata carrying the bank's own identity anywhere, and no
+        // IFSC/branch for *this* account ever appears in extractable text.
+        // Filename is the only evidence source this file has at all, and
+        // the filename itself carries a common real-world misspelling
+        // ("Mahanager", not "Mahanagar") — this locks in that the filename
+        // tier (P6) still resolves it correctly despite that typo.
+        let result = detect(DetectOptions {
+            text: "",
+            filename: "Mahanager Co-operative bank.pdf",
+            ..DetectOptions::default()
+        });
+        assert_eq!(result.bank_name, "Mahanagar Co-operative Bank");
+    }
+
+    #[test]
+    fn detect_mahanagar_not_union_bank_via_self_transfer_narration_counterparty_code() {
+        // Same class of trap as `detect_union_bank_not_saraswat_via_
+        // narration_counterparty_code` above, found in the same real
+        // Mahanagar fixture: this account makes frequent IMPS transfers to
+        // the customer's *own* linked Union Bank of India savings account,
+        // so "SAVINGS 410702010405405 UBIN" (Union Bank's own IFSC prefix)
+        // repeats throughout the narration body — evidence about a
+        // *different* bank entirely, not this statement's own identity.
+        // Confirms the fix doesn't accidentally start matching "Mahanagar"
+        // off narration content either — filename remains the only signal
+        // that wins here, and the counterparty reference must not cause a
+        // false "Union Bank of India" detection.
+        let result = detect(DetectOptions {
+            text: "IMPS P2A 427402304589 SAVINGS 410702010405405 UBIN Rs 100000.00",
+            filename: "Mahanager Co-operative bank.pdf",
+            ..DetectOptions::default()
+        });
+        assert_eq!(result.bank_name, "Mahanagar Co-operative Bank");
     }
 
     #[test]

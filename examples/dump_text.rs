@@ -9,7 +9,7 @@ fn main() {
         .join(name);
     let ft = text_extractor::extract_full_text(&path);
     println!("=== full_text ({} chars) ===", ft.len());
-    for (i, line) in ft.lines().enumerate().take(80) {
+    for (i, line) in ft.lines().enumerate().take(400) {
         println!("[{:03}] {:?}", i, line);
     }
 }

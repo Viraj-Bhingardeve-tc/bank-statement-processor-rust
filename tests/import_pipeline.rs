@@ -162,18 +162,20 @@ fn parse_pdf_via_real_pipeline(path: &Path, name: &str) -> parser::ParseResult {
 /// (some of these real statements, e.g. "Bank of Maharashtra.pdf", only
 /// match Stage 2 in the real app too — that's expected, not a regression).
 ///
-/// Bank-name detection is checked too, except for
-/// "Mahanager Co-operative bank.pdf": its 65 transactions parse correctly,
-/// but its name doesn't match any pattern in the ~45-bank list ported from
-/// the old app — a smaller regional co-operative bank falling outside that
-/// fixed set. This is the already-audited "bank coverage capped, no
-/// mechanism to add new banks without a code change" limitation
-/// (`PROJECT_AUDIT_2026-07-06.md` §8), not a new finding, so it's excluded
-/// from this specific assertion rather than reported as a fourth new bug.
+/// Bank-name detection is checked for every fixture, including
+/// "Mahanager Co-operative bank.pdf" — previously excluded from this
+/// assertion because "Mahanagar Co-operative Bank" fell outside the
+/// ~45-bank pattern list ported from the old app (the already-audited
+/// "bank coverage capped, no mechanism to add new banks without a code
+/// change" limitation, `PROJECT_AUDIT_2026-07-06.md` §8). Fixed
+/// 2026-08-30 by registering the bank in `bank_detection.rs`'s
+/// IFSC/phrase/abbreviation maps — see
+/// `mahanagar_co_operative_bank_pdf_is_identified_correctly` below for the
+/// dedicated end-to-end lock-in (exact bank name, real transaction count,
+/// and the counterparty-narration-code trap this fixture's own data
+/// happens to contain).
 #[test]
 fn every_real_pdf_fixture_parses_into_usable_transactions_with_a_detected_bank() {
-    const BANK_NAME_NOT_IN_PATTERN_LIST: &[&str] = &["Mahanager Co-operative bank.pdf"];
-
     for name in PDF_FIXTURES {
         let path = fixture(name);
         assert!(path.exists(), "fixture missing: {}", path.display());
@@ -186,12 +188,10 @@ fn every_real_pdf_fixture_parses_into_usable_transactions_with_a_detected_bank()
             .filter(|t| !t.is_opening_balance)
             .count();
         assert!(real_txns > 0, "{name}: parsed zero real transactions");
-        if !BANK_NAME_NOT_IN_PATTERN_LIST.contains(name) {
-            assert!(
-                !result.bank_name.is_empty(),
-                "{name}: bank_name is empty — bank-detection did not run or matched nothing"
-            );
-        }
+        assert!(
+            !result.bank_name.is_empty(),
+            "{name}: bank_name is empty — bank-detection did not run or matched nothing"
+        );
 
         for t in result.transactions.iter().filter(|t| !t.is_opening_balance) {
             assert!(
@@ -203,6 +203,83 @@ fn every_real_pdf_fixture_parses_into_usable_transactions_with_a_detected_bank()
                 "{name}: transaction with neither debit nor credit: {t:?}"
             );
         }
+    }
+}
+
+/// "Mahanager Co-operative bank.pdf" bank-detection fix (2026-08-30), tested
+/// end-to-end against the real fixture via the same real two-stage pipeline
+/// `parse_pdf_via_real_pipeline` above exercises — not a synthetic
+/// reproduction. This fixture's own no-header-row body specifically parses
+/// via Stage 2 (`extract_full_text` -> `parse_ocr_text`, over the PDF's own
+/// embedded text layer — no Tesseract needed, text is already present);
+/// Stage 1's column-boundary detection has no header row anywhere in the
+/// file to anchor on and returns `None`, same as `Bank of Maharashtra.pdf`
+/// (see `every_real_pdf_fixture_parses_into_usable_transactions_with_a_
+/// detected_bank`'s doc comment) — expected, not a regression.
+///
+/// Root cause of the actual bank-detection bug: this statement's own
+/// identity (bank name, header, footer, letterhead, IFSC, branch, PDF
+/// metadata) is entirely absent from the file — confirmed by rendering all
+/// 5 pages to images and reading them directly, and by `mutool info`
+/// showing no Title/Author/Subject, just a generic `Producer: iText`.
+/// Every page is pure transaction-table body. "Mahanagar Co-operative
+/// Bank" also simply wasn't a registered bank anywhere in
+/// `bank_detection.rs`'s IFSC/phrase/abbreviation tables at all — not a
+/// false-positive misdetection, `bank_name` came back completely empty.
+/// Fixed by registering it (IFSC prefix "MCBL", verified against
+/// real-world IFSC listings; phrase entries for both the correct spelling
+/// and the "Mahanager" typo the actual filename carries; a matching
+/// OCR-abbreviation entry) so the filename tier (P6) — the only evidence
+/// source this file has — can resolve it. Transaction extraction itself
+/// was untouched (already correct via the existing Stage 2 path; out of
+/// scope per the fix's own requirements).
+///
+/// This fixture's own data happens to also exercise the exact "don't
+/// misdetect from a counterparty's bank code in narration" trap this
+/// engine has hit before (`detect_union_bank_not_saraswat_via_narration_
+/// counterparty_code` in `bank_detection.rs`): the account holder makes
+/// frequent IMPS transfers to their own linked Union Bank of India
+/// account, so "SAVINGS 410702010405405 UBIN" (Union Bank's own IFSC
+/// prefix) repeats throughout the real narration text — asserted below to
+/// confirm it doesn't win over the correct "Mahanagar Co-operative Bank"
+/// filename-based detection.
+#[test]
+fn mahanagar_co_operative_bank_pdf_is_identified_correctly() {
+    let path = fixture("Mahanager Co-operative bank.pdf");
+    let result = parse_pdf_via_real_pipeline(&path, "Mahanager Co-operative bank.pdf");
+
+    assert_eq!(
+        result.bank_name, "Mahanagar Co-operative Bank",
+        "must be detected via the filename tier, not left empty and not misdetected as \
+         \"Union Bank of India\" from the self-transfer narration's UBIN counterparty code"
+    );
+
+    let real: Vec<&parser::Transaction> = result
+        .transactions
+        .iter()
+        .filter(|t| !t.is_opening_balance)
+        .collect();
+    assert!(
+        !real.is_empty(),
+        "expected at least one real transaction, got zero"
+    );
+    assert!(
+        real.iter().any(|t| t.narration.contains("UBIN")),
+        "sanity check: this fixture's own real narration must still contain the Union Bank \
+         counterparty reference this test exists to prove doesn't win — if this assertion \
+         fails, the fixture's content changed and this test's premise needs re-checking"
+    );
+
+    for t in &real {
+        assert!(
+            !(t.debit.is_some() && t.credit.is_some()),
+            "transaction has BOTH debit and credit set: {t:?}"
+        );
+        assert!(
+            t.debit.is_some() || t.credit.is_some(),
+            "transaction has NEITHER debit nor credit set: {t:?}"
+        );
+        assert!(!t.date.is_empty(), "transaction with empty date: {t:?}");
     }
 }
 
