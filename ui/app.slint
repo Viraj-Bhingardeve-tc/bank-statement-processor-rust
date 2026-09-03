@@ -414,9 +414,30 @@ export component AppWindow inherits Window {
     // `event.text` for a Ctrl+letter combo is the literal letter here
     // (not a control byte) — verified via slint-viewer with a real
     // simulated Ctrl+R keypress before relying on it.
-    if root.logged-in : FocusScope {
+    if root.logged-in : main-focus-scope := FocusScope {
         width: root.width; height: root.height;
-        init => { self.focus(); }
+        // Deferred one event-loop tick via Timer rather than focused
+        // directly from `init` — same fix as login.slint's
+        // `autofocus-timer` (see that file's comment for the full
+        // mechanism): this FocusScope is itself lazily instantiated (the
+        // `if root.logged-in` above), created right when `logged-in` flips
+        // true — the same moment the sibling `if !root.logged-in :
+        // LoginScreen` branch is torn down. Focusing synchronously from
+        // `init` there raced that teardown and crashed AccessKit's tree
+        // update with "Focused ID #... is not in the node list" (observed
+        // 2026-09-01, right after a successful license activation flipped
+        // `logged-in`). Firing from a Timer callback runs in a fresh,
+        // unnested call stack once the current frame's tree mutation has
+        // settled, so the focus grab targets a node AccessKit already
+        // knows about.
+        focus-timer := Timer {
+            interval: 1ms;
+            running: true;
+            triggered => {
+                self.running = false;
+                main-focus-scope.focus();
+            }
+        }
         key-pressed(event) => {
             if (event.modifiers.control && (event.text == "r" || event.text == "R")) {
                 if (root.modal-state != "") {
